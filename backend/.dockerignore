@@ -1,0 +1,11 @@
+node_modules
+dist
+logs
+.env
+.env.*
+sureradar.json
+*editthiscookie*.json
+tests/chrome-profile-*
+**/*.log
+Dockerfile
+.dockerignore

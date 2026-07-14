@@ -1,0 +1,33 @@
+# === Dependências ===
+node_modules/
+**/node_modules/
+
+# === Build ===
+backend/dist/
+frontend/dist/
+
+# === Segredos e credenciais (NUNCA commitar) ===
+.env
+**/.env
+*.env
+!**/.env.example
+sureradar.json
+**/sureradar.json
+*editthiscookie*.json
+Planilha_Arbitragem_Automatica.xlsx
+.~lock.*
+
+# === Runtime / logs ===
+backend/logs/
+**/*.log
+sent_alerts.json
+
+# === Perfis do Playwright ===
+backend/tests/chrome-profile-*/
+
+# === Vídeos de mapeamento (pesados, não precisam no repo) ===
+docs/*.mp4
+
+# === SO / editor ===
+.DS_Store
+Thumbs.db

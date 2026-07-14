@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -aoiE \"\\(senha|password|apikey|api_key|token|cookie|authorization|sk-proj|eyJ|ENCRYPTION_KEY|service_role\\)[^ ]{0,40}\" scanner.log)"
+    ]
+  }
+}

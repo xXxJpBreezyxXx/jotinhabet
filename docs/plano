@@ -1,0 +1,68 @@
+# Plano de Integração de Inteligência Artificial (JotinhaBet AI) 🧠
+
+Este plano visa enriquecer o JotinhaBet com recursos inteligentes que vão além da matemática da surebet. A Inteligência Artificial (Gemini/OpenAI) atuará como um **auditor de risco em tempo real** e um **assistente analítico**, prevenindo prejuízos causados por regras conflitantes ou cotações inválidas.
+
+---
+
+## 🎯 Onde a IA nos ajudará (Casos de Uso)
+
+### 1. Auditoria de Conflito de Regras (Tennis/Sports Void Protection)
+As casas de apostas possuem regras diferentes para eventos suspensos ou abandonados. 
+* *Exemplo (Tênis)*: Se um jogador desiste por lesão no meio do segundo set, a *Bet365* considera a aposta como resolvida (vitória de quem avançou), enquanto a *Betano* anula a aposta. Se você fizer uma surebet cruzada entre as duas, você perde a cobertura e fica exposto.
+* *Solução da IA*: Analisar o esporte e as casas envolvidas na surebet para alertar o usuário se há incompatibilidade de regras nas políticas das duas plataformas.
+
+### 2. Detecção de Cotação Incorreta (Palpable Error Protection)
+Casas de apostas cometem erros digitação (ex: cadastrar odd de `18.5` em vez de `1.85`). Se você aposta na odd errada, a casa tem o direito legal de **anular (void)** a sua entrada, deixando você descoberto na outra casa.
+* *Solução da IA*: Estimar a probabilidade implícita da odd em relação à média do mercado mundial. Se a discrepância for absurda (ex: odd discrepante com probabilidade desequilibrada), a IA acende um alerta vermelho de "Risco de Anulação por Erro Crítico".
+
+### 3. Stake Tilting Inteligente (Viés de Aposta Otimizado)
+Ao invés de dividir o lucro igualmente (surebet clássica), a IA analisará o retrospecto recente e as estatísticas dos times/atletas para recomendar um viés.
+* *Exemplo*: Se o Time A tem 85% de chance real de vencer, a IA sugere ajustar as stakes da calculadora para que você ganhe todo o lucro na vitória do Time A, mas receba 100% do seu dinheiro de volta (breakeven) caso o Time B surpreenda.
+
+### 4. Copiloto de Trading (Chat na Aba "IA & Automação")
+Transformar a aba de IA em um chatbot conversacional focado em trading de arbitragem, onde você pode colar cotações avulsas, tirar dúvidas sobre gerenciamento de banca ou perguntar sobre cenários esportivos específicos.
+
+---
+
+## ⚙️ Arquitetura de Fluxo Asíncrono (Performance Blazing Fast)
+Para que a varredura continue extremamente rápida e o Playwright não fique travado esperando chamadas da API do Gemini, implementaremos um **fluxo assíncrono de enriquecimento**:
+1. O scanner captura a surebet do SureRadar e a salva no banco de dados imediatamente.
+2. A surebet aparece no seu painel em milissegundos.
+3. Em segundo plano, o servidor envia os dados da aposta para a IA enriquecer o campo `analise_ia`.
+4. Assim que o processamento da IA termina, a cor do badge no card é atualizada de cinza para "Análise Disponível" na UI do usuário via pooling.
+
+---
+
+## 📂 Alterações Propostas
+
+### Backend
+
+#### [MODIFY] [index.ts](file:///c:/Users/João%20Silva/jotinhabet/backend/src/index.ts)
+- Criar a rota `POST /api/opportunities/:id/enrich` para disparar a chamada de IA em segundo plano e atualizar a linha no Supabase.
+- Criar a rota `POST /api/ai/chat` para dar suporte ao chat conversacional.
+
+#### [MODIFY] [scanner_v2.ts](file:///c:/Users/João%20Silva/jotinhabet/backend/src/core/scanner_v2.ts)
+- Adicionar o gancho que enfileira a aposta salva para enriquecimento da IA logo após a inserção.
+
+---
+
+### Frontend
+
+#### [MODIFY] [App.tsx](file:///c:/Users/João%20Silva/jotinhabet/frontend/src/App.tsx)
+- **Painel de Detalhes da Surebet (Modal)**: Exibir o parecer de risco da IA com badges coloridas (Verde para Regras Iguais, Amarelo para Atenção, Vermelho para Risco Crítico de Anulação).
+- **Calculadora**: Adicionar um botão "Stakes Otimizadas por IA" que ajusta automaticamente o viés da calculadora (Stake Tilting) baseado nas probabilidades calculadas.
+- **Aba "IA & Automação"**: Reformular a aba de teste estático atual em um chat conversacional interativo com visual moderno de bolhas de mensagens e sugestões rápidas de prompt.
+
+---
+
+## 🧪 Plano de Verificação
+
+### Testes Automatizados
+- Executar testes de integração chamando a API do Gemini simulando surebets de Tênis e conferindo se ela detecta conflito de regras.
+  ```bash
+  npx.cmd ts-node tests/test_ai_enrichment.ts
+  ```
+
+### Verificação Manual
+- Entrar no chat da aba de IA, enviar uma mensagem e conferir a resposta contextualizada.
+- Abrir o modal de cálculo de uma surebet ativando o Modo Simulação e verificar o parecer e os novos cálculos de stake otimizada.
