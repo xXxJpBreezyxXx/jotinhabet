@@ -42,14 +42,9 @@ services:
       - "traefik.http.routers.jotinhabet-api.tls=true"
       - "traefik.http.routers.jotinhabet-api.tls.certresolver=letsencrypt"
       - "traefik.http.routers.jotinhabet-api.priority=100"
-      - "traefik.http.routers.jotinhabet-api.middlewares=jotinhabet-auth"
       - "traefik.http.services.jotinhabet-api.loadbalancer.server.port=4000"
-      # --- Autenticação de borda (protege TODO o app + as rotas de IA/billing) ---
-      # Gere o hash:  htpasswd -nbB seu_usuario 'sua_senha'   (ou: openssl passwd -apr1 'sua_senha')
-      # Cole aqui e DUPLIQUE cada "$" -> "$$" (senão o compose interpola).
-      # Com essa auth ligada, deixe API_TOKEN vazio/placeholder no .env (a borda já é o portão).
-      # (Se você já usa Authelia/Authentik no Traefik, troque por aquele middleware.)
-      - "traefik.http.middlewares.jotinhabet-auth.basicauth.users=CHANGE_ME:$$apr1$$TROQUE$$ESTE$$HASH"
+      # ⚠️ Autenticação de borda (basicAuth) REMOVIDA por enquanto — app PÚBLICO durante os testes.
+      # Para religar: recrie o middleware e adicione "...middlewares=jotinhabet-auth" nos dois routers.
 
   jotinhabet-frontend:
     build:
@@ -70,7 +65,6 @@ services:
       - "traefik.http.routers.jotinhabet-web.tls=true"
       - "traefik.http.routers.jotinhabet-web.tls.certresolver=letsencrypt"
       - "traefik.http.routers.jotinhabet-web.priority=1"
-      - "traefik.http.routers.jotinhabet-web.middlewares=jotinhabet-auth"
       - "traefik.http.services.jotinhabet-web.loadbalancer.server.port=80"
 
 volumes:
