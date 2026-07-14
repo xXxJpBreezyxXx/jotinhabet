@@ -3,19 +3,22 @@
 FROM mcr.microsoft.com/playwright:v1.61.1-jammy
 
 ENV TZ=America/Sao_Paulo \
-    NODE_ENV=production \
     PORT=4000
 
 WORKDIR /app
 
-# 1) Dependências (camada cacheável)
+# 1) Dependências — INCLUI devDependencies (typescript p/ o "tsc").
+#    NODE_ENV=production só entra DEPOIS do build; se entrasse antes, o npm omitiria
+#    as devDeps e o "tsc" sumiria (erro: sh: tsc: not found).
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 # 2) Código + build do TypeScript
 COPY . .
 RUN npm run build
 
+# 3) Runtime
+ENV NODE_ENV=production
 EXPOSE 4000
 
 # Healthcheck simples via Node (a imagem não garante curl/wget)
