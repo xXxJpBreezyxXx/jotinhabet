@@ -1,26 +1,25 @@
-# JotinhaBet — stack de produção (Traefik + Portainer)
+# JotinhaBet — stack para DOCKER SWARM (Traefik em swarm mode + Portainer)
 #
-# Roteamento no MESMO domínio (jotinhabet.eurekmind.com):
-#   - /api/*  -> backend (Express :4000)      [prioridade alta]
-#   - /*      -> frontend (nginx :80, SPA)     [prioridade baixa]
-# Assim as chamadas relativas "/api/..." do front funcionam sem CORS (mesma origem).
+# IMPORTANTE (Swarm):
+#  - `docker stack deploy` IGNORA `build:` → é preciso BUILDAR as imagens ANTES.
+#  - Traefik em swarm mode lê os labels de `deploy.labels` (NÃO dos labels do container).
+#  - Rede RedeEurek é overlay externa (a mesma das outras stacks).
 #
-# Rede: RedeEurek (mesma de todas as stacks da VPS — Traefik e Supabase inclusos).
+# DEPLOY (single-node swarm), a partir da raiz do projeto:
+#   docker compose build                                     # builda as imagens (usa build: + image:)
+#   docker stack deploy -c docker-compose.yml jotinhabet     # sobe como serviços do swarm
 #
-# >>> AJUSTE ANTES DE SUBIR <<<
-#   1. `entrypoints=websecure`   -> nome do seu entrypoint HTTPS no Traefik
-#   2. `certresolver=letsencrypt` -> nome do seu certResolver no Traefik
-#   3. basicAuth: gere o hash e cole na label `...basicauth.users` (duplicando $ -> $$)
-#   4. Coloque `backend/.env` na VPS (NÃO versione) e `backend/sureradar.json` (cookies).
+# >>> AJUSTE ANTES <<< entrypoint HTTPS / certresolver do seu Traefik; e coloque
+#     backend/.env e backend/sureradar.json na VPS.
+
+version: "3.8"
 
 services:
-  jotinhabet-backend:
+  backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     image: jotinhabet-backend:latest
-    container_name: jotinhabet-backend
-    restart: unless-stopped
     env_file:
       - ./backend/.env
     environment:
@@ -30,42 +29,44 @@ services:
       - FRONTEND_ORIGIN=https://jotinhabet.eurekmind.com
       - SURERADAR_COOKIES_PATH=/app/sureradar.json
     volumes:
-      - ./backend/sureradar.json:/app/sureradar.json:ro   # cookies do SureRadar (coloque na VPS)
-      - jotinhabet_logs:/app/logs                          # persiste scanner.log / sent_alerts.json
+      - ./backend/sureradar.json:/app/sureradar.json:ro   # cookies do SureRadar (na VPS)
+      - jotinhabet_logs:/app/logs
     networks:
       - RedeEurek
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=RedeEurek"
-      - "traefik.http.routers.jotinhabet-api.rule=Host(`jotinhabet.eurekmind.com`) && PathPrefix(`/api`)"
-      - "traefik.http.routers.jotinhabet-api.entrypoints=websecure"
-      - "traefik.http.routers.jotinhabet-api.tls=true"
-      - "traefik.http.routers.jotinhabet-api.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.jotinhabet-api.priority=100"
-      - "traefik.http.services.jotinhabet-api.loadbalancer.server.port=4000"
-      # ⚠️ Autenticação de borda (basicAuth) REMOVIDA por enquanto — app PÚBLICO durante os testes.
-      # Para religar: recrie o middleware e adicione "...middlewares=jotinhabet-auth" nos dois routers.
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=RedeEurek"
+        - "traefik.http.routers.jotinhabet-api.rule=Host(`jotinhabet.eurekmind.com`) && PathPrefix(`/api`)"
+        - "traefik.http.routers.jotinhabet-api.entrypoints=websecure"
+        - "traefik.http.routers.jotinhabet-api.tls=true"
+        - "traefik.http.routers.jotinhabet-api.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.jotinhabet-api.priority=100"
+        - "traefik.http.services.jotinhabet-api.loadbalancer.server.port=4000"
 
-  jotinhabet-frontend:
+  frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     image: jotinhabet-frontend:latest
-    container_name: jotinhabet-frontend
-    restart: unless-stopped
-    depends_on:
-      - jotinhabet-backend
     networks:
       - RedeEurek
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=RedeEurek"
-      - "traefik.http.routers.jotinhabet-web.rule=Host(`jotinhabet.eurekmind.com`)"
-      - "traefik.http.routers.jotinhabet-web.entrypoints=websecure"
-      - "traefik.http.routers.jotinhabet-web.tls=true"
-      - "traefik.http.routers.jotinhabet-web.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.jotinhabet-web.priority=1"
-      - "traefik.http.services.jotinhabet-web.loadbalancer.server.port=80"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=RedeEurek"
+        - "traefik.http.routers.jotinhabet-web.rule=Host(`jotinhabet.eurekmind.com`)"
+        - "traefik.http.routers.jotinhabet-web.entrypoints=websecure"
+        - "traefik.http.routers.jotinhabet-web.tls=true"
+        - "traefik.http.routers.jotinhabet-web.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.jotinhabet-web.priority=1"
+        - "traefik.http.services.jotinhabet-web.loadbalancer.server.port=80"
 
 volumes:
   jotinhabet_logs:
