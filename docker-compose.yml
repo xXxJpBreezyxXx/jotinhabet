@@ -12,8 +12,6 @@
 # >>> AJUSTE ANTES <<< entrypoint HTTPS / certresolver do seu Traefik; e coloque
 #     backend/.env e backend/sureradar.json na VPS.
 
-version: "3.8"
-
 services:
   backend:
     build:
