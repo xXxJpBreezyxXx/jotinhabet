@@ -149,6 +149,12 @@ function getHouseUrl(casaRaw: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent((casaRaw || '').replace(/\(BR\)/gi, '').trim() + ' apostas bet.br')}`;
 }
 
+/** Surebet "VIP": oculta no painel do SureRadar e capturada via API. O backend marca
+ *  essas oportunidades no texto da análise (ver backend/src/scraping/casa_sureradar.ts). */
+function isVipOpportunity(opp: { analise_ia?: string }): boolean {
+  return /surebet vip/i.test(opp.analise_ia || '');
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'calculadora' | 'juros-compostos' | 'ai-test'>('dashboard');
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
@@ -190,6 +196,7 @@ export default function App() {
   const [opportunities, setOpportunities] = useState<OpportunityItem[]>([]);
   const [selectedBookmakers, setSelectedBookmakers] = useState<string[]>([]);
   const [selectedSports, setSelectedSports] = useState<string[]>([]);
+  const [vipOnly, setVipOnly] = useState<boolean>(false);
 
   const mockOpportunities: OpportunityItem[] = [
     {
@@ -423,7 +430,10 @@ export default function App() {
       return d.evento === opp.evento && (d.mercado || 'Resultado Final') === (opp.mercado || 'Resultado Final');
     });
     if (alreadyEntered) return false;
- 
+
+    // Filtro "só VIP" (oportunidades ocultas no painel do SureRadar, capturadas via API)
+    if (vipOnly && !isVipOpportunity(opp)) return false;
+
     // Filter by event date
     if (filterDate) {
       const [year, month, day] = filterDate.split('-');
@@ -1268,6 +1278,7 @@ export default function App() {
                         transition: 'all 0.15s ease'
                       });
                       const emoji = (s: string) => (s === 'Futebol' ? '⚽' : s === 'Basquete' ? '🏀' : s === 'Tênis' ? '🎾' : s === 'Esports' ? '🎮' : '🏆');
+                      const vipCount = opportunitiesToShow.filter(isVipOpportunity).length;
                       return (
                         <>
                           <button style={chip(selectedSports.length === 0)} onClick={() => setSelectedSports([])}>Todos</button>
@@ -1283,6 +1294,23 @@ export default function App() {
                               </button>
                             );
                           })}
+                          {(vipCount > 0 || vipOnly) && (
+                            <>
+                              <span style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
+                              <button
+                                title="Mostrar apenas surebets VIP (ocultas no painel do SureRadar, capturadas via API)"
+                                onClick={() => setVipOnly((v) => !v)}
+                                style={{
+                                  ...chip(vipOnly),
+                                  ...(vipOnly
+                                    ? { background: 'rgba(234, 179, 8, 0.9)', border: '1px solid rgba(234, 179, 8, 0.9)', color: '#1a1a1a' }
+                                    : { background: 'rgba(234, 179, 8, 0.12)', border: '1px solid rgba(234, 179, 8, 0.45)', color: '#fbbf24' }),
+                                }}
+                              >
+                                👑 Só VIP{vipCount ? ` (${vipCount})` : ''}
+                              </button>
+                            </>
+                          )}
                         </>
                       );
                     })()}
@@ -1350,9 +1378,7 @@ export default function App() {
                         const riskBadge = getRiskBadge();
                         const iaAnalisando = analyzingIds.has(opp.id) || opp.ia_status === 'processando';
                         const iaAnalisado = !!(opp.ia_risco || opp.ia_veredito);
-                        // Surebet "VIP": oculta na interface do SureRadar, capturada via API.
-                        // O backend marca essas no texto da análise (ver casa_sureradar.ts).
-                        const isVip = /surebet vip/i.test(opp.analise_ia || '');
+                        const isVip = isVipOpportunity(opp);
                         const oddAge = oddAgeInfo(latestOddTs(opp));
                         const ageColor = oddAge?.level === 'stale'
                           ? { c: '#ef4444', bg: 'rgba(239,68,68,0.12)', b: 'rgba(239,68,68,0.3)' }
