@@ -352,7 +352,13 @@ export class ArbitrageScannerV2 {
 
     // Reconciliação: remove do banco as surebets do SureRadar que sumiram da lista atual
     // (odd corrigida/expirada) — evita acumular oportunidades inválidas entre scans.
-    await this.reconciliarSureRadar(srOps);
+    // SÓ com fonte 'api' (autoritativa): o fallback via browser não enxerga as VIP/locked,
+    // e reconciliar com essa lista parcial apagaria surebets válidas de alto ROI do banco.
+    if (sureradarScraper.ultimaFonte === 'api') {
+      await this.reconciliarSureRadar(srOps);
+    } else if (srOps.length > 0) {
+      console.log(`ℹ️ [Scanner V2] Reconciliação pulada (fonte: ${sureradarScraper.ultimaFonte} — lista parcial).`);
+    }
 
     console.log(`📊 [Scanner V2] Varredura finalizada. ${oportunidadesSalvas.length} surebets salvas no banco.`);
     return oportunidadesSalvas;

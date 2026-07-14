@@ -30,18 +30,22 @@ export interface RevalidacaoResultado {
  * produção (SureRadar); fontes de scraper próprio ficam como 'nao_suportado'.
  */
 export class RevalidationService {
-  private cache: { at: number; ops: ArbitrageOpportunity[] } | null = null;
+  private cache: { at: number; ops: ArbitrageOpportunity[]; fonte: string } | null = null;
   private inFlight: Promise<ArbitrageOpportunity[]> | null = null;
   private readonly CACHE_MS = 60_000;
+  /** Fonte do último resultado fresco ('api' | 'browser' | 'none') — ver SureRadarScraper.ultimaFonte. */
+  private ultimaFonteFresh: string = 'none';
 
   /**
    * Retorna a lista atual de surebets do SureRadar.
    * - Deduplica requisições em voo (uma única extração serve chamadas concorrentes).
-   * - NÃO cacheia resultados vazios (um [] costuma ser falha do scraper, não "sem surebets").
+   * - Cacheia [] apenas quando a fonte foi a API (autoritativa: "zero surebets agora" é
+   *   estado válido). [] vindo de falha/fallback não é cacheado, para retentar em seguida.
    */
   private async getSureRadarFresh(): Promise<ArbitrageOpportunity[]> {
     const now = Date.now();
-    if (this.cache && now - this.cache.at < this.CACHE_MS && this.cache.ops.length > 0) {
+    if (this.cache && now - this.cache.at < this.CACHE_MS && (this.cache.ops.length > 0 || this.cache.fonte === 'api')) {
+      this.ultimaFonteFresh = this.cache.fonte;
       return this.cache.ops;
     }
     if (this.inFlight) return this.inFlight;
@@ -50,7 +54,10 @@ export class RevalidationService {
     this.inFlight = scraper
       .extrairOportunidades()
       .then((ops) => {
-        if (ops && ops.length > 0) this.cache = { at: Date.now(), ops };
+        this.ultimaFonteFresh = scraper.ultimaFonte;
+        if (ops && (ops.length > 0 || scraper.ultimaFonte === 'api')) {
+          this.cache = { at: Date.now(), ops, fonte: scraper.ultimaFonte };
+        }
         return ops || [];
       })
       .finally(() => {
@@ -152,9 +159,11 @@ export class RevalidationService {
       return res;
     }
 
-    // Lista vazia => provável indisponibilidade da fonte (site fora, cookies expirados).
-    // NÃO tratar como 'expirada' (isso faria descartar surebets válidas por engano).
-    if (!fresh || fresh.length === 0) {
+    // Lista vazia com fonte NÃO-autoritativa => provável indisponibilidade (site fora,
+    // cookies expirados). NÃO tratar como 'expirada' (descartaria surebets válidas).
+    // Com fonte 'api', lista vazia é real ("zero surebets agora") e segue para o
+    // match abaixo, que corretamente resultará em 'expirada'.
+    if ((!fresh || fresh.length === 0) && this.ultimaFonteFresh !== 'api') {
       const res: RevalidacaoResultado = {
         ...base,
         status: 'erro',
@@ -177,6 +186,21 @@ export class RevalidationService {
     );
 
     if (!match) {
+      // Sem match com fonte NÃO-autoritativa (fallback browser não enxerga as VIP/locked):
+      // não dá para afirmar 'expirada' — a surebet pode estar viva e apenas oculta na lista parcial.
+      if (this.ultimaFonteFresh !== 'api') {
+        const res: RevalidacaoResultado = {
+          ...base,
+          status: 'erro',
+          movimento: {
+            tipo: 'desconhecido',
+            explicacao:
+              'Não foi possível confirmar esta surebet agora (a fonte respondeu por caminho degradado, com lista parcial). Tente novamente em instantes.',
+          },
+        };
+        await this.persist(id, res);
+        return res;
+      }
       const res: RevalidacaoResultado = {
         ...base,
         status: 'expirada',
