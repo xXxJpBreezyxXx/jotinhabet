@@ -1350,6 +1350,9 @@ export default function App() {
                         const riskBadge = getRiskBadge();
                         const iaAnalisando = analyzingIds.has(opp.id) || opp.ia_status === 'processando';
                         const iaAnalisado = !!(opp.ia_risco || opp.ia_veredito);
+                        // Surebet "VIP": oculta na interface do SureRadar, capturada via API.
+                        // O backend marca essas no texto da análise (ver casa_sureradar.ts).
+                        const isVip = /surebet vip/i.test(opp.analise_ia || '');
                         const oddAge = oddAgeInfo(latestOddTs(opp));
                         const ageColor = oddAge?.level === 'stale'
                           ? { c: '#ef4444', bg: 'rgba(239,68,68,0.12)', b: 'rgba(239,68,68,0.3)' }
@@ -1358,7 +1361,7 @@ export default function App() {
                           : { c: '#94a3b8', bg: 'rgba(148,163,184,0.12)', b: 'rgba(148,163,184,0.25)' };
 
                         return (
-                        <div key={opp.id} className="surebet-card" style={{ border: opp.roi_pct > 2.5 ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid #1e293b' }}>
+                        <div key={opp.id} className="surebet-card" style={{ border: isVip ? '1px solid rgba(234, 179, 8, 0.5)' : opp.roi_pct > 2.5 ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid #1e293b' }}>
                           <div className="surebet-header">
                             <span>{getSportBadge(opp.esporte)} • {new Date(opp.detectada_em).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1391,6 +1394,14 @@ export default function App() {
                                   🤖 Analisar IA
                                 </button>
                               ) : null}
+                              {isVip && (
+                                <span
+                                  title="Oportunidade VIP: oculta no painel do SureRadar e capturada via API. Sem link direto — busque o evento manualmente nas casas."
+                                  style={{ background: 'rgba(234, 179, 8, 0.18)', color: '#fbbf24', border: '1px solid rgba(234, 179, 8, 0.55)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+                                >
+                                  👑 VIP
+                                </span>
+                              )}
                               <span className="surebet-badge" style={{ background: opp.roi_pct > 2.5 ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.12)', color: opp.roi_pct > 2.5 ? '#34d399' : '#cbd5e1', border: opp.roi_pct > 2.5 ? '1px solid #10b981' : '1px solid rgba(148, 163, 184, 0.3)' }}>
                                 {opp.roi_pct > 2.5 ? '🔥 ALTO RETORNO' : 'SUREBET'}
                               </span>
