@@ -27,7 +27,7 @@ services:
       - FRONTEND_ORIGIN=https://jotinhabet.eurekmind.com
       - SURERADAR_COOKIES_PATH=/app/sureradar.json
     volumes:
-      - ./backend/sureradar.json:/app/sureradar.json:ro   # cookies do SureRadar (na VPS)
+      - ./sureradar.json:/app/sureradar.json:ro   # cookies do SureRadar (arquivo na raiz do projeto)
       - jotinhabet_logs:/app/logs
     networks:
       - RedeEurek
