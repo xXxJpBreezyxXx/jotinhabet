@@ -1,6 +1,7 @@
 import { ArbitrageEngine, ArbitrageOpportunity } from '../arbitrage/engine';
+import { OddsScraper } from '../scraping/scraper_base';
 import { BetanoScraper } from '../scraping/casa_a';
-import { KtoScraper } from '../scraping/casa_kto';
+import { KtoScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
@@ -120,7 +121,7 @@ function parseEventDateTime(eventoStr: string): Date | null {
 }
 
 export class ArbitrageScannerV2 {
-  private scrapers = [
+  private scrapers: OddsScraper[] = [
     new BetanoScraper(),
     new KtoScraper(),
     new SuperbetScraper(),

@@ -13,6 +13,15 @@ export interface ScrapedOdd {
   url?: string;          // Link direto para o evento na casa
 }
 
+/**
+ * Interface comum a todos os coletores de odds — tanto os DOM (ScraperBase) quanto
+ * os baseados em API (ex.: KambiScraper). Permite misturá-los no scanner_v2.
+ */
+export interface OddsScraper {
+  getNome(): string;
+  executarCrawler(esportes: string[], datas: string[], headless?: boolean): Promise<ScrapedOdd[]>;
+}
+
 export abstract class ScraperBase {
   protected casaNome: string;
   protected context?: BrowserContext;

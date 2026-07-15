@@ -1,5 +1,6 @@
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { areEventsSame, areTeamsSame } from './matcher';
+import { mesmaOferta } from './markets';
 
 export interface ArbitrageOpportunity {
   evento: string;
@@ -32,9 +33,11 @@ export class ArbitrageEngine {
     
     for (const odd1 of oddsCasa1) {
       // Procura o mesmo evento na casa 2
-      const eventosCorrespondentes = oddsCasa2.filter(odd2 => 
-        areEventsSame(odd1.evento, odd2.evento) && 
-        odd1.mercado === odd2.mercado
+      // Mesma oferta = mesmo evento + mercado normalizado + MESMA linha.
+      // A linha (over/under, handicap) entra na chave: Over 2.5 nunca cruza com Over 3.0.
+      const eventosCorrespondentes = oddsCasa2.filter(odd2 =>
+        areEventsSame(odd1.evento, odd2.evento) &&
+        mesmaOferta(odd1.mercado, odd1.linha, odd2.mercado, odd2.linha)
       );
       
       for (const odd2 of eventosCorrespondentes) {
@@ -62,19 +65,19 @@ export class ArbitrageEngine {
     return unicas.sort((a, b) => b.lucroGarantidoPerc - a.lucroGarantidoPerc);
   }
 
-  private async testarCruze(
-    odd1: ScrapedOdd, odd2: ScrapedOdd, 
-    nomeCasa1: string, nomeCasa2: string, 
+  private testarCruze(
+    odd1: ScrapedOdd, odd2: ScrapedOdd,
+    nomeCasa1: string, nomeCasa2: string,
     oportunidades: ArbitrageOpportunity[],
     direto: boolean
-  ) {
+  ): void {
     let probA1_B2 = 0;
     let probB1_A2 = 0;
 
     if (direto) {
       probA1_B2 = (1 / odd1.oddA) + (1 / odd2.oddB);
       if (probA1_B2 < 1.0) {
-        oportunidades.push(await this.criarOportunidade(
+        oportunidades.push(this.criarOportunidade(
           odd1.evento, odd1.mercado, 
           odd1.opcaoA, odd2.opcaoB, 
           odd1.oddA, odd2.oddB, 
@@ -85,7 +88,7 @@ export class ArbitrageEngine {
 
       probB1_A2 = (1 / odd1.oddB) + (1 / odd2.oddA);
       if (probB1_A2 < 1.0) {
-        oportunidades.push(await this.criarOportunidade(
+        oportunidades.push(this.criarOportunidade(
           odd1.evento, odd1.mercado, 
           odd1.opcaoB, odd2.opcaoA, 
           odd1.oddB, odd2.oddA, 
@@ -96,7 +99,7 @@ export class ArbitrageEngine {
     } else {
       const probA1_A2 = (1 / odd1.oddA) + (1 / odd2.oddA);
       if (probA1_A2 < 1.0) {
-        oportunidades.push(await this.criarOportunidade(
+        oportunidades.push(this.criarOportunidade(
           odd1.evento, odd1.mercado, 
           odd1.opcaoA, odd2.opcaoA, 
           odd1.oddA, odd2.oddA, 
@@ -107,7 +110,7 @@ export class ArbitrageEngine {
 
       const probB1_B2 = (1 / odd1.oddB) + (1 / odd2.oddB);
       if (probB1_B2 < 1.0) {
-        oportunidades.push(await this.criarOportunidade(
+        oportunidades.push(this.criarOportunidade(
           odd1.evento, odd1.mercado, 
           odd1.opcaoB, odd2.opcaoB, 
           odd1.oddB, odd2.oddB, 
@@ -118,14 +121,14 @@ export class ArbitrageEngine {
     }
   }
 
-  private async criarOportunidade(
-    evento: string, mercado: string, 
-    opcaoA: string, opcaoB: string, 
-    oddA: number, oddB: number, 
-    casaA: string, casaB: string, 
+  private criarOportunidade(
+    evento: string, mercado: string,
+    opcaoA: string, opcaoB: string,
+    oddA: number, oddB: number,
+    casaA: string, casaB: string,
     totalPerc: number,
     esporte?: string, url?: string
-  ): Promise<ArbitrageOpportunity> {
+  ): ArbitrageOpportunity {
     const lucro = (1.0 - totalPerc) * 100;
 
     const opp: ArbitrageOpportunity = {

@@ -1,8 +1,8 @@
 /**
  * Opções de navegador stealth compartilhadas.
  *
- * Extraído do padrão repetido em casa_blaze.ts / casa_1xbet.ts / casa_kto.ts /
- * casa_superbet.ts. Garante que o recon "pareça" o mesmo browser da produção
+ * Extraído do padrão repetido em casa_blaze.ts / casa_1xbet.ts / casa_superbet.ts.
+ * Garante que o recon "pareça" o mesmo browser da produção
  * (mesmo UA, locale pt-BR, geolocation BR e navigator.webdriver oculto).
  */
 import type { BrowserContext } from 'playwright';

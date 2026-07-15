@@ -102,7 +102,6 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'noruega': ['norway', 'norge'],
   'dinamarca': ['denmark', 'danmark'],
   'suecia': ['sweden', 'sverige'],
-  'Polonia': ['poland', 'polska'],
   'coreia do sul': ['south korea', 'korea republic', 'rep da coreia'],
   'estados unidos': ['usa', 'united states', 'estados unidos'],
   'mexico': ['mexico'],
@@ -139,9 +138,7 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'eslovaquia': ['slovakia'],
   'hungria': ['hungary'],
   'austria': ['austria'],
-  'suicia': ['switzerland'],
-  'suissa': ['switzerland'],
-  'suico': ['switzerland'],
+  'polonia': ['poland', 'polska'],
 };
 
 /**
@@ -158,7 +155,7 @@ function canonicalTeamName(name: string): string {
 }
 
 /**
- * Retorna true se os dois times são considerados o mesmo (similaridade >= 0.8)
+ * Retorna true se os dois times são considerados o mesmo (similaridade Jaro-Winkler >= 0.75)
  */
 export function areTeamsSame(teamA: string, teamB: string, threshold = 0.75): boolean {
   // 1. Normalização básica
@@ -183,18 +180,41 @@ export function areTeamsSame(teamA: string, teamB: string, threshold = 0.75): bo
 }
 
 /**
+ * Separadores de "Time A <sep> Time B" aceitos, do mais seguro para o mais ambíguo.
+ * O hífen com espaços vem por último (nomes como "Pen-y-Bont" têm hífen sem espaços).
+ */
+const SEPARADORES_EVENTO = [' vs. ', ' vs ', ' x ', ' v ', ' @ ', ' – ', ' — ', ' - '];
+
+/** Divide "Time A vs Time B" no primeiro separador reconhecido; remove sufixo "(data)". */
+export function splitEvento(evento: string): [string, string] | null {
+  const semSufixo = (evento || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+  const lower = semSufixo.toLowerCase();
+  for (const sep of SEPARADORES_EVENTO) {
+    const idx = lower.indexOf(sep);
+    if (idx > 0) {
+      const a = semSufixo.slice(0, idx).trim();
+      const b = semSufixo.slice(idx + sep.length).trim();
+      if (a && b) return [a, b];
+    }
+  }
+  return null;
+}
+
+/**
  * Retorna true se os dois eventos (Time A vs Time B) são o mesmo.
+ * Aceita separadores variados ( vs / x / - / – ) e ignora o sufixo de data "(...)".
  */
 export function areEventsSame(event1: string, event2: string): boolean {
-  const [e1a, e1b] = event1.split(' vs ').map(t => t.trim());
-  const [e2a, e2b] = event2.split(' vs ').map(t => t.trim());
-  
-  if (!e1a || !e1b || !e2a || !e2b) return false;
-  
+  const p1 = splitEvento(event1);
+  const p2 = splitEvento(event2);
+  if (!p1 || !p2) return false;
+  const [e1a, e1b] = p1;
+  const [e2a, e2b] = p2;
+
   // A vs B == A vs B
   if (areTeamsSame(e1a, e2a) && areTeamsSame(e1b, e2b)) return true;
-  // A vs B == B vs A (casa inversas)
+  // A vs B == B vs A (casas inverteram a ordem)
   if (areTeamsSame(e1a, e2b) && areTeamsSame(e1b, e2a)) return true;
-  
+
   return false;
 }
