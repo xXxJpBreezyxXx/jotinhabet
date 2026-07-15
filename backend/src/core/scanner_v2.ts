@@ -230,6 +230,18 @@ export class ArbitrageScannerV2 {
       bancaAtual = 50.00;
     }
 
+    // Ordena melhores primeiro (SureRadar tem confiança undefined → tratado como 1 = topo),
+    // para que o teto de alertas do motor próprio pegue as candidatas mais fortes.
+    oportunidadesGerais.sort(
+      (a, b) => (b.confianca ?? 1) - (a.confianca ?? 1) || b.lucroGarantidoPerc - a.lucroGarantidoPerc
+    );
+
+    // Anti-flood do alerta do motor próprio: teto por varredura + no máx. 1 alerta por evento.
+    const MAX_ALERTAS_MOTOR = 6;
+    let alertasMotorEnviados = 0;
+    const eventosAlertadosMotor = new Set<string>();
+    const baseEvento = (ev: string) => ev.replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase();
+
     // Persiste no Supabase
     const oportunidadesSalvas = [];
     for (const opp of oportunidadesGerais) {
@@ -340,8 +352,15 @@ export class ArbitrageScannerV2 {
             const ehSureRadar = !!opp.url?.includes('sureradar');
             const roi = opp.lucroGarantidoPerc;
             const alertarSureRadar = ehSureRadar && roi >= 5.0;
+            const base = baseEvento(opp.evento);
             const alertarMotor =
-              !ehSureRadar && (opp.confianca ?? 0) >= 0.9 && roi >= 2.0 && roi <= 15.0 && !opp.alertaPrecisao;
+              !ehSureRadar &&
+              (opp.confianca ?? 0) >= 0.9 &&
+              roi >= 2.0 &&
+              roi <= 15.0 &&
+              !opp.alertaPrecisao &&
+              alertasMotorEnviados < MAX_ALERTAS_MOTOR &&
+              !eventosAlertadosMotor.has(base); // no máx. 1 alerta por evento por varredura
 
             if (!alreadyEntered && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {
              const fonte = ehSureRadar ? 'SureRadar' : 'Motor';
@@ -371,6 +390,10 @@ export class ArbitrageScannerV2 {
                });
                if (success) {
                  markAlertAsSent(alertKey);
+                 if (alertarMotor) {
+                   alertasMotorEnviados++;
+                   eventosAlertadosMotor.add(base); // consome o teto/dedup só em envio real
+                 }
                }
              } else {
                console.log(`ℹ️ [WhatsApp] Alerta ignorado (já enviado): ${opp.evento} (${roi}%)`);
