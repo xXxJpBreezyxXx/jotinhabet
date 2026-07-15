@@ -14,25 +14,44 @@
  *  - HANDICAP: opcaoA = time da casa, opcaoB = visitante, linha = handicap (sinal da casa).
  */
 
-export type MercadoCanonico =
-  | 'RESULTADO_FINAL'
-  | 'TOTAIS'
-  | 'HANDICAP'
-  | 'AMBAS_MARCAM'
-  | 'DESCONHECIDO';
+/**
+ * A chave canônica de um mercado NÃO pode colapsar assunto e período: "Total de gols"
+ * e "Total de escanteios" são mercados DIFERENTES; "Total 1º tempo" ≠ "Total do jogo".
+ * Colapsá-los gera surebets falsas (ex.: cruzar over de escanteios com under de gols).
+ * Por isso a chave carrega ASSUNTO (gols/escanteios/...) e PERÍODO (FT/1T/2T).
+ */
 
-const REGRAS: Array<[RegExp, MercadoCanonico]> = [
-  [/resultado final|match winner|1\s*x\s*2|vencedor|money\s*line|full time result|resultado do jogo|1x2/i, 'RESULTADO_FINAL'],
-  [/handicap|hcp|spread|linha asi[aá]tica/i, 'HANDICAP'],
-  [/total|over\s*\/?\s*under|mais\s*\/?\s*menos|acima|abaixo|totais|under|over/i, 'TOTAIS'],
-  [/ambas.*marcam|both teams to score|btts|ambos marcam|ambas equipes marcam/i, 'AMBAS_MARCAM'],
-];
+/** Período do mercado a partir do rótulo cru. */
+function periodo(s: string): string {
+  if (/1º?\s*tempo|primeiro tempo|1st half|\b1t\b|1º set|1st set/.test(s)) return '1T';
+  if (/2º?\s*tempo|segundo tempo|2nd half|\b2t\b|2º set|2nd set/.test(s)) return '2T';
+  return 'FT';
+}
 
-/** Reduz o nome cru do mercado a uma chave canônica. HANDICAP é testado antes de TOTAIS. */
-export function normalizarMercado(raw: string): MercadoCanonico {
-  const s = (raw || '').toString();
-  for (const [re, canonico] of REGRAS) {
-    if (re.test(s)) return canonico;
+/** Assunto do total/handicap (o que está sendo contado). */
+function assunto(s: string): string {
+  if (/escanteio|corner/.test(s)) return 'ESCANTEIOS';
+  if (/cart[aã]o|card|cart[oõ]es/.test(s)) return 'CARTOES';
+  if (/\bace/.test(s)) return 'ACES';
+  if (/gol|goal/.test(s)) return 'GOLS';
+  if (/game/.test(s)) return 'GAMES';
+  if (/\bset/.test(s)) return 'SETS';
+  if (/ponto|point/.test(s)) return 'PONTOS';
+  return 'GERAL';
+}
+
+/**
+ * Reduz o nome cru do mercado a uma chave canônica composta (assunto + período).
+ * Ordem importa: handicap/total antes de "resultado final" para combos não se
+ * disfarçarem de match-winner.
+ */
+export function normalizarMercado(raw: string): string {
+  const s = (raw || '').toString().toLowerCase();
+  if (/handicap|desvantagem|spread|linha asi/.test(s)) return `HANDICAP_${assunto(s)}_${periodo(s)}`;
+  if (/total|over|under|mais de|menos de|acima|abaixo/.test(s)) return `TOTAIS_${assunto(s)}_${periodo(s)}`;
+  if (/ambas.*marcam|both teams to score|btts|ambos marcam|ambas equipes marcam/.test(s)) return `AMBAS_MARCAM_${periodo(s)}`;
+  if (/resultado final|match winner|1\s*x\s*2|vencedor|money\s*line|full time result|resultado do jogo|1x2/.test(s)) {
+    return `RESULTADO_FINAL_${periodo(s)}`;
   }
   return 'DESCONHECIDO';
 }

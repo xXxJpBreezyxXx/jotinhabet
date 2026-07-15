@@ -168,15 +168,23 @@ export class KambiScraper implements OddsScraper {
     const cross = byType('OT_CROSS');
     const two = byType('OT_TWO');
 
+    // Rótulo real do mercado (ex.: "Total de gols", "Total de escanteios") — preserva
+    // o ASSUNTO para a normalização não confundir gols com escanteios/cartões.
+    const criterio = bo.criterion?.label || '';
+
     // --- TOTAL (Over/Under) ---
     if (over && under && typeof over.line === 'number') {
+      // Só o total DA PARTIDA cruza de forma confiável. Exclui total por-time
+      // ("Total de gols do X") e asiático/quarter-line (split bet, não é 2-way limpo),
+      // que normalizariam igual ao total da partida e gerariam surebets falsas.
+      if (/ do |asi[aá]tic/i.test(criterio)) return null;
       const linha = over.line / 1000;
       const oddA = o(over.odds);
       const oddB = o(under.odds);
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
       return {
         esporte, evento, dataHora, url,
-        mercado: 'Total',
+        mercado: criterio || 'Total de gols',
         linha,
         opcaoA: rotuloOver(linha),
         opcaoB: rotuloUnder(linha),
@@ -192,7 +200,7 @@ export class KambiScraper implements OddsScraper {
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
       return {
         esporte, evento, dataHora, url,
-        mercado: 'Handicap',
+        mercado: /handicap|desvantagem/i.test(criterio) ? criterio : `Handicap ${criterio}`.trim(),
         linha,
         opcaoA: ev.homeName!,
         opcaoB: ev.awayName!,

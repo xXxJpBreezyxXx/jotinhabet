@@ -1,132 +1,203 @@
-import { ScraperBase, ScrapedOdd } from './scraper_base';
-import { chromium } from 'playwright';
-import * as path from 'path';
+import { ScrapedOdd, OddsScraper } from './scraper_base';
+import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { fetchTextoComRetry } from '../utils/http';
 
-export class SuperbetScraper extends ScraperBase {
-  private urlBase = 'https://superbet.bet.br/';
+/**
+ * Superbet (BR) — via API de oferta própria (Fastly), pública e sem proteção
+ * anti-bot (descoberto no recon). Substitui o antigo scraper de DOM.
+ *
+ *  - /events/by-date?...&sportId=X  → lista de eventos com o mercado principal
+ *    (Vencedor/Resultado Final) embutido em `odds` (preços já decimais).
+ *  - /events/{eventId}              → TODOS os mercados do evento (Total de Gols,
+ *    Handicap, etc.). Buscamos só de um subconjunto (custo ~270KB/evento).
+ *
+ * Nome do confronto vem como "Casa·Fora" (ponto médio). Odds já são decimais.
+ */
 
-  constructor() {
-    super('Superbet');
+const BASE = 'https://production-superbet-offer-br.freetls.fastly.net/v2/pt-BR';
+
+// esporte interno → sportId da Superbet (confirmado no recon: 5=Futebol, 2=Tenis).
+const SPORT_ID: Record<string, number> = {
+  Futebol: 5,
+  Tenis: 2,
+  Tênis: 2,
+};
+const SPORT_LABEL: Record<number, string> = { 5: 'Futebol', 2: 'Tenis' };
+
+interface SbOdd {
+  price: number;
+  status?: string;
+  code?: string;
+  name?: string;
+  marketName?: string;
+  specialBetValue?: string;
+  info?: string;
+}
+interface SbEvent {
+  eventId: number;
+  matchName: string;
+  matchDate?: string;
+  sportId?: number;
+  odds?: SbOdd[];
+  marketCount?: number;
+}
+
+export class SuperbetScraper implements OddsScraper {
+  private maxEventosPorEsporte = 40;
+  private maxEventosDetalhe = 30; // quantos eventos buscar mercados completos (Total)
+
+  getNome(): string {
+    return 'Superbet';
   }
 
-  protected async inicializarNavegador(headless: boolean): Promise<void> {
-    const userDir = path.resolve(__dirname, '../../tests/chrome-profile-superbet');
-    this.context = await chromium.launchPersistentContext(userDir, {
-      headless,
-      channel: 'chrome',
-      args: ['--disable-blink-features=AutomationControlled'],
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 }
-    });
-
-    await this.context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-  }
-
-  protected async extrairLinksDaLista(esporte: string, datas: string[]): Promise<string[]> {
-    if (!this.context) throw new Error("Contexto não inicializado.");
-    const page = this.context.pages()[0] || await this.context.newPage();
-    
-    const rotas: Record<string, string> = {
-      'Futebol': 'apostas/futebol?day=hoje',
-      'Basquete': 'apostas/basquete?day=hoje',
-      'Tenis': 'apostas/tenis?day=hoje'
+  private headers() {
+    return {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      Accept: 'application/json',
+      Referer: 'https://superbet.bet.br/',
+      Origin: 'https://superbet.bet.br',
     };
-    
-    const rota = rotas[esporte] || 'apostas/futebol?day=hoje';
-    const targetUrl = `${this.urlBase}${rota}`;
-    
-    console.log(`   [Superbet] Acessando lista de ${esporte}: ${targetUrl}`);
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(6000);
-    
-    const links = await page.evaluate(() => {
-        const anchors = Array.from(document.querySelectorAll('a'));
-        return anchors
-            .map(a => a.href)
-            .filter(href => href.includes('/odds/'));
-    });
-    
-    const uniqueLinks = [...new Set(links)];
-    return uniqueLinks.slice(0, 5);
   }
 
-  protected async extrairMercadosDoEvento(url: string, esporte: string): Promise<ScrapedOdd[]> {
-    if (!this.context) return [];
-    
-    console.log(`   [Superbet] Mergulhando no evento: ${url.split('/').pop()}`);
-    const page = await this.context.newPage();
-    const odds: ScrapedOdd[] = [];
-    
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(4000);
-      
-      const result = await page.evaluate((esporteArg) => {
-          const rawOdds: any[] = [];
-          
-          // Times no topo do evento
-          const teamEls = Array.from(document.querySelectorAll('[class*="team-name"], [class*="competitor"], h1, h2')).map(el => el.textContent?.trim()).filter(Boolean);
-          const timeA = teamEls[0] || "Time A";
-          const timeB = teamEls[2] || teamEls[1] || "Time B";
-          
-          // Pegar botões de odds
-          const oddBtns = Array.from(document.querySelectorAll('button')).filter(b => {
-              const txt = b.textContent?.trim() || '';
-              // Pode ser no formato "1.33" ou "X3.45" ou "25.55"
-              const cleanTxt = txt.replace(/^[XCasaFora]/, '');
-              return /^\d+\.\d{2}$/.test(cleanTxt) && parseFloat(cleanTxt) > 1.0;
-          });
-          
-          if (oddBtns.length >= 3) {
-              const valA = parseFloat(oddBtns[0].textContent?.trim().replace(/^[XCasaFora]/, '') || '0');
-              const valB = parseFloat(oddBtns[1].textContent?.trim().replace(/^[XCasaFora]/, '') || '0');
-              const valC = parseFloat(oddBtns[2].textContent?.trim().replace(/^[XCasaFora]/, '') || '0');
-              
-              rawOdds.push({
-                  mercado: "Resultado Final",
-                  opcaoA: timeA,
-                  oddA: valA,
-                  oddB: valB,
-                  oddC: valC
-              });
-          }
-          
-          return { timeA, timeB, rawOdds };
-      }, esporte);
-      
-      if (result.rawOdds.length > 0) {
-          const evento = `${result.timeA} vs ${result.timeB}`;
-          
-          for (const raw of result.rawOdds) {
-              if (raw.mercado === "Resultado Final") {
-                  odds.push({
-                      esporte, evento, dataHora: 'Hoje', url,
-                      mercado: 'Resultado Final',
-                      opcaoA: `Vitória ${result.timeA}`,
-                      opcaoB: `${result.timeB} ou Empate`,
-                      oddA: raw.oddA,
-                      oddB: 1 / (1/raw.oddB + 1/raw.oddC)
-                  });
-                  odds.push({
-                      esporte, evento, dataHora: 'Hoje', url,
-                      mercado: 'Resultado Final',
-                      opcaoA: `Vitória ${result.timeB}`,
-                      opcaoB: `${result.timeA} ou Empate`,
-                      oddA: raw.oddC,
-                      oddB: 1 / (1/raw.oddB + 1/raw.oddA)
-                  });
-              }
-          }
+  private fmtData(d: Date): string {
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}+${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:00`;
+  }
+
+  private evento(matchName: string): [string, string] | null {
+    const parts = (matchName || '').split('·');
+    if (parts.length !== 2) return null;
+    const home = parts[0].trim();
+    const away = parts[1].trim();
+    if (!home || !away) return null;
+    return [home, away];
+  }
+
+  async executarCrawler(esportes: string[], _datas: string[], _headless = true): Promise<ScrapedOdd[]> {
+    console.log(`🤖 [Superbet] Extração via API de oferta (Fastly)...`);
+    const todas: ScrapedOdd[] = [];
+    for (const esporte of esportes) {
+      const sid = SPORT_ID[esporte];
+      if (!sid) continue;
+      try {
+        const odds = await this.extrairEsporte(sid);
+        console.log(`   [Superbet] ${esporte}: ${odds.length} odds`);
+        todas.push(...odds);
+      } catch (err: any) {
+        console.error(`   ⚠️ [Superbet] Falha em ${esporte}: ${err.message}`);
       }
-      
-    } catch (err) {
-      // Ignora erro
-    } finally {
-      await page.close();
     }
-    
+    console.log(`✅ [Superbet] Total: ${todas.length} odds.`);
+    return todas;
+  }
+
+  private async extrairEsporte(sportId: number): Promise<ScrapedOdd[]> {
+    const now = new Date();
+    const end = new Date(now.getTime() + 48 * 3600 * 1000);
+    const url = `${BASE}/events/by-date?currentStatus=active&offerState=prematch&startDate=${this.fmtData(now)}&endDate=${this.fmtData(end)}&sportId=${sportId}`;
+    const r = await fetchTextoComRetry(url, { headers: this.headers() }, 3, 'Superbet/list');
+    if (r.status !== 200) throw new Error(`by-date HTTP ${r.status}`);
+    const j = JSON.parse(r.body);
+    const eventos: SbEvent[] = (j.data || j || []).slice(0, this.maxEventosPorEsporte);
+
+    const odds: ScrapedOdd[] = [];
+
+    // 1) Mercado principal (match winner) de TODOS os eventos — barato.
+    for (const ev of eventos) {
+      const mw = this.parseMatchWinner(ev, sportId);
+      if (mw) odds.push(mw);
+    }
+
+    // 2) Mercados completos (Total de Gols) de um subconjunto.
+    const detalhe = eventos.slice(0, this.maxEventosDetalhe);
+    for (const ev of detalhe) {
+      try {
+        const extras = await this.extrairMercadosEvento(ev.eventId, sportId);
+        odds.push(...extras);
+      } catch {
+        /* evento sem detalhe — ignora */
+      }
+    }
     return odds;
+  }
+
+  private parseMatchWinner(ev: SbEvent, sportId: number): ScrapedOdd | null {
+    const par = this.evento(ev.matchName);
+    if (!par) return null;
+    const [home, away] = par;
+    const esporte = SPORT_LABEL[sportId] || String(sportId);
+    const dataHora = ev.matchDate || 'Hoje';
+
+    const ativos = (ev.odds || []).filter((o) => o.status === 'active' && o.price > 1);
+    const one = ativos.find((o) => o.code === '1');
+    const cross = ativos.find((o) => o.code === '0' || (o.name || '').toUpperCase() === 'X');
+    const two = ativos.find((o) => o.code === '2');
+    if (!one || !two) return null;
+
+    // 3-way (futebol): dupla chance sintética (mesma técnica da Blaze/Kambi).
+    if (cross && cross.price > 1) {
+      return {
+        esporte, evento: `${home} vs ${away}`, dataHora,
+        mercado: 'Resultado Final',
+        opcaoA: `Vitória ${home}`,
+        opcaoB: `${away} ou Empate`,
+        oddA: one.price,
+        oddB: 1 / (1 / cross.price + 1 / two.price),
+      };
+    }
+    // 2-way: direto.
+    return {
+      esporte, evento: `${home} vs ${away}`, dataHora,
+      mercado: 'Resultado Final',
+      opcaoA: home,
+      opcaoB: away,
+      oddA: one.price,
+      oddB: two.price,
+    };
+  }
+
+  private async extrairMercadosEvento(eventId: number, sportId: number): Promise<ScrapedOdd[]> {
+    const r = await fetchTextoComRetry(`${BASE}/events/${eventId}`, { headers: this.headers() }, 2, 'Superbet/ev');
+    if (r.status !== 200) return [];
+    const j = JSON.parse(r.body);
+    const ev: SbEvent = (j.data || j || [])[0];
+    if (!ev) return [];
+    const par = this.evento(ev.matchName);
+    if (!par) return [];
+    const [home, away] = par;
+    const esporte = SPORT_LABEL[sportId] || String(sportId);
+    const dataHora = ev.matchDate || 'Hoje';
+    const eventoStr = `${home} vs ${away}`;
+
+    const out: ScrapedOdd[] = [];
+
+    // Total de Gols: agrupa por specialBetValue (a linha) → par Over/Under.
+    const totais = (ev.odds || []).filter((o) => o.marketName === 'Total de Gols' && o.status === 'active');
+    const porLinha = new Map<string, { over?: SbOdd; under?: SbOdd }>();
+    for (const o of totais) {
+      const sbv = o.specialBetValue || '';
+      if (!sbv) continue;
+      const g = porLinha.get(sbv) || {};
+      if (/mais de/i.test(o.name || '')) g.over = o;
+      else if (/menos de/i.test(o.name || '')) g.under = o;
+      porLinha.set(sbv, g);
+    }
+    for (const [sbv, g] of porLinha) {
+      if (g.over && g.under && g.over.price > 1 && g.under.price > 1) {
+        const linha = Number(sbv);
+        if (!Number.isFinite(linha)) continue;
+        out.push({
+          esporte, evento: eventoStr, dataHora,
+          mercado: 'Total de Gols',
+          linha,
+          opcaoA: rotuloOver(linha),
+          opcaoB: rotuloUnder(linha),
+          oddA: g.over.price,
+          oddB: g.under.price,
+        });
+      }
+    }
+    return out;
   }
 }
