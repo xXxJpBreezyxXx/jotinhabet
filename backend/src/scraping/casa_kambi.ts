@@ -254,3 +254,15 @@ export class KtoScraper extends KambiScraper {
     super({ nome: 'KTO', offering: 'ktobr', referer: 'https://www.kto.bet.br/' });
   }
 }
+
+/** BetWarrior — Kambi offering "bwpe" (descoberto no HTML do site; host EU responde). */
+export class BetWarriorScraper extends KambiScraper {
+  constructor() {
+    super({
+      nome: 'BetWarrior',
+      offering: 'bwpe',
+      host: 'eu.offering-api.kambicdn.com',
+      referer: 'https://apostas.betwarrior.bet.br/',
+    });
+  }
+}
