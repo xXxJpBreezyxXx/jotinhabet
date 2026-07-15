@@ -218,3 +218,57 @@ export function areEventsSame(event1: string, event2: string): boolean {
 
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Hardening de precisão: horário de início e força do match (para confiança)
+// ---------------------------------------------------------------------------
+
+/**
+ * Converte a dataHora de um ScrapedOdd em epoch ms.
+ * Aceita ISO ("2026-07-15T10:00:00Z") e formato "AAAA-MM-DD HH:MM:SS" (tratado como UTC,
+ * consistente com o que as casas retornam). Retorna null para "Hoje"/"Amanhã"/inválido.
+ */
+export function parseKickoff(dataHora?: string): number | null {
+  if (!dataHora || typeof dataHora !== 'string') return null;
+  let iso = dataHora.includes('T') ? dataHora.trim() : dataHora.trim().replace(' ', 'T');
+  if (!/[Zz]$|[+-]\d\d:?\d\d$/.test(iso)) iso += 'Z';
+  const t = Date.parse(iso);
+  return isNaN(t) ? null : t;
+}
+
+/**
+ * True se dois eventos podem ser o mesmo jogo pelo horário.
+ * Se algum horário não for parseável ("Hoje"), NÃO bloqueia (retorna true) — a
+ * verificação de time decide, e a confiança fica menor. Se ambos são conhecidos,
+ * exige início dentro de `tolMin` minutos (defesa contra parear jogos diferentes).
+ */
+export function mesmoHorario(dh1?: string, dh2?: string, tolMin = 10): boolean {
+  const t1 = parseKickoff(dh1);
+  const t2 = parseKickoff(dh2);
+  if (t1 === null || t2 === null) return true;
+  return Math.abs(t1 - t2) <= tolMin * 60000;
+}
+
+/** Similaridade [0..1] de um par de times (exato/substring/alias fortes; senão Jaro-Winkler). */
+function simTime(a: string, b: string): number {
+  const na = normalizeTeamName(a);
+  const nb = normalizeTeamName(b);
+  if (na === nb) return 1;
+  if ((na.includes(nb) && nb.length > 3) || (nb.includes(na) && na.length > 3)) return 0.95;
+  if (canonicalTeamName(a) === canonicalTeamName(b)) return 0.9;
+  return jaroWinkler(na, nb);
+}
+
+/**
+ * Força do casamento de um evento [0..1]: a MENOR similaridade entre os dois times
+ * (na melhor orientação). Usado para a confiança — um match onde um dos lados é fraco
+ * fica com confiança baixa mesmo que o areEventsSame tenha passado no limiar.
+ */
+export function forcaMatchEvento(event1: string, event2: string): number {
+  const p1 = splitEvento(event1);
+  const p2 = splitEvento(event2);
+  if (!p1 || !p2) return 0;
+  const direta = Math.min(simTime(p1[0], p2[0]), simTime(p1[1], p2[1]));
+  const invertida = Math.min(simTime(p1[0], p2[1]), simTime(p1[1], p2[0]));
+  return Math.max(direta, invertida);
+}

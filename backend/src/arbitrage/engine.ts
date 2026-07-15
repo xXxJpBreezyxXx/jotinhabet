@@ -1,5 +1,5 @@
 import { ScrapedOdd } from '../scraping/scraper_base';
-import { areEventsSame, areTeamsSame } from './matcher';
+import { areEventsSame, areTeamsSame, mesmoHorario, forcaMatchEvento, parseKickoff } from './matcher';
 import { mesmaOferta } from './markets';
 
 export interface ArbitrageOpportunity {
@@ -18,6 +18,9 @@ export interface ArbitrageOpportunity {
   analiseIA?: string; // Parecer da Inteligência Artificial sobre a Surebet
   esporte?: string;
   url?: string;
+  linha?: number;            // linha do mercado (over/under, handicap), quando aplicável
+  confianca?: number;        // 0..1 — qualidade do casamento (time + horário + sanidade do ROI)
+  alertaPrecisao?: string;   // motivo de cautela (ROI alto, horário desconhecido, match fraco)
 }
 
 export class ArbitrageEngine {
@@ -33,10 +36,12 @@ export class ArbitrageEngine {
     
     for (const odd1 of oddsCasa1) {
       // Procura o mesmo evento na casa 2
-      // Mesma oferta = mesmo evento + mercado normalizado + MESMA linha.
-      // A linha (over/under, handicap) entra na chave: Over 2.5 nunca cruza com Over 3.0.
+      // Mesma oferta = mesmo evento + mesmo horário + mercado normalizado + MESMA linha.
+      // A trava de horário evita parear jogos diferentes de times homônimos; a linha
+      // (over/under, handicap) entra na chave: Over 2.5 nunca cruza com Over 3.0.
       const eventosCorrespondentes = oddsCasa2.filter(odd2 =>
         areEventsSame(odd1.evento, odd2.evento) &&
+        mesmoHorario(odd1.dataHora, odd2.dataHora) &&
         mesmaOferta(odd1.mercado, odd1.linha, odd2.mercado, odd2.linha)
       );
       
@@ -71,54 +76,72 @@ export class ArbitrageEngine {
     oportunidades: ArbitrageOpportunity[],
     direto: boolean
   ): void {
-    let probA1_B2 = 0;
-    let probB1_A2 = 0;
+    // Confiança do casamento, calculada uma vez por par (time + horário).
+    const forca = forcaMatchEvento(odd1.evento, odd2.evento);
+    const tempoConhecido = parseKickoff(odd1.dataHora) !== null && parseKickoff(odd2.dataHora) !== null;
+
+    // Enriquece cada oportunidade com linha, confiança e alerta de precisão antes de guardar.
+    const registrar = (opp: ArbitrageOpportunity) => {
+      opp.linha = odd1.linha ?? odd2.linha;
+      const { confianca, alerta } = this.avaliarConfianca(forca, tempoConhecido, opp.lucroGarantidoPerc);
+      opp.confianca = confianca;
+      if (alerta) opp.alertaPrecisao = alerta;
+      oportunidades.push(opp);
+    };
 
     if (direto) {
-      probA1_B2 = (1 / odd1.oddA) + (1 / odd2.oddB);
+      const probA1_B2 = (1 / odd1.oddA) + (1 / odd2.oddB);
       if (probA1_B2 < 1.0) {
-        oportunidades.push(this.criarOportunidade(
-          odd1.evento, odd1.mercado, 
-          odd1.opcaoA, odd2.opcaoB, 
-          odd1.oddA, odd2.oddB, 
-          nomeCasa1, nomeCasa2, probA1_B2,
-          odd1.esporte, odd1.url
+        registrar(this.criarOportunidade(
+          odd1.evento, odd1.mercado, odd1.opcaoA, odd2.opcaoB,
+          odd1.oddA, odd2.oddB, nomeCasa1, nomeCasa2, probA1_B2, odd1.esporte, odd1.url
         ));
       }
-
-      probB1_A2 = (1 / odd1.oddB) + (1 / odd2.oddA);
+      const probB1_A2 = (1 / odd1.oddB) + (1 / odd2.oddA);
       if (probB1_A2 < 1.0) {
-        oportunidades.push(this.criarOportunidade(
-          odd1.evento, odd1.mercado, 
-          odd1.opcaoB, odd2.opcaoA, 
-          odd1.oddB, odd2.oddA, 
-          nomeCasa1, nomeCasa2, probB1_A2,
-          odd1.esporte, odd1.url
+        registrar(this.criarOportunidade(
+          odd1.evento, odd1.mercado, odd1.opcaoB, odd2.opcaoA,
+          odd1.oddB, odd2.oddA, nomeCasa1, nomeCasa2, probB1_A2, odd1.esporte, odd1.url
         ));
       }
     } else {
       const probA1_A2 = (1 / odd1.oddA) + (1 / odd2.oddA);
       if (probA1_A2 < 1.0) {
-        oportunidades.push(this.criarOportunidade(
-          odd1.evento, odd1.mercado, 
-          odd1.opcaoA, odd2.opcaoA, 
-          odd1.oddA, odd2.oddA, 
-          nomeCasa1, nomeCasa2, probA1_A2,
-          odd1.esporte, odd1.url
+        registrar(this.criarOportunidade(
+          odd1.evento, odd1.mercado, odd1.opcaoA, odd2.opcaoA,
+          odd1.oddA, odd2.oddA, nomeCasa1, nomeCasa2, probA1_A2, odd1.esporte, odd1.url
         ));
       }
-
       const probB1_B2 = (1 / odd1.oddB) + (1 / odd2.oddB);
       if (probB1_B2 < 1.0) {
-        oportunidades.push(this.criarOportunidade(
-          odd1.evento, odd1.mercado, 
-          odd1.opcaoB, odd2.opcaoB, 
-          odd1.oddB, odd2.oddB, 
-          nomeCasa1, nomeCasa2, probB1_B2,
-          odd1.esporte, odd1.url
+        registrar(this.criarOportunidade(
+          odd1.evento, odd1.mercado, odd1.opcaoB, odd2.opcaoB,
+          odd1.oddB, odd2.oddB, nomeCasa1, nomeCasa2, probB1_B2, odd1.esporte, odd1.url
         ));
       }
     }
+  }
+
+  /**
+   * Confiança [0..1] de uma oportunidade e um eventual alerta de cautela.
+   * Combina a força do casamento de times, se o horário foi confirmado e a
+   * sanidade do ROI (ROI muito alto costuma indicar odd travada/erro/1 lado stale).
+   */
+  private avaliarConfianca(
+    forca: number,
+    tempoConhecido: boolean,
+    roiPct: number
+  ): { confianca: number; alerta?: string } {
+    const timeScore = tempoConhecido ? 1 : 0.6;
+    const roiSanity = roiPct <= 6 ? 1 : roiPct <= 15 ? 0.75 : 0.45;
+    const confianca = Math.max(0, Math.min(1, 0.55 * forca + 0.25 * timeScore + 0.2 * roiSanity));
+
+    const motivos: string[] = [];
+    if (forca < 0.85) motivos.push('casamento de times fraco');
+    if (!tempoConhecido) motivos.push('horário não confirmado');
+    if (roiPct > 15) motivos.push('ROI muito alto (possível odd travada/erro)');
+
+    return { confianca: parseFloat(confianca.toFixed(2)), alerta: motivos.length ? motivos.join('; ') : undefined };
   }
 
   private criarOportunidade(
