@@ -2,6 +2,7 @@ import { ArbitrageOpportunity } from '../arbitrage/engine';
 import { chromium } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fetchTextoComRetry } from '../utils/http';
 
 // ---------------------------------------------------------------------------
 // Tipos da API interna do SureRadar (descobertos via engenharia do painel /app)
@@ -108,14 +109,19 @@ export class SureRadarScraper {
   private async extrairViaApi(cookies: any[]): Promise<ArbitrageOpportunity[]> {
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
 
-    const { status, contentType, urlFinal, body } = await this.fetchTextoComRetry(SURERADAR_API_URL, {
-      headers: {
-        Cookie: cookieHeader,
-        'User-Agent': USER_AGENT,
-        Accept: 'application/json',
-        Referer: SURERADAR_APP_URL,
+    const { status, contentType, urlFinal, body } = await fetchTextoComRetry(
+      SURERADAR_API_URL,
+      {
+        headers: {
+          Cookie: cookieHeader,
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json',
+          Referer: SURERADAR_APP_URL,
+        },
       },
-    });
+      3,
+      'SureRadar/API'
+    );
 
     // 401 = sempre sessão inválida. 403 só é sessão se a resposta parecer vir do app
     // (JSON ou marcadores de login) — um 403+HTML de challenge de WAF/Cloudflare com
@@ -252,43 +258,6 @@ export class SureRadarScraper {
       }
     }
     return 'Hoje';
-  }
-
-  /**
-   * fetch com retry/backoff cobrindo TAMBÉM a leitura do corpo (o AbortController
-   * interrompe o stream — sem isso um corpo travado penduraria ~300s no bodyTimeout
-   * do undici, fora do retry). Status 5xx é transitório e também entra no retry.
-   */
-  private async fetchTextoComRetry(
-    url: string,
-    init: RequestInit,
-    tentativas = 3
-  ): Promise<{ status: number; contentType: string; urlFinal: string; body: string }> {
-    let ultimoErro: any;
-    for (let i = 1; i <= tentativas; i++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 20000);
-      try {
-        const resp = await fetch(url, { ...init, signal: controller.signal });
-        const body = await resp.text(); // ainda dentro da janela do timeout
-        if (resp.status >= 500) {
-          throw new Error(`HTTP ${resp.status}`);
-        }
-        return {
-          status: resp.status,
-          contentType: resp.headers.get('content-type') || '',
-          urlFinal: resp.url || url,
-          body,
-        };
-      } catch (err: any) {
-        ultimoErro = err;
-        console.warn(`⚠️ [SureRadar/API] Tentativa ${i}/${tentativas} falhou: ${err.message}`);
-        if (i < tentativas) await new Promise((r) => setTimeout(r, 2000 * i));
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-    throw ultimoErro;
   }
 
   // -------------------------------------------------------------------------
