@@ -5,6 +5,7 @@ import { KtoScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
+import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -125,6 +126,7 @@ export class ArbitrageScannerV2 {
     new BetanoScraper(),
     new KtoScraper(),
     new SuperbetScraper(),
+    new PinnacleScraper(),
     new BlazeScraper(),
     new OneXBetScraper()
   ];
