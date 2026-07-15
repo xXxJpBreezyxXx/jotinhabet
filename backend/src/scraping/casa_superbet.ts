@@ -99,7 +99,14 @@ export class SuperbetScraper implements OddsScraper {
     const r = await fetchTextoComRetry(url, { headers: this.headers() }, 3, 'Superbet/list');
     if (r.status !== 200) throw new Error(`by-date HTTP ${r.status}`);
     const j = JSON.parse(r.body);
-    const eventos: SbEvent[] = (j.data || j || []).slice(0, this.maxEventosPorEsporte);
+    const agora = Date.now();
+    const eventos: SbEvent[] = (j.data || j || [])
+      // offerState=prematch já exclui ao vivo; reforça descartando início no passado.
+      .filter((ev: SbEvent) => {
+        const t = Date.parse((ev.matchDate || '').replace(' ', 'T') + 'Z');
+        return isNaN(t) || t > agora;
+      })
+      .slice(0, this.maxEventosPorEsporte);
 
     const odds: ScrapedOdd[] = [];
 

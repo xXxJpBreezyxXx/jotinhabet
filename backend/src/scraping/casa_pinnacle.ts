@@ -52,6 +52,7 @@ interface PinMatchup {
   participants?: PinParticipant[];
   league?: { name?: string };
   state?: string;
+  isLive?: boolean;
 }
 
 export class PinnacleScraper implements OddsScraper {
@@ -106,9 +107,15 @@ export class PinnacleScraper implements OddsScraper {
     if (rMatch.status !== 200) throw new Error(`matchups HTTP ${rMatch.status}`);
     const matchups: PinMatchup[] = JSON.parse(rMatch.body);
 
-    // Só jogos "raiz" (sem parentId) com 2 participantes; os mais próximos primeiro.
+    // Só jogos "raiz" (sem parentId) com 2 participantes, PRÉ-JOGO (não ao vivo, início
+    // no futuro); os mais próximos primeiro.
+    const agora = Date.now();
     const eventos = matchups
-      .filter((m) => !m.parentId && (m.participants?.length || 0) >= 2)
+      .filter((m) => {
+        if (m.parentId || (m.participants?.length || 0) < 2 || m.isLive) return false;
+        const t = Date.parse(m.startTime || '');
+        return isNaN(t) || t > agora;
+      })
       .sort((a, b) => (Date.parse(a.startTime || '') || 0) - (Date.parse(b.startTime || '') || 0))
       .slice(0, this.maxEventosPorEsporte);
 

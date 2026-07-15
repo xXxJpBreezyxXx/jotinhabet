@@ -120,7 +120,12 @@ export class KambiScraper implements OddsScraper {
       // Descarta partidas VIRTUAIS/e-soccer (FIFA): o nome do time traz o handle do
       // jogador entre parênteses (ex.: "Tottenham (zoyir)"). São voláteis e geram
       // "arbs" de odd travada, não reais.
-      .filter((ev: KambiEvent) => !/\([^)]+\)/.test(ev.homeName || '') && !/\([^)]+\)/.test(ev.awayName || ''));
+      .filter((ev: KambiEvent) => !/\([^)]+\)/.test(ev.homeName || '') && !/\([^)]+\)/.test(ev.awayName || ''))
+      // Só PRÉ-JOGO: descarta partidas já iniciadas/ao vivo (start no passado).
+      .filter((ev: KambiEvent) => {
+        const t = Date.parse(ev.start || '');
+        return isNaN(t) || t > Date.now();
+      });
 
     const eventosLimitados = eventos.slice(0, this.cfg.maxEventosPorEsporte);
     const mapaEventos = new Map<number, KambiEvent>();

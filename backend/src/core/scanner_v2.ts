@@ -1,4 +1,5 @@
 import { ArbitrageEngine, ArbitrageOpportunity } from '../arbitrage/engine';
+import { parseKickoff } from '../arbitrage/matcher';
 import { OddsScraper } from '../scraping/scraper_base';
 import { BetanoScraper } from '../scraping/casa_a';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
@@ -45,6 +46,22 @@ function markAlertAsSent(key: string) {
   } catch (err) {
     console.error('⚠️ [Tracker] Erro ao salvar cache de alertas enviados:', err);
   }
+}
+
+// Timestamp (ms) do início da partida: usa dataHora (ISO/UTC) e cai para a data no
+// texto do evento "(DD/MM/AAAA HH:MM)" interpretada como horário de Brasília (UTC-3).
+function kickoffMs(opp: { dataHora?: string; evento: string }): number | null {
+  const t = parseKickoff(opp.dataHora);
+  if (t !== null) return t;
+  const m = opp.evento.match(/\((\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})\)/);
+  if (m) return Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4] + 3, +m[5]); // BR (UTC-3) → UTC
+  return null;
+}
+
+// True se a partida ainda NÃO começou (pré-jogo). Se o horário for desconhecido, não bloqueia.
+function ehPreJogo(opp: { dataHora?: string; evento: string }): boolean {
+  const k = kickoffMs(opp);
+  return k === null ? true : k > Date.now();
 }
 
 // Verifica se o evento ocorre hoje ou amanhã
@@ -365,7 +382,8 @@ export class ArbitrageScannerV2 {
                 ? (opp.confianca ?? 0) >= 0.9 && roi >= 2.0
                 : (opp.confianca ?? 0) >= 0.95 && roi >= 4.0);
 
-            if (!alreadyEntered && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {
+            // Só PRÉ-JOGO: nunca alerta partida que já começou (não fazemos ao vivo).
+            if (!alreadyEntered && ehPreJogo(opp) && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {
              const fonte = ehSureRadar ? 'SureRadar' : 'Motor';
              const alertKey = `${fonte}_${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${roi.toFixed(1)}`;
              if (!alertAlreadySent(alertKey)) {
