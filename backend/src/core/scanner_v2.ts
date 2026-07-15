@@ -7,6 +7,7 @@ import { SuperbetScraper } from '../scraping/casa_superbet';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
+import { Aposta1Scraper } from '../scraping/casa_altenar';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -145,13 +146,14 @@ export class ArbitrageScannerV2 {
     new BetWarriorScraper(),
     new SuperbetScraper(),
     new PinnacleScraper(),
+    new Aposta1Scraper(),
     new BlazeScraper(),
     new OneXBetScraper()
   ];
   private engine = new ArbitrageEngine();
 
   /** Nomes dos scrapers que usam API direta (rápidos, sem browser) — usados no modo apenasApi. */
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']);
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']); // Aposta1 já ativo
 
   /**
    * @param apenasApi quando true, o cruzamento entre casas usa SÓ os scrapers de API
