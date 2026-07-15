@@ -184,18 +184,13 @@ export class ArbitrageScannerV2 {
         }
       }
 
-      console.log('⚡ [Scanner V2] Cruzando mercados e buscando Surebets...');
-      // Compara todas contra todas (Combinatória)
-      for (let i = 0; i < todasOdds.length; i++) {
-        for (let j = i + 1; j < todasOdds.length; j++) {
-          const casa1 = todasOdds[i];
-          const casa2 = todasOdds[j];
-          
-          if (casa1.odds.length > 0 && casa2.odds.length > 0) {
-            const ops = await this.engine.encontrarOportunidades(casa1.nome, casa1.odds, casa2.nome, casa2.odds);
-            oportunidadesGerais.push(...ops);
-          }
-        }
+      console.log('⚡ [Scanner V2] Buscando a MELHOR combinação de odds entre as casas...');
+      // Para cada aposta, pega a maior odd de cada lado entre TODAS as casas (ROI ótimo,
+      // 1 oportunidade por aposta) — em vez do antigo cruzamento par a par.
+      const fontes = todasOdds.filter((t) => t.odds.length > 0).map((t) => ({ nome: t.nome, odds: t.odds }));
+      if (fontes.length >= 2) {
+        const ops = await this.engine.encontrarMelhoresOportunidades(fontes);
+        oportunidadesGerais.push(...ops);
       }
     }
 
@@ -230,10 +225,14 @@ export class ArbitrageScannerV2 {
       bancaAtual = 50.00;
     }
 
-    // Ordena melhores primeiro (SureRadar tem confiança undefined → tratado como 1 = topo),
-    // para que o teto de alertas do motor próprio pegue as candidatas mais fortes.
+    // Ordena para o teto de alertas pegar as melhores: Pinnacle (âncora sharp) primeiro,
+    // depois maior confiança e ROI. SureRadar tem confiança undefined → tratado como 1.
+    const envolvePin = (o: ArbitrageOpportunity) => (o.casaA === 'Pinnacle' || o.casaB === 'Pinnacle' ? 1 : 0);
     oportunidadesGerais.sort(
-      (a, b) => (b.confianca ?? 1) - (a.confianca ?? 1) || b.lucroGarantidoPerc - a.lucroGarantidoPerc
+      (a, b) =>
+        envolvePin(b) - envolvePin(a) ||
+        (b.confianca ?? 1) - (a.confianca ?? 1) ||
+        b.lucroGarantidoPerc - a.lucroGarantidoPerc
     );
 
     // Anti-flood do alerta do motor próprio: teto por varredura + no máx. 1 alerta por evento.
@@ -353,14 +352,18 @@ export class ArbitrageScannerV2 {
             const roi = opp.lucroGarantidoPerc;
             const alertarSureRadar = ehSureRadar && roi >= 5.0;
             const base = baseEvento(opp.evento);
+            // Prioriza Pinnacle (casa sharp): arb contra a Pinnacle é sinal forte de edge real.
+            // Arb entre duas casas soft exige barra mais alta (mais falso positivo/linha stale).
+            const envolvePinnacle = opp.casaA === 'Pinnacle' || opp.casaB === 'Pinnacle';
             const alertarMotor =
               !ehSureRadar &&
-              (opp.confianca ?? 0) >= 0.9 &&
-              roi >= 2.0 &&
-              roi <= 15.0 &&
               !opp.alertaPrecisao &&
+              roi <= 15.0 &&
               alertasMotorEnviados < MAX_ALERTAS_MOTOR &&
-              !eventosAlertadosMotor.has(base); // no máx. 1 alerta por evento por varredura
+              !eventosAlertadosMotor.has(base) && // no máx. 1 alerta por evento por varredura
+              (envolvePinnacle
+                ? (opp.confianca ?? 0) >= 0.9 && roi >= 2.0
+                : (opp.confianca ?? 0) >= 0.95 && roi >= 4.0);
 
             if (!alreadyEntered && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {
              const fonte = ehSureRadar ? 'SureRadar' : 'Motor';

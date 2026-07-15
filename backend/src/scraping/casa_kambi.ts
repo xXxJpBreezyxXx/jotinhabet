@@ -114,7 +114,13 @@ export class KambiScraper implements OddsScraper {
     const lv = await fetchTextoComRetry(lvUrl, { headers: this.headers() }, 3, `${this.cfg.nome}/list`);
     if (lv.status !== 200) throw new Error(`listView HTTP ${lv.status}`);
     const lvJson = JSON.parse(lv.body);
-    const eventos: KambiEvent[] = (lvJson.events || []).map((e: any) => e.event).filter(Boolean);
+    const eventos: KambiEvent[] = (lvJson.events || [])
+      .map((e: any) => e.event)
+      .filter(Boolean)
+      // Descarta partidas VIRTUAIS/e-soccer (FIFA): o nome do time traz o handle do
+      // jogador entre parênteses (ex.: "Tottenham (zoyir)"). São voláteis e geram
+      // "arbs" de odd travada, não reais.
+      .filter((ev: KambiEvent) => !/\([^)]+\)/.test(ev.homeName || '') && !/\([^)]+\)/.test(ev.awayName || ''));
 
     const eventosLimitados = eventos.slice(0, this.cfg.maxEventosPorEsporte);
     const mapaEventos = new Map<number, KambiEvent>();
@@ -172,13 +178,18 @@ export class KambiScraper implements OddsScraper {
     // o ASSUNTO para a normalização não confundir gols com escanteios/cartões.
     const criterio = bo.criterion?.label || '';
 
+    // Só meia-linha (.5) forma arbitragem 2-way limpa: linha inteira tem push (reembolso)
+    // e quarto de linha (.25/.75) divide a aposta. Ambas quebram o cálculo de surebet.
+    const ehMeiaLinha = (l: number) => Math.abs(l % 1) === 0.5;
+
     // --- TOTAL (Over/Under) ---
     if (over && under && typeof over.line === 'number') {
       // Só o total DA PARTIDA cruza de forma confiável. Exclui total por-time
-      // ("Total de gols do X") e asiático/quarter-line (split bet, não é 2-way limpo),
-      // que normalizariam igual ao total da partida e gerariam surebets falsas.
-      if (/ do |asi[aá]tic/i.test(criterio)) return null;
+      // ("Total de gols do X", "Total de Escanteio por Y") e asiático/quarter-line —
+      // a normalização não distingue o time, então cruzariam subjects diferentes.
+      if (/ do | por |asi[aá]tic/i.test(criterio)) return null;
       const linha = over.line / 1000;
+      if (!ehMeiaLinha(linha)) return null;
       const oddA = o(over.odds);
       const oddB = o(under.odds);
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
@@ -192,9 +203,11 @@ export class KambiScraper implements OddsScraper {
       };
     }
 
-    // --- HANDICAP (Desvantagem): OT_ONE/OT_TWO com line ---
-    if (one && two && typeof one.line === 'number') {
+    // --- HANDICAP ASIÁTICO 2-way (Desvantagem): OT_ONE/OT_TWO com line, SEM empate ---
+    // Exclui handicap europeu (3-way, tem empate-handicap) e linhas não-meias (push).
+    if (one && two && !cross && typeof one.line === 'number' && !/europ/i.test(criterio)) {
       const linha = one.line / 1000;
+      if (!ehMeiaLinha(linha)) return null;
       const oddA = o(one.odds);
       const oddB = o(two.odds);
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;

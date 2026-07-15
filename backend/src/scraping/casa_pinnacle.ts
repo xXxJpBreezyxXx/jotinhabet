@@ -143,6 +143,8 @@ export class PinnacleScraper implements OddsScraper {
     const eventoStr = `${home} vs ${away}`;
     const dec = (p?: number) => (typeof p === 'number' ? this.americanoParaDecimal(p) : NaN);
     const ok = (n: number) => Number.isFinite(n) && n > 1;
+    // Só meia-linha (.5) é arbitragem 2-way limpa (inteira = push; quarto = split).
+    const ehMeiaLinha = (l: number) => Math.abs(l % 1) === 0.5;
     const out: ScrapedOdd[] = [];
 
     for (const mk of markets) {
@@ -177,7 +179,7 @@ export class PinnacleScraper implements OddsScraper {
         const oOver = dec(over?.price);
         const oUnder = dec(under?.price);
         const linha = over?.points;
-        if (ok(oOver) && ok(oUnder) && typeof linha === 'number') {
+        if (ok(oOver) && ok(oUnder) && typeof linha === 'number' && ehMeiaLinha(linha)) {
           out.push({
             esporte, evento: eventoStr, dataHora,
             mercado: TOTAL_LABEL[sportId] || 'Total',
@@ -193,7 +195,7 @@ export class PinnacleScraper implements OddsScraper {
         const oH = dec(hp?.price);
         const oA = dec(ap?.price);
         const linha = hp?.points;
-        if (ok(oH) && ok(oA) && typeof linha === 'number') {
+        if (ok(oH) && ok(oA) && typeof linha === 'number' && ehMeiaLinha(linha)) {
           const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
           out.push({
             esporte, evento: eventoStr, dataHora,

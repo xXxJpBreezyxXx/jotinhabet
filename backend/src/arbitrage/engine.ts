@@ -71,6 +71,74 @@ export class ArbitrageEngine {
     return unicas.sort((a, b) => b.lucroGarantidoPerc - a.lucroGarantidoPerc);
   }
 
+  /**
+   * MELHOR COMBINAÇÃO entre N casas: para cada aposta (esporte + evento + mercado +
+   * linha), agrupa as ofertas de todas as casas e escolhe a MAIOR odd de cada lado
+   * (em casas diferentes) — o ROI ótimo. Emite UMA oportunidade por aposta, o que
+   * também deduplica naturalmente (bem menos ruído que o cruzamento par a par).
+   */
+  async encontrarMelhoresOportunidades(
+    fontes: Array<{ nome: string; odds: ScrapedOdd[] }>
+  ): Promise<ArbitrageOpportunity[]> {
+    interface OfertaAlinhada { casa: string; evento: string; dataHora?: string; oddA: number; oddB: number; opcaoA: string; opcaoB: string; }
+    interface Cluster {
+      evento: string; mercado: string; linha?: number; esporte?: string; dataHora?: string;
+      labelA: string; labelB: string; ofertas: OfertaAlinhada[]; casas: Set<string>;
+    }
+    const normEsp = (s?: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    const clusters: Cluster[] = [];
+
+    for (const fonte of fontes) {
+      for (const odd of fonte.odds) {
+        if (!(odd.oddA > 1) || !(odd.oddB > 1)) continue;
+        let c = clusters.find(
+          (cl) =>
+            normEsp(cl.esporte) === normEsp(odd.esporte) &&
+            mesmaOferta(cl.mercado, cl.linha, odd.mercado, odd.linha) &&
+            mesmoHorario(cl.dataHora, odd.dataHora) &&
+            areEventsSame(cl.evento, odd.evento)
+        );
+        let oddA = odd.oddA, oddB = odd.oddB, opcaoA = odd.opcaoA, opcaoB = odd.opcaoB;
+        if (!c) {
+          c = {
+            evento: odd.evento, mercado: odd.mercado, linha: odd.linha, esporte: odd.esporte,
+            dataHora: odd.dataHora, labelA: odd.opcaoA, labelB: odd.opcaoB, ofertas: [], casas: new Set(),
+          };
+          clusters.push(c);
+        } else if (!areTeamsSame(odd.opcaoA, c.labelA) && areTeamsSame(odd.opcaoA, c.labelB)) {
+          // Casa listou os lados invertidos em relação ao cluster → troca.
+          oddA = odd.oddB; oddB = odd.oddA; opcaoA = odd.opcaoB; opcaoB = odd.opcaoA;
+        }
+        c.ofertas.push({ casa: fonte.nome, evento: odd.evento, dataHora: odd.dataHora, oddA, oddB, opcaoA, opcaoB });
+        c.casas.add(fonte.nome);
+      }
+    }
+
+    const ops: ArbitrageOpportunity[] = [];
+    for (const c of clusters) {
+      if (c.casas.size < 2) continue; // arbitragem exige 2+ casas
+      // Melhor odd do lado A; melhor do lado B numa casa DIFERENTE (arb real entre 2 casas).
+      const melhorA = c.ofertas.reduce((m, o) => (o.oddA > m.oddA ? o : m));
+      const candidatosB = c.ofertas.filter((o) => o.casa !== melhorA.casa);
+      if (candidatosB.length === 0) continue;
+      const melhorB = candidatosB.reduce((m, o) => (o.oddB > m.oddB ? o : m));
+
+      const totalPerc = 1 / melhorA.oddA + 1 / melhorB.oddB;
+      if (totalPerc >= 1) continue;
+
+      const forca = forcaMatchEvento(melhorA.evento, melhorB.evento);
+      const tempoConhecido = parseKickoff(melhorA.dataHora) !== null && parseKickoff(melhorB.dataHora) !== null;
+
+      const opp = this.criarOportunidade(
+        c.evento, c.mercado, melhorA.opcaoA, melhorB.opcaoB,
+        melhorA.oddA, melhorB.oddB, melhorA.casa, melhorB.casa, totalPerc, c.esporte
+      );
+      ops.push(this.enriquecer(opp, forca, tempoConhecido, c.dataHora, c.linha));
+    }
+
+    return ops.sort((a, b) => b.lucroGarantidoPerc - a.lucroGarantidoPerc);
+  }
+
   private testarCruze(
     odd1: ScrapedOdd, odd2: ScrapedOdd,
     nomeCasa1: string, nomeCasa2: string,
@@ -82,19 +150,9 @@ export class ArbitrageEngine {
     const tempoConhecido = parseKickoff(odd1.dataHora) !== null && parseKickoff(odd2.dataHora) !== null;
 
     const dataHora = odd1.dataHora || odd2.dataHora;
-    const quando = this.fmtDataEvento(dataHora);
-
-    // Enriquece cada oportunidade com linha, data, confiança e alerta antes de guardar.
+    const linha = odd1.linha ?? odd2.linha;
     const registrar = (opp: ArbitrageOpportunity) => {
-      opp.linha = odd1.linha ?? odd2.linha;
-      opp.dataHora = dataHora;
-      // Anexa "(DD/MM/AAAA HH:MM)" ao evento (mesmo formato do SureRadar) para o
-      // filtro de data e a exibição funcionarem uniformemente.
-      if (quando && !/\(\d{2}\/\d{2}/.test(opp.evento)) opp.evento = `${opp.evento} (${quando})`;
-      const { confianca, alerta } = this.avaliarConfianca(forca, tempoConhecido, opp.lucroGarantidoPerc);
-      opp.confianca = confianca;
-      if (alerta) opp.alertaPrecisao = alerta;
-      oportunidades.push(opp);
+      oportunidades.push(this.enriquecer(opp, forca, tempoConhecido, dataHora, linha));
     };
 
     if (direto) {
@@ -150,6 +208,26 @@ export class ArbitrageEngine {
     if (roiPct > 15) motivos.push('ROI muito alto (possível odd travada/erro)');
 
     return { confianca: parseFloat(confianca.toFixed(2)), alerta: motivos.length ? motivos.join('; ') : undefined };
+  }
+
+  /** Anexa linha/data/confiança/alerta a uma oportunidade recém-criada. */
+  private enriquecer(
+    opp: ArbitrageOpportunity,
+    forca: number,
+    tempoConhecido: boolean,
+    dataHora?: string,
+    linha?: number
+  ): ArbitrageOpportunity {
+    opp.linha = linha;
+    opp.dataHora = dataHora;
+    const quando = this.fmtDataEvento(dataHora);
+    // Anexa "(DD/MM/AAAA HH:MM)" ao evento (mesmo formato do SureRadar) para o
+    // filtro de data e a exibição funcionarem uniformemente.
+    if (quando && !/\(\d{2}\/\d{2}/.test(opp.evento)) opp.evento = `${opp.evento} (${quando})`;
+    const { confianca, alerta } = this.avaliarConfianca(forca, tempoConhecido, opp.lucroGarantidoPerc);
+    opp.confianca = confianca;
+    if (alerta) opp.alertaPrecisao = alerta;
+    return opp;
   }
 
   /** Formata o início da partida como "DD/MM/AAAA HH:MM" (America/Sao_Paulo) — null se não parseável. */
