@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -aoiE \"\\(senha|password|apikey|api_key|token|cookie|authorization|sk-proj|eyJ|ENCRYPTION_KEY|service_role\\)[^ ]{0,40}\" scanner.log)"
+      "Bash(grep -aoiE \"\\(senha|password|apikey|api_key|token|cookie|authorization|sk-proj|eyJ|ENCRYPTION_KEY|service_role\\)[^ ]{0,40}\" scanner.log)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }
