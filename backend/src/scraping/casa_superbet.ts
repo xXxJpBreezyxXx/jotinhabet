@@ -16,13 +16,20 @@ import { fetchTextoComRetry } from '../utils/http';
 
 const BASE = 'https://production-superbet-offer-br.freetls.fastly.net/v2/pt-BR';
 
-// esporte interno → sportId da Superbet (confirmado no recon: 5=Futebol, 2=Tenis).
+// esporte interno → sportId da Superbet (confirmado: 5=Futebol, 2=Tenis, 4=Basquete).
 const SPORT_ID: Record<string, number> = {
   Futebol: 5,
   Tenis: 2,
   Tênis: 2,
+  Basquete: 4,
 };
-const SPORT_LABEL: Record<number, string> = { 5: 'Futebol', 2: 'Tenis' };
+const SPORT_LABEL: Record<number, string> = { 5: 'Futebol', 2: 'Tenis', 4: 'Basquete' };
+
+// Mercado de total DA PARTIDA por esporte (nome exato) — evita props de jogador.
+const TOTAL_CFG: Record<number, { market: string; label: string }> = {
+  5: { market: 'Total de Gols', label: 'Total de Gols' },
+  4: { market: 'Total de Pontos (Inc. prorrogação)', label: 'Total de Pontos' },
+};
 
 interface SbOdd {
   price: number;
@@ -179,8 +186,10 @@ export class SuperbetScraper implements OddsScraper {
 
     const out: ScrapedOdd[] = [];
 
-    // Total de Gols: agrupa por specialBetValue (a linha) → par Over/Under.
-    const totais = (ev.odds || []).filter((o) => o.marketName === 'Total de Gols' && o.status === 'active');
+    // Total DA PARTIDA (gols/pontos por esporte): agrupa por specialBetValue (linha) → Over/Under.
+    const cfg = TOTAL_CFG[sportId];
+    if (!cfg) return out;
+    const totais = (ev.odds || []).filter((o) => o.marketName === cfg.market && o.status === 'active');
     const porLinha = new Map<string, { over?: SbOdd; under?: SbOdd }>();
     for (const o of totais) {
       const sbv = o.specialBetValue || '';
@@ -196,7 +205,7 @@ export class SuperbetScraper implements OddsScraper {
         if (!Number.isFinite(linha)) continue;
         out.push({
           esporte, evento: eventoStr, dataHora,
-          mercado: 'Total de Gols',
+          mercado: cfg.label,
           linha,
           opcaoA: rotuloOver(linha),
           opcaoB: rotuloUnder(linha),
