@@ -194,11 +194,14 @@ export class PinnacleScraper implements OddsScraper {
         const oA = dec(ap?.price);
         const linha = hp?.points;
         if (ok(oH) && ok(oA) && typeof linha === 'number') {
+          const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
           out.push({
             esporte, evento: eventoStr, dataHora,
             mercado: 'Handicap',
             linha,
-            opcaoA: home, opcaoB: away, oddA: oH, oddB: oA,
+            opcaoA: `${home} (${sinal(linha)})`,
+            opcaoB: `${away} (${sinal(-linha)})`,
+            oddA: oH, oddB: oA,
           });
         }
       }

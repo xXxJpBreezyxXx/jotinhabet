@@ -198,12 +198,13 @@ export class KambiScraper implements OddsScraper {
       const oddA = o(one.odds);
       const oddB = o(two.odds);
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
+      const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
       return {
         esporte, evento, dataHora, url,
         mercado: /handicap|desvantagem/i.test(criterio) ? criterio : `Handicap ${criterio}`.trim(),
         linha,
-        opcaoA: ev.homeName!,
-        opcaoB: ev.awayName!,
+        opcaoA: `${ev.homeName} (${sinal(linha)})`,
+        opcaoB: `${ev.awayName} (${sinal(-linha)})`,
         oddA, oddB,
       };
     }

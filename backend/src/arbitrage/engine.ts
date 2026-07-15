@@ -19,6 +19,7 @@ export interface ArbitrageOpportunity {
   esporte?: string;
   url?: string;
   linha?: number;            // linha do mercado (over/under, handicap), quando aplicável
+  dataHora?: string;         // início da partida (ISO), quando disponível
   confianca?: number;        // 0..1 — qualidade do casamento (time + horário + sanidade do ROI)
   alertaPrecisao?: string;   // motivo de cautela (ROI alto, horário desconhecido, match fraco)
 }
@@ -80,9 +81,16 @@ export class ArbitrageEngine {
     const forca = forcaMatchEvento(odd1.evento, odd2.evento);
     const tempoConhecido = parseKickoff(odd1.dataHora) !== null && parseKickoff(odd2.dataHora) !== null;
 
-    // Enriquece cada oportunidade com linha, confiança e alerta de precisão antes de guardar.
+    const dataHora = odd1.dataHora || odd2.dataHora;
+    const quando = this.fmtDataEvento(dataHora);
+
+    // Enriquece cada oportunidade com linha, data, confiança e alerta antes de guardar.
     const registrar = (opp: ArbitrageOpportunity) => {
       opp.linha = odd1.linha ?? odd2.linha;
+      opp.dataHora = dataHora;
+      // Anexa "(DD/MM/AAAA HH:MM)" ao evento (mesmo formato do SureRadar) para o
+      // filtro de data e a exibição funcionarem uniformemente.
+      if (quando && !/\(\d{2}\/\d{2}/.test(opp.evento)) opp.evento = `${opp.evento} (${quando})`;
       const { confianca, alerta } = this.avaliarConfianca(forca, tempoConhecido, opp.lucroGarantidoPerc);
       opp.confianca = confianca;
       if (alerta) opp.alertaPrecisao = alerta;
@@ -142,6 +150,16 @@ export class ArbitrageEngine {
     if (roiPct > 15) motivos.push('ROI muito alto (possível odd travada/erro)');
 
     return { confianca: parseFloat(confianca.toFixed(2)), alerta: motivos.length ? motivos.join('; ') : undefined };
+  }
+
+  /** Formata o início da partida como "DD/MM/AAAA HH:MM" (America/Sao_Paulo) — null se não parseável. */
+  private fmtDataEvento(dataHora?: string): string | null {
+    const t = parseKickoff(dataHora);
+    if (t === null) return null;
+    return new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(new Date(t)).replace(',', '');
   }
 
   private criarOportunidade(
