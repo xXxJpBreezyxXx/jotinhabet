@@ -130,7 +130,14 @@ export class ArbitrageScannerV2 {
   ];
   private engine = new ArbitrageEngine();
 
-  async executarVarredura(dataFiltro?: string, aoVivo?: boolean, sureradarOnly?: boolean): Promise<any[]> {
+  /** Nomes dos scrapers que usam API direta (rápidos, sem browser) — usados no modo apenasApi. */
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']);
+
+  /**
+   * @param apenasApi quando true, o cruzamento entre casas usa SÓ os scrapers de API
+   *   (rápidos, sem Playwright) — permite rodar de forma frequente no scheduler.
+   */
+  async executarVarredura(dataFiltro?: string, aoVivo?: boolean, sureradarOnly?: boolean, apenasApi?: boolean): Promise<any[]> {
     // 🧹 Limpeza de banco: deletar todas as oportunidades do banco com mais de 24 horas
     try {
       const limite24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -153,14 +160,19 @@ export class ArbitrageScannerV2 {
     if (sureradarOnly) {
       console.log(`\n🔍 [Scanner V2] Iniciando varredura RÁPIDA (Apenas SureRadar)...`);
     } else {
-      console.log(`\n🔍 [Scanner V2] Iniciando varredura COMPLETA (5 Casas + SureRadar)...`);
+      const scrapersUsados = apenasApi
+        ? this.scrapers.filter((s) => ArbitrageScannerV2.SCRAPERS_API.has(s.getNome()))
+        : this.scrapers;
+      console.log(
+        `\n🔍 [Scanner V2] Iniciando varredura ${apenasApi ? 'API' : 'COMPLETA'} (${scrapersUsados.map((s) => s.getNome()).join(', ')} + SureRadar)...`
+      );
       const esportes = ['Futebol', 'Basquete', 'Tenis'];
       const datas = [dataFiltro || 'Hoje'];
 
       const todasOdds: any[] = [];
-      
+
       // Coleta sequencial para evitar estouro de memória no modo Headless
-      for (const scraper of this.scrapers) {
+      for (const scraper of scrapersUsados) {
         try {
           const odds = await scraper.executarCrawler(esportes, datas, true);
           todasOdds.push({ nome: scraper.getNome(), odds });
@@ -317,11 +329,22 @@ export class ArbitrageScannerV2 {
               console.error('⚠️ [Scanner V2] Erro ao checar se evento já possui aposta confirmada:', err);
             }
             
-            // WhatsApp Alert for SureRadar opportunities with ROI >= 5% happening today or tomorrow
-            if (!alreadyEntered && opp.lucroGarantidoPerc >= 5.0 && opp.url?.includes('sureradar') && isTodayOrTomorrow(opp.evento)) {
-             const alertKey = `${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${opp.lucroGarantidoPerc.toFixed(1)}`;
+            // Decide se alerta no WhatsApp. Duas fontes:
+            //  - SureRadar (curado): ROI >= 5%.
+            //  - Motor próprio (cruzamento entre casas): exige alta CONFIANÇA e ROI numa
+            //    faixa sã (2-15%) e sem alerta de precisão — evita spam de falso positivo
+            //    (ROI absurdo = odd travada/erro; horário/time incerto já foram sinalizados).
+            const ehSureRadar = !!opp.url?.includes('sureradar');
+            const roi = opp.lucroGarantidoPerc;
+            const alertarSureRadar = ehSureRadar && roi >= 5.0;
+            const alertarMotor =
+              !ehSureRadar && (opp.confianca ?? 0) >= 0.9 && roi >= 2.0 && roi <= 15.0 && !opp.alertaPrecisao;
+
+            if (!alreadyEntered && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {
+             const fonte = ehSureRadar ? 'SureRadar' : 'Motor';
+             const alertKey = `${fonte}_${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${roi.toFixed(1)}`;
              if (!alertAlreadySent(alertKey)) {
-               console.log(`✉️ [WhatsApp] Disparando alerta SureRadar (ROI ${opp.lucroGarantidoPerc}%) para: ${opp.evento}`);
+               console.log(`✉️ [WhatsApp] Disparando alerta ${fonte} (ROI ${roi}%${ehSureRadar ? '' : `, conf ${opp.confianca}`}) para: ${opp.evento}`);
                const notifier = new WhatsAppNotifier();
                const success = await notifier.enviarAlerta({
                  evento: opp.evento,
@@ -334,15 +357,18 @@ export class ArbitrageScannerV2 {
                  stake2: parseFloat(distr.apostaB),
                  investimento: stake,
                  lucro: parseFloat(distr.lucroR$),
-                 roi: opp.lucroGarantidoPerc,
+                 roi: roi,
                  casa1: opp.casaA,
-                 casa2: opp.casaB
+                 casa2: opp.casaB,
+                 nota: ehSureRadar
+                   ? undefined
+                   : `Cruzamento próprio ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`,
                });
                if (success) {
                  markAlertAsSent(alertKey);
                }
              } else {
-               console.log(`ℹ️ [WhatsApp] Alerta ignorado (já enviado anteriormente): ${opp.evento} (${opp.lucroGarantidoPerc}%)`);
+               console.log(`ℹ️ [WhatsApp] Alerta ignorado (já enviado): ${opp.evento} (${roi}%)`);
              }
            }
         }

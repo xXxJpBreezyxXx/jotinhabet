@@ -45,8 +45,11 @@ export class SchedulerService {
 
     this.isRunning = true;
     try {
-      console.log('⏰ [Scheduler] Executando varredura agendada de SureRadar...');
-      await this.scanner.executarVarredura(undefined, false, true);
+      // Varredura API: SureRadar + cruzamento entre casas de API (KTO, Superbet, ...) —
+      // rápida e sem Playwright, então pode rodar a cada ciclo. Dispara alertas de
+      // ambas as fontes (SureRadar e motor próprio de alta confiança).
+      console.log('⏰ [Scheduler] Executando varredura agendada (API + SureRadar)...');
+      await this.scanner.executarVarredura(undefined, false, false, true);
     } catch (err) {
       console.error('❌ [Scheduler] Erro crítico no job de varredura:', err);
     } finally {

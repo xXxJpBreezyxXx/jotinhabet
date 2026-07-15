@@ -15,6 +15,7 @@ export interface WhatsAppAlert {
   roi: number;
   casa1?: string;
   casa2?: string;
+  nota?: string; // linha extra (ex.: fonte/confiança para surebets do motor próprio)
 }
 
 export class WhatsAppNotifier {
@@ -141,7 +142,7 @@ export class WhatsAppNotifier {
 👉 Odd: *${a.odd2.toFixed(2)}* | Aporte: *R$ ${a.stake2.toFixed(2)}*
 🔗 Abrir: ${linkB}
 
-📊 Lucro: *R$ ${a.lucro.toFixed(2)}* (Total: R$ ${a.investimento.toFixed(2)})
+📊 Lucro: *R$ ${a.lucro.toFixed(2)}* (Total: R$ ${a.investimento.toFixed(2)})${a.nota ? `\n🧭 ${a.nota}` : ''}
 
 ⏱️ _Odds coletadas agora. As cotações mudam rápido — revalide no painel antes de apostar._`;
   }
