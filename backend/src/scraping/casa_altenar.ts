@@ -37,8 +37,10 @@ interface AltResp {
   champs?: AltChamp[]; sports?: AltSport[]; categories?: AltCategory[];
 }
 
-const SPORT_ID: Record<string, number> = { Futebol: 66, Basquete: 67, Tenis: 68, Tênis: 68 };
-const SPORT_LABEL: Record<number, string> = { 66: 'Futebol', 67: 'Basquete', 68: 'Tenis' };
+// sportId 145 = E-Sports (confirmado ao vivo: VCT/Valorant, Esports World Cup, etc.).
+// Neste endpoint só vem o mercado principal (Vencedor da partida) para e-sports.
+const SPORT_ID: Record<string, number> = { Futebol: 66, Basquete: 67, Tenis: 68, Tênis: 68, Esports: 145 };
+const SPORT_LABEL: Record<number, string> = { 66: 'Futebol', 67: 'Basquete', 68: 'Tenis', 145: 'Esports' };
 const TOTAL_LABEL: Record<number, string> = { 66: 'Total de Gols', 67: 'Total de Pontos', 68: 'Total de Games' };
 
 export class AltenarWidgetScraper implements OddsScraper {
@@ -161,13 +163,15 @@ export class AltenarWidgetScraper implements OddsScraper {
         // Nome base sem o sufixo "(incluindo Prorrogação)" — normaliza futebol/basquete/tênis.
         const base = (m.name || '').replace(/\s*\(incluindo prorroga[cç][aã]o\)\s*/i, '').trim();
 
-        // --- Resultado Final (1x2 3-way / Vencedor 2-way) ---
-        if (base === '1x2' || base === 'Vencedor') {
+        // --- Resultado Final (1x2 3-way / Vencedor 2-way; e-sports: "Vencedor da partida") ---
+        if (base === '1x2' || base === 'Vencedor' || base === 'Vencedor da partida') {
           const oHome = oddsM.find((o) => o.competitorId === cids[0]);
           const oAway = oddsM.find((o) => o.competitorId === cids[1]);
           const oDraw = oddsM.find((o) => !o.competitorId || /empate|draw|^x$/i.test(o.name || ''));
           if (!ativa(oHome) || !ativa(oAway)) continue;
           if (oDraw && ativa(oDraw)) {
+            // Diretrizes §5: e-sports não admite 1X2/3-vias (empate de BO2) → descarta.
+            if (esporte === 'Esports') continue;
             out.push({
               esporte, evento, dataHora, mercado: 'Resultado Final',
               opcaoA: `Vitória ${home}`, opcaoB: `${away} ou Empate`,
