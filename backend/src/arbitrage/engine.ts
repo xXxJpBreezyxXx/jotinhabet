@@ -87,18 +87,51 @@ export class ArbitrageEngine {
       labelA: string; labelB: string; ofertas: OfertaAlinhada[]; casas: Set<string>;
     }
     const normEsp = (s?: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    // Handicap COM SINAL embutido no rótulo da opção (ex.: "Time A (-1.5)").
+    // null quando o rótulo não carrega linha (RF, totais, DNB...).
+    const linhaDoRotulo = (s: string): number | null => {
+      const m = (s || '').match(/\(([+-]?\d+(?:\.\d+)?)\)\s*$/);
+      return m ? parseFloat(m[1]) : null;
+    };
     const clusters: Cluster[] = [];
+
+    /**
+     * Alinhamento da oferta ao cluster, SIGN-AWARE para handicaps. Alinhar só por
+     * NOME de time ignora o sinal: casas que ancoram a linha no time oposto
+     * ("Phantom (-1.5)/K27 (+1.5)" vs "K27 (-1.5)/Phantom (+1.5)") têm |linha| e
+     * times iguais, mas são a oferta ESPELHADA — misturá-las pareava K27(-1.5) com
+     * Phantom(-1.5) (pernas não complementares) e fabricava ROI de 20-40%, inclusive
+     * 2 alertas falsos no WhatsApp. Retorna null quando a oferta NÃO pertence ao
+     * cluster (aí ela forma/acha um cluster na convenção dela — nada se perde).
+     */
+    const alinharAoCluster = (cl: Cluster, o: ScrapedOdd): { swap: boolean } | null => {
+      const swap = !areTeamsSame(o.opcaoA, cl.labelA) && areTeamsSame(o.opcaoA, cl.labelB);
+      const ladoA = swap ? o.opcaoB : o.opcaoA;
+      const sinalCluster = linhaDoRotulo(cl.labelA);
+      const sinalOferta = linhaDoRotulo(ladoA);
+      if (sinalCluster !== null && sinalOferta !== null && Math.abs(sinalCluster - sinalOferta) > 1e-9) {
+        return null; // oferta espelhada — não é o mesmo mercado deste cluster
+      }
+      return { swap };
+    };
 
     for (const fonte of fontes) {
       for (const odd of fonte.odds) {
         if (!(odd.oddA > 1) || !(odd.oddB > 1)) continue;
-        let c = clusters.find(
-          (cl) =>
+        let c: Cluster | undefined;
+        let swap = false;
+        for (const cl of clusters) {
+          if (
             normEsp(cl.esporte) === normEsp(odd.esporte) &&
             mesmaOferta(cl.mercado, cl.linha, odd.mercado, odd.linha) &&
             mesmoHorario(cl.dataHora, odd.dataHora) &&
             areEventsSame(cl.evento, odd.evento)
-        );
+          ) {
+            const al = alinharAoCluster(cl, odd);
+            if (al) { c = cl; swap = al.swap; break; }
+            // sign-aware rejeitou: segue procurando (pode existir o cluster espelhado)
+          }
+        }
         let oddA = odd.oddA, oddB = odd.oddB, opcaoA = odd.opcaoA, opcaoB = odd.opcaoB;
         if (!c) {
           c = {
@@ -106,7 +139,7 @@ export class ArbitrageEngine {
             dataHora: odd.dataHora, labelA: odd.opcaoA, labelB: odd.opcaoB, ofertas: [], casas: new Set(),
           };
           clusters.push(c);
-        } else if (!areTeamsSame(odd.opcaoA, c.labelA) && areTeamsSame(odd.opcaoA, c.labelB)) {
+        } else if (swap) {
           // Casa listou os lados invertidos em relação ao cluster → troca.
           oddA = odd.oddB; oddB = odd.oddA; opcaoA = odd.opcaoB; opcaoB = odd.opcaoA;
         }
