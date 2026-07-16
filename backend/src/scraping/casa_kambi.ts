@@ -284,6 +284,13 @@ export class KambiScraper implements OddsScraper {
     if (one && two && !one.line) {
       const oddHome = o(one.odds);
       const oddAway = o(two.odds);
+      // Vencedor de SEGMENTO (1º quarto/tempo/set/período) NÃO é match-winner:
+      // preserva o critério pro normalizador segmentar (RESULTADO_FINAL_Q1 ≠ _FT).
+      // Sem isto, "Vencedor - 1º Quarto" era carimbado 'Resultado Final' e podia
+      // cruzar com o vencedor da PARTIDA de outra casa.
+      const rotuloRF = /quarto|quarter|per[ií]odo|\bset\b|tempo|half/i.test(criterio)
+        ? criterio
+        : 'Resultado Final';
       // 3-way (empate presente): dupla chance sintética SÓ fora de e-sports.
       // Diretrizes §5: e-sports não admite 1X2/3-vias (BO2 empata 1-1) → descarta.
       if (cross && this.oddOk(o(cross.odds))) {
@@ -293,7 +300,7 @@ export class KambiScraper implements OddsScraper {
         // Emite só a primeira perna de dupla chance; a inversão é redundante para 2-way arb.
         return {
           esporte, evento, dataHora, url,
-          mercado: 'Resultado Final',
+          mercado: rotuloRF,
           opcaoA: `Vitória ${ev.homeName}`,
           opcaoB: `${ev.awayName} ou Empate`,
           oddA: oddHome,
@@ -306,7 +313,7 @@ export class KambiScraper implements OddsScraper {
         const ehVencedorMapa = ehEsports && /\bmapa\s*\d+\b/i.test(criterio);
         return {
           esporte, evento, dataHora, url,
-          mercado: ehVencedorMapa ? criterio : 'Resultado Final',
+          mercado: ehVencedorMapa ? criterio : rotuloRF,
           opcaoA: ev.homeName!,
           opcaoB: ev.awayName!,
           oddA: oddHome,

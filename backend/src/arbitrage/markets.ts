@@ -23,8 +23,17 @@
 
 /** Período do mercado a partir do rótulo cru. */
 function periodo(s: string): string {
-  if (/1º?\s*tempo|primeiro tempo|1st half|\b1t\b|1º set|1st set/.test(s)) return '1T';
-  if (/2º?\s*tempo|segundo tempo|2nd half|\b2t\b|2º set|2nd set/.test(s)) return '2T';
+  // Segmentos específicos ANTES dos tempos — "1º quarto"/"3º set"/"2º período" não
+  // podem virar FT nem colidir entre si (mesma família do bug Mapa 1 × Mapa 2:
+  // total do 1º quarto a 43.5 não pode cruzar com o do 2º quarto a 43.5).
+  const q = s.match(/([1-4])º?\s*quarto|\bq([1-4])\b|([1-4])(?:st|nd|rd|th)\s*quarter/);
+  if (q) return `Q${q[1] || q[2] || q[3]}`;
+  const st = s.match(/([1-5])º?\s*set|([1-5])(?:st|nd|rd|th)\s*set/);
+  if (st) return `S${st[1] || st[2]}`;
+  const pr = s.match(/([1-3])º?\s*per[ií]odo/);
+  if (pr) return `P${pr[1]}`;
+  if (/1º?\s*tempo|primeiro tempo|1st half|\b1t\b/.test(s)) return '1T';
+  if (/2º?\s*tempo|segundo tempo|2nd half|\b2t\b/.test(s)) return '2T';
   return 'FT';
 }
 
@@ -40,7 +49,7 @@ function mapa(s: string): string {
 
 // Termos que indicam que um sufixo pós-hífen é TEXTO DE MERCADO, não nome de time.
 const TERMO_MERCADO =
-  /total|mais|menos|over|under|handicap|vencedor|resultado|placar|rodada|round|mapa|\bmap\b|kill|gol|goal|ponto|game|\bset\b|escanteio|cart[aã]o|cart[oõ]es|chute|shot|prorroga|[ií]mpar|\bpar\b|corret|margem|dura[cç][aã]o|jogador|player|pistol|d[uú]pla/;
+  /total|mais|menos|over|under|handicap|vencedor|resultado|placar|rodada|round|mapa|\bmap\b|kill|gol|goal|ponto|game|\bset\b|escanteio|cart[aã]o|cart[oõ]es|chute|shot|prorroga|[ií]mpar|\bpar\b|corret|margem|dura[cç][aã]o|jogador|player|pistol|d[uú]pla|quarto|quarter|per[ií]odo|tempo|half/;
 
 /**
  * Escopo POR TIME no fim do rótulo ("Total de cartões - Chapecoense" → "_CHAPECOENSE").
