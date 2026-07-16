@@ -28,6 +28,16 @@ function periodo(s: string): string {
   return 'FT';
 }
 
+/**
+ * Segmento de MAPA em e-sports ("Mapa 1" → "M1"), ou "" quando não houver.
+ * Essencial para não colapsar "Mapa 1 - Total de rodadas" com "Mapa 2 - ...":
+ * over 21.5 do mapa 1 nunca pode cruzar com under 21.5 do mapa 2.
+ */
+function mapa(s: string): string {
+  const m = s.match(/mapa\s*(\d+)|\bmap\s*(\d+)\b/);
+  return m ? `M${m[1] || m[2]}` : '';
+}
+
 /** Assunto do total/handicap (o que está sendo contado). */
 function assunto(s: string): string {
   if (/escanteio|corner/.test(s)) return 'ESCANTEIOS';
@@ -37,6 +47,14 @@ function assunto(s: string): string {
   if (/game/.test(s)) return 'GAMES';
   if (/\bset/.test(s)) return 'SETS';
   if (/ponto|point/.test(s)) return 'PONTOS';
+  // E-sports: o ASSUNTO da estatística separa mercados que senão colapsariam em GERAL
+  // (kills ≠ torres ≠ minutos) e poderiam cruzar falso ao coincidir a linha.
+  if (/kill|abate/.test(s)) return 'KILLS';
+  if (/torre|tower/.test(s)) return 'TORRES';
+  if (/minuto|minute/.test(s)) return 'MINUTOS';
+  // Rodadas antes de mapas (ex.: "Mapa 1 - Total de rodadas" é ROUNDS, não MAPAS).
+  if (/rodada|\bround/.test(s)) return 'ROUNDS';
+  if (/mapa|\bmap\b/.test(s)) return 'MAPAS';
   return 'GERAL';
 }
 
@@ -47,12 +65,21 @@ function assunto(s: string): string {
  */
 export function normalizarMercado(raw: string): string {
   const s = (raw || '').toString().toLowerCase();
+  // Segmento: em e-sports usa o mapa (M1/M2/...); nos demais, o período (FT/1T/2T).
+  const seg = mapa(s) || periodo(s);
   // DNB (Empate Anula / Draw No Bet) antes de tudo — não deve virar RESULTADO_FINAL.
   if (/empate anula|empate devolve|draw no bet|\bdnb\b/.test(s)) return `DNB_${periodo(s)}`;
-  if (/handicap|desvantagem|spread|linha asi/.test(s)) return `HANDICAP_${assunto(s)}_${periodo(s)}`;
-  if (/total|over|under|mais de|menos de|acima|abaixo/.test(s)) return `TOTAIS_${assunto(s)}_${periodo(s)}`;
+  if (/handicap|desvantagem|spread|linha asi/.test(s)) return `HANDICAP_${assunto(s)}_${seg}`;
+  if (/total|over|under|mais de|menos de|acima|abaixo/.test(s)) return `TOTAIS_${assunto(s)}_${seg}`;
   // BTTS — aceita "ambas"/"ambos ... marcam" e variações.
   if (/amb[oa]s.*marcam|both teams to score|btts/.test(s)) return `AMBAS_MARCAM_${periodo(s)}`;
+  // Vencedor de MAPA específico em e-sports ("Mapa 1"/"Mapa 2", 2-vias) — distinto do
+  // vencedor da partida. Totais/handicap já foram tratados acima, então aqui só sobra o
+  // vencedor de mapa cru.
+  {
+    const m = s.match(/\bmapa\s*(\d+)\b|\bmap\s*(\d+)\s*winner\b/);
+    if (m) return `VENCEDOR_MAPA_M${m[1] || m[2]}`;
+  }
   if (/resultado final|match winner|1\s*x\s*2|vencedor|money\s*line|full time result|resultado do jogo|1x2/.test(s)) {
     return `RESULTADO_FINAL_${periodo(s)}`;
   }

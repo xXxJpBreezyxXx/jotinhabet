@@ -17,16 +17,24 @@ import { fetchTextoComRetry } from '../utils/http';
 const BASE = 'https://guest.api.arcadia.pinnacle.com/0.1';
 const API_KEY = 'CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R'; // guest key pública usada pelo site da Pinnacle
 
-// esporte interno → Pinnacle sportId (descoberto: Soccer=29, Tennis=33, Basketball=4).
+// esporte interno → Pinnacle sportId (descoberto: Soccer=29, Tennis=33, Basketball=4, E-Sports=12).
 const SPORT_ID: Record<string, number> = {
   Futebol: 29,
   Tenis: 33,
   Tênis: 33,
   Basquete: 4,
+  Esports: 12,
+  'E-Sports': 12,
 };
-const SPORT_LABEL: Record<number, string> = { 29: 'Futebol', 33: 'Tenis', 4: 'Basquete' };
-// Rótulo do total por esporte, para o assunto normalizar certo (gols/games/pontos).
-const TOTAL_LABEL: Record<number, string> = { 29: 'Total de Gols', 33: 'Total de Games', 4: 'Total de Pontos' };
+const SPORT_LABEL: Record<number, string> = { 29: 'Futebol', 33: 'Tenis', 4: 'Basquete', 12: 'Esports' };
+// Rótulo do total por esporte, para o assunto normalizar certo (gols/games/pontos/mapas).
+// Em e-sports o total de jogo completo (period 0) é o total de MAPAS → normaliza p/ TOTAIS_MAPAS.
+const TOTAL_LABEL: Record<number, string> = {
+  29: 'Total de Gols',
+  33: 'Total de Games',
+  4: 'Total de Pontos',
+  12: 'Total de Mapas',
+};
 
 interface PinPrice {
   designation?: string; // home | away | draw | over | under
@@ -146,6 +154,7 @@ export class PinnacleScraper implements OddsScraper {
     const markets: PinMarket[] = JSON.parse(r.body);
 
     const esporte = SPORT_LABEL[sportId] || String(sportId);
+    const ehEsports = sportId === 12;
     const dataHora = ev.startTime || 'Hoje';
     const eventoStr = `${home} vs ${away}`;
     const dec = (p?: number) => (typeof p === 'number' ? this.americanoParaDecimal(p) : NaN);
@@ -162,8 +171,9 @@ export class PinnacleScraper implements OddsScraper {
         const a = dec(mk.prices.find((p) => p.designation === 'away')?.price);
         const d = dec(mk.prices.find((p) => p.designation === 'draw')?.price);
         if (Number.isFinite(d) && d > 1) {
-          // 3-way (futebol) → dupla chance sintética
-          if (ok(h) && ok(a)) {
+          // 3-way (futebol) → dupla chance sintética. Diretrizes §5: e-sports não admite
+          // 1X2/3-vias (empate de BO2) → não sintetiza (deixa passar só o moneyline 2-vias).
+          if (ok(h) && ok(a) && !ehEsports) {
             out.push({
               esporte, evento: eventoStr, dataHora,
               mercado: 'Resultado Final',
@@ -206,7 +216,8 @@ export class PinnacleScraper implements OddsScraper {
           const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
           out.push({
             esporte, evento: eventoStr, dataHora,
-            mercado: 'Handicap',
+            // Em e-sports o spread de jogo completo é handicap de MAPAS → normaliza p/ HANDICAP_MAPAS.
+            mercado: ehEsports ? 'Handicap de Mapas' : 'Handicap',
             linha,
             opcaoA: `${home} (${sinal(linha)})`,
             opcaoB: `${away} (${sinal(-linha)})`,

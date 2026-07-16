@@ -189,7 +189,7 @@ export class ArbitrageScannerV2 {
       console.log(
         `\n🔍 [Scanner V2] Iniciando varredura ${apenasApi ? 'API' : 'COMPLETA'} (${scrapersUsados.map((s) => s.getNome()).join(', ')} + SureRadar)...`
       );
-      const esportes = ['Futebol', 'Basquete', 'Tenis'];
+      const esportes = ['Futebol', 'Basquete', 'Tenis', 'Esports'];
       const datas = [dataFiltro || 'Hoje'];
 
       const todasOdds: any[] = [];

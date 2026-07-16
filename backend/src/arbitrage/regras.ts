@@ -45,18 +45,39 @@ export function mesmoGrupoTenis(casaA: string, casaB: string): boolean {
   return ga !== null && ga === gb;
 }
 
-function normEsporte(e?: string): 'futebol' | 'basquete' | 'tenis' | 'outro' {
+function normEsporte(e?: string): 'futebol' | 'basquete' | 'tenis' | 'esports' | 'outro' {
   const s = (e || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   if (/futebol|football|soccer/.test(s)) return 'futebol';
   if (/basquete|basket/.test(s)) return 'basquete';
   if (/tenis|tennis/.test(s)) return 'tenis';
+  if (/e-?sports?|eletronic|counter|cs2|cs:?go|valorant|league of legends|\blol\b|dota|honor of kings|rainbow/.test(s))
+    return 'esports';
   return 'outro';
+}
+
+/**
+ * Blacklist de mercados de E-Sports (Diretrizes §5). Regra escolhida: permitir 2 vias,
+ * bloqueando SÓ o que a Diretriz proíbe explicitamente. O empate (1X2/3-vias de BO2) é
+ * barrado nos parsers (não sintetizam dupla chance em e-sports); aqui cobrimos o resto.
+ */
+function mercadoEsportsBloqueado(mercado: string): boolean {
+  const m = (mercado || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  // Resultado exato de mapas (ex.: "Resultado correto do mapa", 2-0/2-1).
+  if (/resultado correto|correct (map )?score|placar exato|resultado exato/.test(m)) return true;
+  // Kills/mortes de JOGADOR específico (regras de W.O. divergem por substituição/queda).
+  if (/(kill|morte|abate).*(jogador|player)|(jogador|player).*(kill|morte|abate)|player occurrence/.test(m)) return true;
+  // "Corrida" (Race to X): primeiro a N, primeira torre, first blood, pistol round.
+  if (/primeiro a |first to |race to |primeira torre|first tower|first blood|primeiro sangue|pistol|round de pistola/.test(m))
+    return true;
+  return false;
 }
 
 /** Mercado permitido por esporte. Futebol: Resultado Final/1X2 é PROIBIDO. */
 export function mercadoPermitido(esporte: string | undefined, mercado: string): boolean {
+  const esp = normEsporte(esporte);
   const canon = normalizarMercado(mercado); // ex.: RESULTADO_FINAL_FT, TOTAIS_GOLS_FT, HANDICAP_..._FT
-  if (normEsporte(esporte) === 'futebol' && canon.startsWith('RESULTADO_FINAL')) return false;
+  if (esp === 'futebol' && canon.startsWith('RESULTADO_FINAL')) return false;
+  if (esp === 'esports' && mercadoEsportsBloqueado(mercado)) return false;
   return true;
 }
 

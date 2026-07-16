@@ -58,11 +58,26 @@ const SPORT_PATHS: Record<string, string> = {
   Tênis: 'tennis',
 };
 
+// E-Sports: paths por jogo da whitelist das Diretrizes §5 (CS2, LoL, Dota 2, Valorant).
+// Casas sem e-sports (ex.: KTO) simplesmente retornam vazio nesses paths (404 → []).
+const ESPORTS_PATHS = [
+  'esports/cs2',
+  'esports/league_of_legends',
+  'esports/valorant',
+  'esports/dota_2',
+];
+
 const SPORT_LABEL: Record<string, string> = {
   football: 'Futebol',
   basketball: 'Basquete',
   tennis: 'Tenis',
 };
+
+/** Rótulo do esporte a partir do path da Kambi (e-sports vira sempre "Esports"). */
+function rotuloEsporte(sportPath: string): string {
+  if (/^esports/i.test(sportPath)) return 'Esports';
+  return SPORT_LABEL[sportPath] || sportPath;
+}
 
 export class KambiScraper implements OddsScraper {
   private cfg: Required<KambiConfig>;
@@ -106,14 +121,18 @@ export class KambiScraper implements OddsScraper {
     const todas: ScrapedOdd[] = [];
 
     for (const esporte of esportes) {
-      const sportPath = SPORT_PATHS[esporte];
-      if (!sportPath) continue;
-      try {
-        const odds = await this.extrairEsporte(sportPath);
-        console.log(`   [${this.cfg.nome}] ${esporte}: ${odds.length} odds`);
-        todas.push(...odds);
-      } catch (err: any) {
-        console.error(`   ⚠️ [${this.cfg.nome}] Falha em ${esporte}: ${err.message}`);
+      // E-Sports varre 1 path por jogo (CS2/LoL/Valorant/Dota 2); demais, 1 path só.
+      const ehEsports = /^e-?sports?$/i.test(esporte);
+      const paths = ehEsports ? ESPORTS_PATHS : (SPORT_PATHS[esporte] ? [SPORT_PATHS[esporte]] : []);
+      if (!paths.length) continue;
+      for (const sportPath of paths) {
+        try {
+          const odds = await this.extrairEsporte(sportPath);
+          if (odds.length) console.log(`   [${this.cfg.nome}] ${sportPath}: ${odds.length} odds`);
+          todas.push(...odds);
+        } catch (err: any) {
+          console.error(`   ⚠️ [${this.cfg.nome}] Falha em ${sportPath}: ${err.message}`);
+        }
       }
     }
 
@@ -125,6 +144,8 @@ export class KambiScraper implements OddsScraper {
     // 1) Lista de eventos (para obter IDs + nomes + horários).
     const lvUrl = `${this.base()}/listView/${sportPath}.json?${this.commonParams()}`;
     const lv = await fetchTextoComRetry(lvUrl, { headers: this.headers() }, 3, `${this.cfg.nome}/list`);
+    // 404 = esporte/jogo inexistente nesta casa (ex.: KTO não tem e-sports) → vazio, sem erro.
+    if (lv.status === 404) return [];
     if (lv.status !== 200) throw new Error(`listView HTTP ${lv.status}`);
     const lvJson = JSON.parse(lv.body);
     const eventos: KambiEvent[] = (lvJson.events || [])
@@ -179,7 +200,8 @@ export class KambiScraper implements OddsScraper {
   /** Converte um betOffer da Kambi numa ScrapedOdd (2 pernas), quando o mercado é arbitrável. */
   private parseBetOffer(bo: KambiBetOffer, ev: KambiEvent, sportPath: string): ScrapedOdd | null {
     const evento = `${ev.homeName} vs ${ev.awayName}`;
-    const esporte = SPORT_LABEL[sportPath] || sportPath;
+    const esporte = rotuloEsporte(sportPath);
+    const ehEsports = esporte === 'Esports';
     const dataHora = ev.start || 'Hoje';
     const url = undefined;
     const o = (n?: number) => (typeof n === 'number' ? n / 1000 : NaN);
@@ -258,12 +280,14 @@ export class KambiScraper implements OddsScraper {
       return { esporte, evento, dataHora, url, mercado: 'Empate Anula', opcaoA: ev.homeName!, opcaoB: ev.awayName!, oddA, oddB };
     }
 
-    // --- RESULTADO FINAL (Jogo) ---
+    // --- RESULTADO FINAL / VENCEDOR DE MAPA (Jogo) ---
     if (one && two && !one.line) {
       const oddHome = o(one.odds);
       const oddAway = o(two.odds);
-      // 3-way (futebol com empate) → dupla chance sintética (mesma técnica da Blaze).
+      // 3-way (empate presente): dupla chance sintética SÓ fora de e-sports.
+      // Diretrizes §5: e-sports não admite 1X2/3-vias (BO2 empata 1-1) → descarta.
       if (cross && this.oddOk(o(cross.odds))) {
+        if (ehEsports) return null;
         const oddX = o(cross.odds);
         if (!this.oddOk(oddHome) || !this.oddOk(oddAway)) return null;
         // Emite só a primeira perna de dupla chance; a inversão é redundante para 2-way arb.
@@ -276,11 +300,13 @@ export class KambiScraper implements OddsScraper {
           oddB: 1 / (1 / oddX + 1 / oddAway),
         };
       }
-      // 2-way (tênis/basquete): direto.
+      // 2-way direto. Em e-sports o critério "Mapa N" é vencedor de mapa (mercado distinto
+      // do vencedor da partida) → preserva o rótulo para não colapsar os dois na normalização.
       if (this.oddOk(oddHome) && this.oddOk(oddAway)) {
+        const ehVencedorMapa = ehEsports && /\bmapa\s*\d+\b/i.test(criterio);
         return {
           esporte, evento, dataHora, url,
-          mercado: 'Resultado Final',
+          mercado: ehVencedorMapa ? criterio : 'Resultado Final',
           opcaoA: ev.homeName!,
           opcaoB: ev.awayName!,
           oddA: oddHome,
