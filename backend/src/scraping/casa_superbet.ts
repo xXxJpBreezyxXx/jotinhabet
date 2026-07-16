@@ -263,8 +263,10 @@ export class SuperbetScraper implements OddsScraper {
    * Mercados de E-Sports de um evento (Diretrizes §5 — só 2-vias da whitelist):
    *  - Vencedor de mapa ("X° Mapa - Vencedor", nº do mapa no sv "1"/"2"/"3") → "Mapa N".
    *  - Total de Mapas (sv = linha, ex.: 2.5) → over/under.
-   *  - Handicap de Mapas (sv = linha do mandante, ex.: -1.5) → home/away com sinal.
    * O match-winner vem do endpoint de lista (parseMatchWinner); aqui não se repete.
+   * NÃO emitimos "Handicap de Mapas": o motor ainda não pareia handicaps direcionais
+   * de forma sign-aware entre casas (cruzava K27(-1.5) com Phantom(-1.5) → falso ROI ~40%).
+   * Só voltamos a habilitar quando o pareamento de handicap por sinal/time for corrigido.
    * Combos/exato/kills/pistola (sv composto "1-20.5", "Resultado Correto…", "Jogador…")
    * são ignorados por não serem 2-vias limpas / caírem na blacklist das Diretrizes.
    */
@@ -281,7 +283,6 @@ export class SuperbetScraper implements OddsScraper {
     const eventoStr = `${home} vs ${away}`;
     const esporte = 'Esports';
     const ehMeiaLinha = (l: number) => Math.abs(l % 1) === 0.5;
-    const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
     const ativos = (ev.odds || []).filter((o) => o.status === 'active' && o.price > 1);
     const out: ScrapedOdd[] = [];
 
@@ -329,26 +330,7 @@ export class SuperbetScraper implements OddsScraper {
       }
     }
 
-    // 3) Handicap de Mapas (home/away com sinal), sv = linha do mandante (meia-linha).
-    const hcpMapas = new Map<string, { home?: SbOdd; away?: SbOdd }>();
-    for (const o of ativos) {
-      if ((o.marketName || '') !== 'Handicap de Mapas') continue;
-      const sv = o.specialBetValue || '';
-      const g = hcpMapas.get(sv) || {};
-      if (o.code === '1') g.home = o;
-      else if (o.code === '2') g.away = o;
-      hcpMapas.set(sv, g);
-    }
-    for (const [sv, g] of hcpMapas) {
-      const linha = parseFloat(sv);
-      if (g.home && g.away && Number.isFinite(linha) && ehMeiaLinha(linha)) {
-        out.push({
-          esporte, evento: eventoStr, dataHora, mercado: 'Handicap de Mapas', linha,
-          opcaoA: `${home} (${sinal(linha)})`, opcaoB: `${away} (${sinal(-linha)})`,
-          oddA: g.home.price, oddB: g.away.price,
-        });
-      }
-    }
+    // (Handicap de Mapas removido de propósito — ver nota no cabeçalho do método.)
 
     return out;
   }
