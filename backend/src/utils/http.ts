@@ -5,6 +5,8 @@
  * probe de reconhecimento (teste de autenticação/proteção dos feeds das casas).
  */
 
+import { fetch as undiciFetch } from 'undici';
+
 export interface RespostaTexto {
   status: number;
   contentType: string;
@@ -33,13 +35,17 @@ export async function fetchTextoComRetry(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const resp = await fetch(url, { ...init, signal: controller.signal });
+      // Com `dispatcher` (proxy undici, ex.: Pinnacle via Tailscale) é OBRIGATÓRIO usar o
+      // fetch do PRÓPRIO undici: o fetch global do Node embute outro undici e rejeita
+      // dispatcher de versão diferente ("invalid onRequestStart method").
+      const doFetch: any = (init as any)?.dispatcher ? undiciFetch : fetch;
+      const resp = await doFetch(url, { ...init, signal: controller.signal });
       const body = await resp.text(); // ainda dentro da janela do timeout
       if (resp.status >= 500) {
         throw new Error(`HTTP ${resp.status}`);
       }
       const headers: Record<string, string> = {};
-      resp.headers.forEach((v, k) => {
+      resp.headers.forEach((v: string, k: string) => {
         headers[k] = v;
       });
       return {
