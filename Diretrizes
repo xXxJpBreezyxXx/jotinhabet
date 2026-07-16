@@ -1,0 +1,88 @@
+# Diretrizes de Varredura e Matriz de Risco (Surebet Scanner)
+
+Este documento define os parâmetros de validação de mercados e regras esportivas para o motor de arbitragem. O sistema deve rejeitar automaticamente qualquer combinação que envolva mercados da *Blacklist* ou cruzamentos incompatíveis no tênis.
+
+## 1. Filtro de Mercados: Futebol ⚽
+
+O algoritmo deve ignorar eventos com possibilidade de um terceiro resultado (empate) ou que não garantam o reembolso em caso de igualdade.
+
+**🔴 Mercados Proibidos (Blacklist):**
+* Resultado Final (Match Odds / 1X2)
+* Handicap Europeu (EH)
+* Vencedor do 1º Tempo / 2º Tempo
+* Primeiro time a marcar (Risco de placar 0x0)
+* Resultado Exato
+
+**🟢 Mercados Liberados (Whitelist - 2 Vias):**
+* Empate Anula a Aposta (Draw No Bet / DNB)
+* Handicap Asiático (AH)
+* Total de Gols (Mais/Menos ou Over/Under)
+* Ambas as Equipes Marcam (BTTS)
+
+---
+
+## 2. Filtro de Mercados: Basquete 🏀
+
+O sistema deve mitigar o risco de partidas que se estendem para a prorrogação (*Overtime*).
+
+**🔴 Mercados Proibidos (Blacklist):**
+* Vencedor do Tempo Regulamentar (1X2 / Exclui prorrogação)
+* Vencedor por Quarto/Tempo específico
+* Margem de Vitória Exata
+
+**🟢 Mercados Liberados (Whitelist - 2 Vias):**
+* Vencedor do Jogo / Moneyline (Obrigatório incluir prorrogação)
+* Handicap de Pontos / Spread (Incluindo prorrogação)
+* Total de Pontos (Mais/Menos ou Over/Under)
+
+---
+
+## 3. Matriz de Compatibilidade: Tênis 🎾
+
+O tênis opera com mercados estritamente binários. A restrição não é o mercado em si, mas as políticas de abandono (Retirement/W.O.) das plataformas. 
+
+O motor de varredura deve obedecer à seguinte regra de cruzamento: **Casas do Grupo A só podem ser cruzadas com casas do Grupo A. Casas do Grupo B só podem ser cruzadas com casas do Grupo B.**
+
+### Grupo A: Regra da Partida Completa
+*Condição:* A partida inteira deve ser finalizada. Em caso de abandono por lesão em qualquer momento, as apostas de Vencedor do Encontro (Moneyline) são **Anuladas (Devolvidas)**.
+
+**Casas Mapeadas neste grupo:**
+* AlfaBet (BR)
+* Aposta1 (BR)
+* Apostaganha (BR)
+* Bet365 (BR)
+* Bet7k (BR)
+* BetBoom (BR)
+* Betao (BR)
+* Betnacional (BR)
+* Betsul (BR)
+* Blaze
+* BolsaDeAposta (BR)
+* KTO
+* Novibet (BR)
+* PixBet (BR)
+* Reidopitaco (BR)
+* SeuBet (BR)
+* Stake (BR)
+* SuperBet (BR) / Superbet
+
+### Grupo B: Regra de 1 Set Concluído
+*Condição:* Se o 1º set for finalizado e ocorrer um abandono no 2º ou 3º set, o jogador que avançar de fase é validado como **Vencedor da aposta**.
+
+**Casas Mapeadas neste grupo:**
+* Pinnacle
+* Betano (BR)
+* BetWarrior / BetWarrior (BR)
+
+---
+
+## 4. Lógica de Execução (Tênis)
+
+**🔴 Mercados Proibidos em caso de Cruzamento entre Grupos Diferentes (A x B):**
+* Vencedor da Partida (Match Winner / Moneyline)
+* Handicap de Games/Sets
+* Mais/Menos Games
+
+**🟢 Ação Requerida do Sistema:**
+Se `Casa_1.Grupo != Casa_2.Grupo` para o esporte `Tênis`:
+* Ação: `REJEITAR_OPORTUNIDADE` e emitir log de incompatibilidade de regras de W.O.
