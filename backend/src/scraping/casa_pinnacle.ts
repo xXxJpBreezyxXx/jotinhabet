@@ -184,6 +184,11 @@ export class PinnacleScraper implements OddsScraper {
 
     for (const mk of markets) {
       if (mk.period !== 0 || mk.status === 'closed') continue; // só jogo completo, mercado aberto
+      // O endpoint "related/straight" traz mercados de DEZENAS de matchups relacionados
+      // (escanteios, especiais, props). Sem este filtro, totais de ESCANTEIOS (linha
+      // 9.5/10.5...) eram emitidos como "Total de Gols" e cruzavam com mercados errados
+      // de outras casas (ex.: a falsa arb "chutes × escanteios" rotulada de gols).
+      if (mk.matchupId !== ev.id) continue;
 
       if (mk.type === 'moneyline') {
         const h = dec(mk.prices.find((p) => p.designation === 'home')?.price);

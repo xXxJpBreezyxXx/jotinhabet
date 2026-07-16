@@ -38,11 +38,32 @@ function mapa(s: string): string {
   return m ? `M${m[1] || m[2]}` : '';
 }
 
+// Termos que indicam que um sufixo pós-hífen é TEXTO DE MERCADO, não nome de time.
+const TERMO_MERCADO =
+  /total|mais|menos|over|under|handicap|vencedor|resultado|placar|rodada|round|mapa|\bmap\b|kill|gol|goal|ponto|game|\bset\b|escanteio|cart[aã]o|cart[oõ]es|chute|shot|prorroga|[ií]mpar|\bpar\b|corret|margem|dura[cç][aã]o|jogador|player|pistol|d[uú]pla/;
+
+/**
+ * Escopo POR TIME no fim do rótulo ("Total de cartões - Chapecoense" → "_CHAPECOENSE").
+ * Sem isto, o total por-time colidia com o total da PARTIDA (e com o do outro time),
+ * cruzando mercados diferentes como se fossem o mesmo. Sufixos que são texto de
+ * mercado ("Mapa 1 - Total de rodadas") são ignorados.
+ */
+function escopoTime(s: string): string {
+  const m = s.match(/-\s*([^-]+?)\s*$/);
+  if (!m) return '';
+  const suf = m[1].trim().toLowerCase();
+  if (!suf || TERMO_MERCADO.test(suf)) return '';
+  return '_' + suf.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '').toUpperCase();
+}
+
 /** Assunto do total/handicap (o que está sendo contado). */
 function assunto(s: string): string {
   if (/escanteio|corner/.test(s)) return 'ESCANTEIOS';
   if (/cart[aã]o|card|cart[oõ]es/.test(s)) return 'CARTOES';
   if (/\bace/.test(s)) return 'ACES';
+  // Chutes ANTES de gols: "total de chutes a gol" contém "gol" e colidia com
+  // TOTAIS_GOLS (pareava chutes com gols/escanteios de outra casa).
+  if (/chute|shot|finaliza/.test(s)) return 'CHUTES';
   if (/gol|goal/.test(s)) return 'GOLS';
   if (/game/.test(s)) return 'GAMES';
   if (/\bset/.test(s)) return 'SETS';
@@ -69,8 +90,8 @@ export function normalizarMercado(raw: string): string {
   const seg = mapa(s) || periodo(s);
   // DNB (Empate Anula / Draw No Bet) antes de tudo — não deve virar RESULTADO_FINAL.
   if (/empate anula|empate devolve|draw no bet|\bdnb\b/.test(s)) return `DNB_${periodo(s)}`;
-  if (/handicap|desvantagem|spread|linha asi/.test(s)) return `HANDICAP_${assunto(s)}_${seg}`;
-  if (/total|over|under|mais de|menos de|acima|abaixo/.test(s)) return `TOTAIS_${assunto(s)}_${seg}`;
+  if (/handicap|desvantagem|spread|linha asi/.test(s)) return `HANDICAP_${assunto(s)}_${seg}${escopoTime(s)}`;
+  if (/total|over|under|mais de|menos de|acima|abaixo/.test(s)) return `TOTAIS_${assunto(s)}_${seg}${escopoTime(s)}`;
   // BTTS — aceita "ambas"/"ambos ... marcam" e variações.
   if (/amb[oa]s.*marcam|both teams to score|btts/.test(s)) return `AMBAS_MARCAM_${periodo(s)}`;
   // Vencedor de MAPA específico em e-sports ("Mapa 1"/"Mapa 2", 2-vias) — distinto do
