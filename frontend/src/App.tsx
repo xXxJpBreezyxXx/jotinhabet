@@ -1377,10 +1377,21 @@ export default function App() {
                              return txt.normalize('NFD').replace(/[\u0300-\u036f]/g, "").toLowerCase();
                           };
                           const esp = normalizeText(esporte || '');
-                          if (esp.includes('futebol') || opp.evento.includes('×') || (opp.evento.includes('vs') && !opp.evento.includes('LOUD') && !opp.evento.includes('Djokovic') && !opp.evento.includes('Alcaraz'))) return '⚽ Futebol';
-                          if (esp.includes('basquete') || opp.evento.toLowerCase().includes('lakers') || opp.evento.toLowerCase().includes('celtics')) return '🏀 Basquete';
-                          if (esp.includes('tenis') || opp.evento.includes('Djokovic') || opp.evento.includes('Alcaraz') || opp.evento.includes('Federer') || opp.evento.includes('Nadal')) return '🎾 Tênis';
-                          if (esp.includes('esports') || opp.evento.includes('LOUD') || opp.evento.includes('paiN') || opp.evento.includes('Gaming')) return '🎮 Esports';
+                          // 1) Confia no campo `esporte` (os scrapers preenchem corretamente).
+                          if (esp) {
+                            if (esp.includes('futebol') || esp.includes('football') || esp.includes('soccer')) return '⚽ Futebol';
+                            if (esp.includes('basquete') || esp.includes('basket')) return '🏀 Basquete';
+                            if (esp.includes('tenis') || esp.includes('tennis')) return '🎾 Tênis';
+                            if (esp.includes('esport')) return '🎮 Esports';
+                            if (esp.includes('volei') || esp.includes('volley')) return '🏐 Vôlei';
+                            if (esp.includes('hoquei') || esp.includes('hockey')) return '🏒 Hóquei';
+                          }
+                          // 2) Fallback por nome do evento (só quando `esporte` não veio).
+                          const ev = opp.evento.toLowerCase();
+                          if (ev.includes('lakers') || ev.includes('celtics') || ev.includes('nba')) return '🏀 Basquete';
+                          if (ev.includes('djokovic') || ev.includes('alcaraz') || ev.includes('federer') || ev.includes('nadal')) return '🎾 Tênis';
+                          if (ev.includes('loud') || ev.includes('pain') || ev.includes('gaming')) return '🎮 Esports';
+                          if (opp.evento.includes('×') || ev.includes(' vs ')) return '⚽ Futebol';
                           return '🏆 Esporte';
                         };
 
