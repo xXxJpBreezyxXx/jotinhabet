@@ -86,3 +86,28 @@ O motor de varredura deve obedecer à seguinte regra de cruzamento: **Casas do G
 **🟢 Ação Requerida do Sistema:**
 Se `Casa_1.Grupo != Casa_2.Grupo` para o esporte `Tênis`:
 * Ação: `REJEITAR_OPORTUNIDADE` e emitir log de incompatibilidade de regras de W.O.
+
+ ----
+
+## 5. Filtro de Mercados: E-Sports 🎮 (CS2, LoL, Dota 2, Valorant)
+
+Os esportes eletrônicos operam de forma majoritariamente binária (vitória/derrota), mas o motor de varredura deve aplicar restrições severas a eventos baseados em estatísticas de micro-segundos devido ao risco de latência de API e divergência de liquidação entre as casas.
+
+**🔴 Mercados Proibidos (Blacklist):**
+* **Partidas no formato "Melhor de 2" (BO2):** Alguns torneios (fase de grupos) usam formato de 2 mapas. Isso introduz a possibilidade do empate (1 a 1). O sistema deve rejeitar qualquer mercado 1X2 em E-sports.
+* **Mercados de "Corrida" (Race to X):** Ex: Primeiro time a alcançar 5 rounds / Primeira Torre / First Blood / Vencedor do Pistol Round. (O delay dos provedores de dados causa anulação frequente ou odds defasadas).
+* **Resultado Exato de Mapas:** Ex: Apostar que vai ser 2-0 ou 2-1 (Risco de quebra matemática emSurebets de duas vias).
+* **Kills de Jogadores Específicos:** Ex: "FalleN terá mais de 15.5 Kills". (Regras de W.O. por queda de energia ou substituição de jogador variam muito entre as casas).
+
+**🟢 Mercados Liberados (Whitelist - 2 Vias):**
+* **Vencedor da Partida (Moneyline):** Válido apenas para formatos BO1 (Melhor de 1), BO3, BO5 ou BO7.
+* **Vencedor do Mapa Específico:** Ex: Vencedor do Mapa 1 / Vencedor do Mapa 2.
+* **Handicap de Mapas:** Ex: Time A (-1.5 Mapas) vs Time B (+1.5 Mapas).
+* **Mais/Menos Mapas (Over/Under):** Ex: Mais de 2.5 Mapas.
+* **Handicap de Rounds (Específico para CS2 / Valorant):** Ex: Time A (-3.5 Rounds).
+* **Mais/Menos Rounds (Específico para CS2 / Valorant):** Ex: Mais de 21.5 Rounds no Mapa 1.
+
+### ⚠️ Regra de Risco Operacional para o Sistema (Latência)
+**Bloqueio de Operação "Ao Vivo" (In-Play):**
+* A varredura de E-sports no sistema deve ser configurada **estritamente para Pré-Jogo (Pre-match)**. 
+* *Motivo:* As casas de apostas recebem os dados direto dos servidores da desenvolvedora (Riot, Valve), enquanto as transmissões oficiais (Twitch/YouTube) têm de 2 a 5 minutos de atraso. Entrar em uma Surebet ao vivo em E-sports gera um alto risco de a casa rejeitar o bilhete alegando "Aposta Feita Após o Fato" (Late Betting).
