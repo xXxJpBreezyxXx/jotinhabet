@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   TrendingUp, 
   Cpu, 
@@ -16,7 +16,8 @@ import {
   ChevronRight,
   ExternalLink,
   Sun,
-  Moon
+  Moon,
+  Save
 } from 'lucide-react';
 
 interface HealthStatus {
@@ -181,6 +182,80 @@ export default function App() {
     return localStorage.getItem('jotinhabet_user_banca') || '50.00';
   });
   const [projBancaInicial, setProjBancaInicial] = useState(localStorage.getItem('jotinhabet_user_banca') || '50.00');
+
+  // Persistência da banca no BANCO (app_config) — o localStorage vira cache local.
+  // 'saving'/'saved'/'error' alimentam o feedback do botão Salvar do card.
+  const [bancaSaveState, setBancaSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // Fonte SÍNCRONA da verdade da banca: evita stale closure em read-modify-write
+  // concorrente (ex.: dois lançamentos/exclusões antes do re-render).
+  const userBancaRef = useRef(userBanca);
+  // Usuário/fluxo já escreveu a banca depois do mount? Se sim, o GET tardio de
+  // /api/banca NÃO pode sobrescrever o valor local.
+  const bancaTocadaRef = useRef(false);
+  // Timer do reset do feedback do botão — cancelado a cada transição p/ não zerar
+  // um 'saving' de um clique mais novo.
+  const bancaSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Escrita canônica da banca: ref (síncrono) + state + localStorage; opcionalmente
+  // persiste no banco (silencioso). Todos os fluxos que mudam a banca passam aqui.
+  const aplicarBanca = (v: string, persistirNoBanco = false) => {
+    userBancaRef.current = v;
+    bancaTocadaRef.current = true;
+    setUserBanca(v);
+    localStorage.setItem('jotinhabet_user_banca', v);
+    if (persistirNoBanco) salvarBancaNoBanco(v, true);
+  };
+
+  const agendarResetBotao = () => {
+    if (bancaSaveTimerRef.current) clearTimeout(bancaSaveTimerRef.current);
+    bancaSaveTimerRef.current = setTimeout(() => setBancaSaveState('idle'), 2500);
+  };
+
+  // Salva a banca no banco. `silencioso` = sem feedback visual (usado nos salvamentos
+  // automáticos após lançar/excluir entrada, que já têm alert próprio). Em falha,
+  // marca 'jotinhabet_banca_dirty' — o próximo mount re-sincroniza em vez de
+  // deixar o valor antigo do banco sobrescrever o local mais novo.
+  const salvarBancaNoBanco = (valor: string | number, silencioso = false) => {
+    const banca = parseFloat(String(valor));
+    if (!Number.isFinite(banca) || banca <= 0) {
+      console.warn('[banca] Valor inválido, não sincronizado com o banco:', valor);
+      localStorage.setItem('jotinhabet_banca_dirty', '1'); // local é mais novo que o banco
+      if (!silencioso) {
+        setBancaSaveState('error');
+        agendarResetBotao();
+      }
+      return;
+    }
+    if (!silencioso) {
+      if (bancaSaveTimerRef.current) clearTimeout(bancaSaveTimerRef.current);
+      setBancaSaveState('saving');
+    }
+    fetch('/api/banca', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ banca }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.success) localStorage.removeItem('jotinhabet_banca_dirty');
+        else {
+          localStorage.setItem('jotinhabet_banca_dirty', '1');
+          console.warn('Falha ao salvar banca no banco:', d.error);
+        }
+        if (!silencioso) {
+          setBancaSaveState(d.success ? 'saved' : 'error');
+          agendarResetBotao();
+        }
+      })
+      .catch((err) => {
+        localStorage.setItem('jotinhabet_banca_dirty', '1');
+        console.error('Erro ao salvar banca no banco:', err);
+        if (!silencioso) {
+          setBancaSaveState('error');
+          agendarResetBotao();
+        }
+      });
+  };
   const [projDias, setProjDias] = useState('30');
   const [projMaxStakePct, setProjMaxStakePct] = useState('50'); // 50%
   const [projRoiMedioPct, setProjRoiMedioPct] = useState('4'); // 4%
@@ -334,6 +409,31 @@ export default function App() {
     
     fetchOpportunities();
     fetchOperations();
+
+    // Sincronização inicial da banca com o banco:
+    //  - Se um save anterior falhou (flag dirty), o valor LOCAL é o mais novo →
+    //    re-envia pro banco em vez de deixar o banco sobrescrever o local.
+    //  - Senão o banco é a fonte da verdade, mas só aplica se o usuário ainda não
+    //    editou nada neste pageload (um GET tardio não pode sobrescrever edição).
+    if (localStorage.getItem('jotinhabet_banca_dirty') === '1') {
+      salvarBancaNoBanco(localStorage.getItem('jotinhabet_user_banca') || '', true);
+    } else {
+      fetch('/api/banca')
+        .then((r) => r.json())
+        .then((d) => {
+          if (bancaTocadaRef.current) return; // usuário já mexeu — não sobrescreve
+          if (d && typeof d.banca === 'number' && Number.isFinite(d.banca) && d.banca > 0) {
+            const v = d.banca.toFixed(2);
+            userBancaRef.current = v;
+            setUserBanca(v);
+            localStorage.setItem('jotinhabet_user_banca', v);
+          }
+        })
+        .catch(() => {
+          console.warn('Não foi possível carregar a banca salva do banco (usando localStorage).');
+        });
+    }
+
     const interval = setInterval(fetchOpportunities, 8000);
     return () => clearInterval(interval);
   }, []);
@@ -639,10 +739,11 @@ export default function App() {
         if (data.success) {
           // Update user balance!
           const profit = modalCalc.lucro;
-          const currentBanca = parseFloat(userBanca);
+          // Lê da REF (síncrona) — o state do closure pode estar defasado se outra
+          // operação mexeu na banca entre o clique e esta resposta.
+          const currentBanca = parseFloat(userBancaRef.current);
           const newBanca = (currentBanca + profit).toFixed(2);
-          setUserBanca(newBanca);
-          localStorage.setItem('jotinhabet_user_banca', newBanca);
+          aplicarBanca(newBanca, true); // ref + state + localStorage + banco
 
           // Add to launched keys to filter out from dashboard!
           const launchedKey = `${selectedOpp.evento}_${selectedOpp.mercado || 'Resultado Final'}_${selectedOpp.casa_a_nome || 'Casa A'}_${selectedOpp.casa_b_nome || 'Casa B'}`;
@@ -683,9 +784,10 @@ export default function App() {
       .then(data => {
         if (data.success) {
           // Reverte a banca: desfaz o "+ lucro" aplicado no lançamento.
-          const novaBanca = (parseFloat(userBanca) - lucro).toFixed(2);
-          setUserBanca(novaBanca);
-          localStorage.setItem('jotinhabet_user_banca', novaBanca);
+          // Lê da REF (síncrona) — evita que duas exclusões em sequência estornem
+          // a partir da mesma banca pré-exclusão (stale closure).
+          const novaBanca = (parseFloat(userBancaRef.current) - lucro).toFixed(2);
+          aplicarBanca(novaBanca, true); // ref + state + localStorage + banco
 
           // Reexibe a oportunidade no radar: remove a chave gerada no lançamento
           // (mesmo formato de handleRecordOperation).
@@ -1017,10 +1119,7 @@ export default function App() {
                     step="0.01"
                     min="1"
                     value={userBanca}
-                    onChange={(e) => {
-                      setUserBanca(e.target.value);
-                      localStorage.setItem('jotinhabet_user_banca', e.target.value);
-                    }}
+                    onChange={(e) => aplicarBanca(e.target.value)}
                     style={{
                       background: 'rgba(255,255,255,0.03)',
                       border: '1px solid var(--panel-border)',
@@ -1035,6 +1134,29 @@ export default function App() {
                       boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)'
                     }}
                   />
+                  <button
+                    onClick={() => salvarBancaNoBanco(userBanca)}
+                    disabled={bancaSaveState === 'saving'}
+                    style={{
+                      background: bancaSaveState === 'saved' ? 'rgba(16,185,129,0.25)' : 'rgba(16,185,129,0.1)',
+                      border: '1px solid rgba(16,185,129,0.35)',
+                      borderRadius: '6px',
+                      padding: '5px 10px',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      cursor: bancaSaveState === 'saving' ? 'wait' : 'pointer',
+                      color: bancaSaveState === 'error' ? '#ef4444' : '#10b981',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      whiteSpace: 'nowrap',
+                      transition: 'all 0.15s ease'
+                    }}
+                    title="Salvar a banca ativa no banco de dados"
+                  >
+                    {bancaSaveState === 'saved' ? <CheckCircle size={12} /> : <Save size={12} />}
+                    {bancaSaveState === 'saving' ? 'Salvando…' : bancaSaveState === 'saved' ? 'Salvo!' : bancaSaveState === 'error' ? 'Erro' : 'Salvar'}
+                  </button>
                 </div>
                 <div className="stat-footer">
                   Saldo utilizado nos cálculos de aposta

@@ -345,6 +345,50 @@ app.delete('/api/operations/:id', async (req, res) => {
   }
 });
 
+// Detecta erro do PostgREST quando a TABELA não existe (migration não aplicada):
+// PGRST205 ("Could not find the table ... in the schema cache") ou 42P01 do Postgres.
+const isMissingTable = (err: any) =>
+  !!err && (err.code === 'PGRST205' || err.code === '42P01' || /find the table|does not exist/i.test(err.message || ''));
+
+// GET - Banca ativa salva no banco (app_config['banca_ativa']); null se nunca salva.
+app.get('/api/banca', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('app_config')
+      .select('valor, atualizado_em')
+      .eq('chave', 'banca_ativa')
+      .maybeSingle();
+    if (error) throw error;
+    res.json({ banca: data ? Number(data.valor) : null, atualizado_em: data?.atualizado_em ?? null });
+  } catch (error: any) {
+    if (isMissingTable(error)) {
+      console.warn('⚠️ [banca] Tabela app_config ausente (aplique a migration 008). Tratando como "nunca salva".');
+      return res.json({ banca: null, atualizado_em: null });
+    }
+    res.status(500).json({ error: error.message || 'Erro ao obter banca salva' });
+  }
+});
+
+// POST - Salvar a banca ativa no banco (upsert em app_config).
+app.post('/api/banca', async (req, res) => {
+  const banca = Number(req.body?.banca);
+  if (!Number.isFinite(banca) || banca <= 0) {
+    return res.status(400).json({ error: 'Valor de banca inválido' });
+  }
+  try {
+    const { error } = await supabase
+      .from('app_config')
+      .upsert({ chave: 'banca_ativa', valor: banca.toFixed(2), atualizado_em: new Date().toISOString() });
+    if (error) throw error;
+    res.json({ success: true, banca: Number(banca.toFixed(2)) });
+  } catch (error: any) {
+    if (isMissingTable(error)) {
+      return res.status(500).json({ error: 'Tabela app_config ausente no banco — aplique a migration 008.' });
+    }
+    res.status(500).json({ error: error.message || 'Erro ao salvar banca' });
+  }
+});
+
 // GET last 150 lines of logs/scanner.log
 app.get('/api/logs', (req, res) => {
   try {
