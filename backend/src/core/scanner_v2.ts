@@ -372,26 +372,28 @@ export class ArbitrageScannerV2 {
             }
             
             // Decide se alerta no WhatsApp. Duas fontes:
-            //  - SureRadar (curado): ROI >= 5%.
+            //  - SureRadar (curado): ROI >= 1.5%.
             //  - Motor próprio (cruzamento entre casas): exige alta CONFIANÇA e ROI numa
-            //    faixa sã (2-15%) e sem alerta de precisão — evita spam de falso positivo
+            //    faixa sã (1.5-15%) e sem alerta de precisão — evita spam de falso positivo
             //    (ROI absurdo = odd travada/erro; horário/time incerto já foram sinalizados).
             const ehSureRadar = !!opp.url?.includes('sureradar');
             const roi = opp.lucroGarantidoPerc;
-            const alertarSureRadar = ehSureRadar && roi >= 5.0;
+            const alertarSureRadar = ehSureRadar && roi >= 1.5;
             const base = baseEvento(opp.evento);
             // Prioriza Pinnacle (casa sharp): arb contra a Pinnacle é sinal forte de edge real.
-            // Arb entre duas casas soft exige barra mais alta (mais falso positivo/linha stale).
+            // Arb entre duas casas soft exige confiança mais alta (mais falso positivo/linha stale).
+            // Piso de ROI unificado em 1.5% para ambas; a confiança segue diferenciando o risco.
             const envolvePinnacle = opp.casaA === 'Pinnacle' || opp.casaB === 'Pinnacle';
             const alertarMotor =
               !ehSureRadar &&
               !opp.alertaPrecisao &&
+              roi >= 1.5 &&
               roi <= 15.0 &&
               alertasMotorEnviados < MAX_ALERTAS_MOTOR &&
               !eventosAlertadosMotor.has(base) && // no máx. 1 alerta por evento por varredura
               (envolvePinnacle
-                ? (opp.confianca ?? 0) >= 0.9 && roi >= 2.0
-                : (opp.confianca ?? 0) >= 0.95 && roi >= 4.0);
+                ? (opp.confianca ?? 0) >= 0.9
+                : (opp.confianca ?? 0) >= 0.95);
 
             // Só PRÉ-JOGO: nunca alerta partida que já começou (não fazemos ao vivo).
             if (!alreadyEntered && ehPreJogo(opp) && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {

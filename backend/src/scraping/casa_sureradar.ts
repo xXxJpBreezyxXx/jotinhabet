@@ -204,7 +204,7 @@ export class SureRadarScraper {
 
     // ROI: usa o do site quando é um número são; senão deriva das odds já validadas
     // ((1/totalPerc - 1) * 100 — mesma convenção do revalidationService p/ roi_pct).
-    // Sem isso, um profit_pct null/0 da API suprimiria o alerta WhatsApp (gate ROI >= 5%).
+    // Sem isso, um profit_pct null/0 da API suprimiria o alerta WhatsApp (gate ROI >= 1.5%).
     const roiDerivado = Number(((1 / totalPerc - 1) * 100).toFixed(2));
     const roi = Number.isFinite(sb.profit_pct) && sb.profit_pct > 0 ? sb.profit_pct : roiDerivado;
 
