@@ -665,6 +665,47 @@ export default function App() {
         setLoadingOperation(false);
       });
   };
+
+  // Excluir uma entrada do histórico e REVERTER a banca ativa (estorna o lucro
+  // dessa entrada — inverso exato do lançamento). Serve para desfazer entradas
+  // indevidas. Também reexibe a oportunidade no radar (remove a chave que a ocultava).
+  const handleDeleteOperation = (op: any) => {
+    const lucro = Number(op.lucro_real) || 0;
+    const d = op.detalhes || {};
+    const evento = d.evento || 'esta entrada';
+    if (!confirm(
+      `Excluir "${evento}" do histórico?\n\n` +
+      `O lucro de R$ ${lucro.toFixed(2)} será estornado da sua banca ativa (R$ ${parseFloat(userBanca).toFixed(2)}).`
+    )) return;
+
+    fetch(`/api/operations/${op.id}`, { method: 'DELETE' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          // Reverte a banca: desfaz o "+ lucro" aplicado no lançamento.
+          const novaBanca = (parseFloat(userBanca) - lucro).toFixed(2);
+          setUserBanca(novaBanca);
+          localStorage.setItem('jotinhabet_user_banca', novaBanca);
+
+          // Reexibe a oportunidade no radar: remove a chave gerada no lançamento
+          // (mesmo formato de handleRecordOperation).
+          const key = `${d.evento}_${d.mercado || 'Resultado Final'}_${d.casaA || 'Casa A'}_${d.casaB || 'Casa B'}`;
+          const nextKeys = launchedKeys.filter(k => k !== key);
+          setLaunchedKeys(nextKeys);
+          localStorage.setItem('jotinhabet_launched_keys', JSON.stringify(nextKeys));
+
+          fetchOperations(); // recarrega o histórico
+          alert(`Entrada excluída. Banca revertida para R$ ${novaBanca}.`);
+        } else {
+          alert(`Erro ao excluir: ${data.error}`);
+        }
+      })
+      .catch(err => {
+        console.error('Erro ao excluir operação:', err);
+        alert('Erro ao excluir a entrada.');
+      });
+  };
+
   useEffect(() => {
     const odd1 = parseFloat(calcOdd1);
     const odd2 = parseFloat(calcOdd2);
@@ -1599,6 +1640,7 @@ export default function App() {
                         <th>Investimento</th>
                         <th>Lucro Líquido</th>
                         <th>ROI</th>
+                        <th style={{ textAlign: 'center' }}>Ações</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1620,6 +1662,27 @@ export default function App() {
                             <td>R$ {(op.stake_real_1 + op.stake_real_2).toFixed(2)}</td>
                             <td style={{ color: 'var(--color-success)', fontWeight: 'bold' }}>+ R$ {op.lucro_real.toFixed(2)}</td>
                             <td style={{ color: 'var(--color-accent)', fontWeight: 'bold' }}>{d.roi?.toFixed(2)}%</td>
+                            <td style={{ textAlign: 'center' }}>
+                              <button
+                                onClick={() => handleDeleteOperation(op)}
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.1)',
+                                  border: '1px solid rgba(239, 68, 68, 0.2)',
+                                  borderRadius: '6px',
+                                  width: '26px',
+                                  height: '26px',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  cursor: 'pointer',
+                                  color: '#ef4444',
+                                  transition: 'all 0.15s ease'
+                                }}
+                                title="Excluir entrada e reverter a banca"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
                           </tr>
                         );
                       })}

@@ -327,6 +327,24 @@ app.get('/api/operations', async (req, res) => {
   }
 });
 
+// DELETE - Remover uma entrada lançada na banca (reverter entrada indevida).
+// Só apaga a operação; o estorno do lucro na "banca ativa" é feito no frontend
+// (a banca vive no localStorage do cliente e não no banco).
+app.delete('/api/operations/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { error } = await supabase
+      .from('operacoes')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao excluir operação da banca' });
+  }
+});
+
 // GET last 150 lines of logs/scanner.log
 app.get('/api/logs', (req, res) => {
   try {
