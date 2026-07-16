@@ -18,7 +18,8 @@
     "express": "^4.19.2",
     "openai": "^4.52.0",
     "pg": "^8.22.0",
-    "playwright": "^1.61.1"
+    "playwright": "^1.61.1",
+    "undici": "^8.7.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

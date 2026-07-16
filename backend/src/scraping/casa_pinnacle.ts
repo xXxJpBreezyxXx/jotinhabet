@@ -1,6 +1,16 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
 import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
 import { fetchTextoComRetry } from '../utils/http';
+import { ProxyAgent } from 'undici';
+
+/**
+ * A Pinnacle bloqueia por ASN o IP do datacenter da VPS (HTTP 403). PINNACLE_PROXY
+ * (ex.: http://jotinhabet_tsproxy:1055) aponta pro sidecar Tailscale que sai por um
+ * exit node residencial (celular). O dispatcher é passado SÓ nas requisições da
+ * Pinnacle — o resto do backend continua saindo direto.
+ */
+const PINNACLE_PROXY = process.env.PINNACLE_PROXY || '';
+const pinnacleDispatcher = PINNACLE_PROXY ? new ProxyAgent(PINNACLE_PROXY) : undefined;
 
 /**
  * Pinnacle — via API "arcadia" guest (pública, X-API-Key estática do próprio site).
@@ -81,6 +91,13 @@ export class PinnacleScraper implements OddsScraper {
     };
   }
 
+  /** Init do fetch: headers + dispatcher do proxy (quando PINNACLE_PROXY configurado). */
+  private fetchInit(): RequestInit {
+    const init: any = { headers: this.headers() };
+    if (pinnacleDispatcher) init.dispatcher = pinnacleDispatcher;
+    return init as RequestInit;
+  }
+
   /** Odds americanas → decimais. */
   private americanoParaDecimal(price: number): number {
     if (!Number.isFinite(price) || price === 0) return NaN;
@@ -88,7 +105,9 @@ export class PinnacleScraper implements OddsScraper {
   }
 
   async executarCrawler(esportes: string[], _datas: string[], _headless = true): Promise<ScrapedOdd[]> {
-    console.log(`🤖 [Pinnacle] Extração via API arcadia (guest)...`);
+    console.log(
+      `🤖 [Pinnacle] Extração via API arcadia (guest)${PINNACLE_PROXY ? ` [proxy Tailscale: ${PINNACLE_PROXY}]` : ''}...`
+    );
     const todas: ScrapedOdd[] = [];
     for (const esporte of esportes) {
       const sid = SPORT_ID[esporte];
@@ -108,7 +127,7 @@ export class PinnacleScraper implements OddsScraper {
   private async extrairEsporte(sportId: number): Promise<ScrapedOdd[]> {
     const rMatch = await fetchTextoComRetry(
       `${BASE}/sports/${sportId}/matchups?withSpecials=false&brandId=0`,
-      { headers: this.headers() },
+      this.fetchInit(),
       3,
       'Pinnacle/match'
     );
@@ -146,7 +165,7 @@ export class PinnacleScraper implements OddsScraper {
 
     const r = await fetchTextoComRetry(
       `${BASE}/matchups/${ev.id}/markets/related/straight`,
-      { headers: this.headers() },
+      this.fetchInit(),
       2,
       'Pinnacle/mkt'
     );

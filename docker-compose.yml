@@ -26,6 +26,9 @@ services:
       - PORT=4000
       - FRONTEND_ORIGIN=https://jotinhabet.eurekmind.com
       - SURERADAR_COOKIES_PATH=/app/sureradar.json
+      # Proxy só-Pinnacle via sidecar Tailscale (serviço jotinhabet_tsproxy, exit node
+      # = celular residencial) — contorna o bloqueio de ASN da Pinnacle (HTTP 403).
+      - PINNACLE_PROXY=http://jotinhabet_tsproxy:1055
     volumes:
       - ./sureradar.json:/app/sureradar.json:ro   # cookies do SureRadar (arquivo na raiz do projeto)
       - jotinhabet_logs:/app/logs
