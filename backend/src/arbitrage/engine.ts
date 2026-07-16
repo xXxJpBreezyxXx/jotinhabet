@@ -1,6 +1,7 @@
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { areEventsSame, areTeamsSame, mesmoHorario, forcaMatchEvento, parseKickoff } from './matcher';
 import { mesmaOferta } from './markets';
+import { regraPermiteOportunidade } from './regras';
 
 export interface ArbitrageOpportunity {
   evento: string;
@@ -133,6 +134,8 @@ export class ArbitrageEngine {
         c.evento, c.mercado, melhorA.opcaoA, melhorB.opcaoB,
         melhorA.oddA, melhorB.oddB, melhorA.casa, melhorB.casa, totalPerc, c.esporte
       );
+      // Diretrizes de risco: pula mercado/cruzamento proibido (ex.: futebol 1X2, tênis A×B).
+      if (!regraPermiteOportunidade(opp).ok) continue;
       ops.push(this.enriquecer(opp, forca, tempoConhecido, c.dataHora, c.linha));
     }
 
@@ -152,6 +155,7 @@ export class ArbitrageEngine {
     const dataHora = odd1.dataHora || odd2.dataHora;
     const linha = odd1.linha ?? odd2.linha;
     const registrar = (opp: ArbitrageOpportunity) => {
+      if (!regraPermiteOportunidade(opp).ok) return; // Diretrizes de risco
       oportunidades.push(this.enriquecer(opp, forca, tempoConhecido, dataHora, linha));
     };
 

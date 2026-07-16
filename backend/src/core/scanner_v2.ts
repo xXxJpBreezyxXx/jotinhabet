@@ -1,5 +1,6 @@
 import { ArbitrageEngine, ArbitrageOpportunity } from '../arbitrage/engine';
 import { parseKickoff } from '../arbitrage/matcher';
+import { regraPermiteOportunidade } from '../arbitrage/regras';
 import { OddsScraper } from '../scraping/scraper_base';
 import { BetanoScraper } from '../scraping/casa_a';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
@@ -219,7 +220,15 @@ export class ArbitrageScannerV2 {
     try {
       srOps = await sureradarScraper.extrairOportunidades();
       if (srOps.length > 0) {
-        console.log(`⚡ [Scanner V2] Importando ${srOps.length} surebets diretas do SureRadar!`);
+        // Diretrizes de risco também para o SureRadar (ele decide o par de casas):
+        // rejeita futebol 1X2 e tênis com grupos de W.O. incompatíveis.
+        const permitidas = srOps.filter((o) => regraPermiteOportunidade(o).ok);
+        const bloqueadas = srOps.length - permitidas.length;
+        console.log(
+          `⚡ [Scanner V2] SureRadar: ${permitidas.length} surebets importadas` +
+            (bloqueadas > 0 ? ` (${bloqueadas} bloqueadas pelas Diretrizes de risco)` : '')
+        );
+        srOps = permitidas; // usa a lista filtrada também na reconciliação (limpa bloqueadas do banco)
         oportunidadesGerais.push(...srOps);
       }
     } catch (err: any) {

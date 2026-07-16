@@ -94,8 +94,9 @@ describe('ArbitrageEngine (detecção + confiança + gates)', () => {
   });
 
   it('confiança menor + alerta quando ROI é absurdamente alto', async () => {
-    const casa1 = [odd({ mercado: 'Resultado Final', opcaoA: 'Time A', opcaoB: 'Time B', oddA: 3.0, oddB: 2.0 })];
-    const casa2 = [odd({ mercado: 'Resultado Final', opcaoA: 'Time A', opcaoB: 'Time B', oddA: 3.0, oddB: 3.0 })];
+    // Basquete moneyline é permitido (futebol Resultado Final seria bloqueado pelas Diretrizes).
+    const casa1 = [odd({ esporte: 'Basquete', mercado: 'Resultado Final', opcaoA: 'Time A', opcaoB: 'Time B', oddA: 3.0, oddB: 2.0 })];
+    const casa2 = [odd({ esporte: 'Basquete', mercado: 'Resultado Final', opcaoA: 'Time A', opcaoB: 'Time B', oddA: 3.0, oddB: 3.0 })];
     const ops = await engine.encontrarOportunidades('C1', casa1, 'C2', casa2);
     const alta = ops.find(o => o.lucroGarantidoPerc > 15);
     expect(alta).toBeTruthy();

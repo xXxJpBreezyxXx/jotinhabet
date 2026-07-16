@@ -1,0 +1,83 @@
+/**
+ * Regras de risco da varredura (ver documento "Diretrizes" na raiz do projeto).
+ * Rejeita mercados/cruzamentos que podem dar PREJUÍZO numa surebet.
+ *
+ * Resumo:
+ *  - Futebol: PROIBIDO Resultado Final / 1X2 (3-way, risco do empate). Liberado:
+ *    DNB, Handicap Asiático, Total de Gols, Ambas Marcam.
+ *  - Basquete: vencedor só vale incluindo prorrogação (tratado nos scrapers).
+ *  - Tênis: só cruzar casas do MESMO grupo de regra de abandono (W.O.).
+ *    Grupo A×A ou B×B; A×B é rejeitado (uma perna anula e a outra perde = prejuízo).
+ */
+import { normalizarMercado } from './markets';
+
+// Grupos de regra de W.O. do tênis (Diretrizes §3).
+const GRUPO_A = new Set([
+  'alfabet', 'aposta1', 'apostaganha', 'bet365', 'bet7k', 'betboom', 'betao',
+  'betnacional', 'betsul', 'blaze', 'bolsadeaposta', 'kto', 'novibet', 'pixbet',
+  'reidopitaco', 'seubet', 'stake', 'superbet',
+]);
+const GRUPO_B = new Set(['pinnacle', 'betano', 'betwarrior']);
+
+/** Normaliza o nome da casa: sem acento, minúsculo, sem "(BR)" e sem pontuação. */
+function normCasa(casa: string): string {
+  return (casa || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\(br\)/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+/** Grupo de W.O. do tênis da casa, ou null se desconhecida (→ tratado como incompatível). */
+export function grupoTenis(casa: string): 'A' | 'B' | null {
+  const n = normCasa(casa);
+  if (GRUPO_A.has(n)) return 'A';
+  if (GRUPO_B.has(n)) return 'B';
+  return null;
+}
+
+/** True só se ambas as casas têm grupo conhecido e IGUAL (A×A ou B×B). */
+export function mesmoGrupoTenis(casaA: string, casaB: string): boolean {
+  const ga = grupoTenis(casaA);
+  const gb = grupoTenis(casaB);
+  return ga !== null && ga === gb;
+}
+
+function normEsporte(e?: string): 'futebol' | 'basquete' | 'tenis' | 'outro' {
+  const s = (e || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  if (/futebol|football|soccer/.test(s)) return 'futebol';
+  if (/basquete|basket/.test(s)) return 'basquete';
+  if (/tenis|tennis/.test(s)) return 'tenis';
+  return 'outro';
+}
+
+/** Mercado permitido por esporte. Futebol: Resultado Final/1X2 é PROIBIDO. */
+export function mercadoPermitido(esporte: string | undefined, mercado: string): boolean {
+  const canon = normalizarMercado(mercado); // ex.: RESULTADO_FINAL_FT, TOTAIS_GOLS_FT, HANDICAP_..._FT
+  if (normEsporte(esporte) === 'futebol' && canon.startsWith('RESULTADO_FINAL')) return false;
+  return true;
+}
+
+/**
+ * Decide se uma oportunidade respeita as Diretrizes de risco.
+ * @returns { ok, motivo } — motivo preenchido quando rejeitada (para log).
+ */
+export function regraPermiteOportunidade(opp: {
+  esporte?: string;
+  mercado: string;
+  casaA: string;
+  casaB: string;
+}): { ok: boolean; motivo?: string } {
+  if (!mercadoPermitido(opp.esporte, opp.mercado)) {
+    return { ok: false, motivo: `mercado bloqueado (${opp.esporte}): ${opp.mercado}` };
+  }
+  if (normEsporte(opp.esporte) === 'tenis' && !mesmoGrupoTenis(opp.casaA, opp.casaB)) {
+    return {
+      ok: false,
+      motivo: `tênis: grupos de W.O. incompatíveis (${opp.casaA}[${grupoTenis(opp.casaA) || '?'}] x ${opp.casaB}[${grupoTenis(opp.casaB) || '?'}])`,
+    };
+  }
+  return { ok: true };
+}
