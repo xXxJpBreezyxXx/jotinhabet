@@ -15,9 +15,10 @@ export interface WhatsAppAlert {
   roi: number;
   casa1?: string;
   casa2?: string;
-  nota?: string;        // linha extra (ex.: fonte/confiança para surebets do motor próprio)
+  nota?: string;        // linha extra (ex.: confiança para surebets do motor próprio)
   esporte?: string;     // ex.: "Futebol", "Tênis"
   dataPartida?: string; // ex.: "15/07/2026 10:00"
+  fonte?: string;       // origem da oportunidade: "SureRadar" | "Pré-match (motor próprio)"
 }
 
 export class WhatsAppNotifier {
@@ -133,7 +134,7 @@ export class WhatsAppNotifier {
 
     const linhaEsporte = [a.esporte, a.dataPartida].filter(Boolean).join(' • ');
 
-    return `🔥 *SUREBET: ${a.roi.toFixed(2)}% ROI* 🔥
+    return `🔥 *SUREBET: ${a.roi.toFixed(2)}% ROI* 🔥${a.fonte ? `\n📡 *${a.fonte}*` : ''}
 
 🏆 *${a.evento}*${linhaEsporte ? `\n🏅 ${linhaEsporte}` : ''}
 🎯 Mercado: ${a.mercado}

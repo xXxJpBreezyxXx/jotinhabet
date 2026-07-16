@@ -155,6 +155,12 @@ function isVipOpportunity(opp: { analise_ia?: string }): boolean {
   return /surebet vip/i.test(opp.analise_ia || '');
 }
 
+/** Origem da oportunidade: 'sureradar' (agregador) ou 'prematch' (motor próprio, cruzamento entre casas). */
+function fonteOportunidade(opp: { url?: string; analise_ia?: string }): 'sureradar' | 'prematch' {
+  const s = `${opp.url || ''} ${opp.analise_ia || ''}`.toLowerCase();
+  return s.includes('sureradar') ? 'sureradar' : 'prematch';
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'calculadora' | 'juros-compostos' | 'ai-test'>('dashboard');
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
@@ -197,6 +203,7 @@ export default function App() {
   const [selectedBookmakers, setSelectedBookmakers] = useState<string[]>([]);
   const [selectedSports, setSelectedSports] = useState<string[]>([]);
   const [vipOnly, setVipOnly] = useState<boolean>(false);
+  const [fonteFiltro, setFonteFiltro] = useState<'todas' | 'sureradar' | 'prematch'>('todas');
 
   const mockOpportunities: OpportunityItem[] = [
     {
@@ -433,6 +440,9 @@ export default function App() {
 
     // Filtro "só VIP" (oportunidades ocultas no painel do SureRadar, capturadas via API)
     if (vipOnly && !isVipOpportunity(opp)) return false;
+
+    // Filtro por fonte (SureRadar vs pré-match/motor próprio)
+    if (fonteFiltro !== 'todas' && fonteOportunidade(opp) !== fonteFiltro) return false;
 
     // Filter by event date
     if (filterDate) {
@@ -1311,6 +1321,27 @@ export default function App() {
                               </button>
                             </>
                           )}
+                          {/* Filtro por FONTE: SureRadar (agregador) vs Pré-match (motor próprio) */}
+                          {(() => {
+                            const nSR = opportunitiesToShow.filter((o) => fonteOportunidade(o) === 'sureradar').length;
+                            const nPM = opportunitiesToShow.filter((o) => fonteOportunidade(o) === 'prematch').length;
+                            const toggle = (f: 'sureradar' | 'prematch') => setFonteFiltro((cur) => (cur === f ? 'todas' : f));
+                            const chipFonte = (ativo: boolean, cor: string) =>
+                              ativo
+                                ? { ...chip(true), background: cor, border: `1px solid ${cor}`, color: '#0b0b0b' }
+                                : { ...chip(false), color: cor, border: `1px solid ${cor}80` };
+                            return (
+                              <>
+                                <span style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
+                                <button title="Só oportunidades do SureRadar (agregador)" onClick={() => toggle('sureradar')} style={chipFonte(fonteFiltro === 'sureradar', '#60a5fa')}>
+                                  📡 SureRadar{nSR ? ` (${nSR})` : ''}
+                                </button>
+                                <button title="Só oportunidades da análise pré-match (cruzamento entre casas)" onClick={() => toggle('prematch')} style={chipFonte(fonteFiltro === 'prematch', '#34d399')}>
+                                  🎯 Pré-match{nPM ? ` (${nPM})` : ''}
+                                </button>
+                              </>
+                            );
+                          })()}
                         </>
                       );
                     })()}
@@ -1379,6 +1410,7 @@ export default function App() {
                         const iaAnalisando = analyzingIds.has(opp.id) || opp.ia_status === 'processando';
                         const iaAnalisado = !!(opp.ia_risco || opp.ia_veredito);
                         const isVip = isVipOpportunity(opp);
+                        const fonte = fonteOportunidade(opp);
                         const oddAge = oddAgeInfo(latestOddTs(opp));
                         const ageColor = oddAge?.level === 'stale'
                           ? { c: '#ef4444', bg: 'rgba(239,68,68,0.12)', b: 'rgba(239,68,68,0.3)' }
@@ -1420,6 +1452,17 @@ export default function App() {
                                   🤖 Analisar IA
                                 </button>
                               ) : null}
+                              {/* Origem da oportunidade */}
+                              <span
+                                title={fonte === 'sureradar' ? 'Fonte: SureRadar (agregador de surebets)' : 'Fonte: análise pré-match do JotinhaBet (cruzamento entre casas)'}
+                                style={
+                                  fonte === 'sureradar'
+                                    ? { background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.45)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }
+                                    : { background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.45)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }
+                                }
+                              >
+                                {fonte === 'sureradar' ? '📡 SureRadar' : '🎯 Pré-match'}
+                              </span>
                               {isVip && (
                                 <span
                                   title="Oportunidade VIP: oculta no painel do SureRadar e capturada via API. Sem link direto — busque o evento manualmente nas casas."

@@ -407,9 +407,10 @@ export class ArbitrageScannerV2 {
                  casa2: opp.casaB,
                  esporte: opp.esporte,
                  dataPartida: (opp.evento.match(/\((\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})\)\s*$/) || [])[1],
+                 fonte: ehSureRadar ? 'SureRadar' : 'Pré-match (motor próprio)',
                  nota: ehSureRadar
                    ? undefined
-                   : `Cruzamento próprio ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`,
+                   : `Cruzamento ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`,
                });
                if (success) {
                  markAlertAsSent(alertKey);
