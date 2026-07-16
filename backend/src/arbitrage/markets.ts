@@ -47,9 +47,12 @@ function assunto(s: string): string {
  */
 export function normalizarMercado(raw: string): string {
   const s = (raw || '').toString().toLowerCase();
+  // DNB (Empate Anula / Draw No Bet) antes de tudo — não deve virar RESULTADO_FINAL.
+  if (/empate anula|empate devolve|draw no bet|\bdnb\b/.test(s)) return `DNB_${periodo(s)}`;
   if (/handicap|desvantagem|spread|linha asi/.test(s)) return `HANDICAP_${assunto(s)}_${periodo(s)}`;
   if (/total|over|under|mais de|menos de|acima|abaixo/.test(s)) return `TOTAIS_${assunto(s)}_${periodo(s)}`;
-  if (/ambas.*marcam|both teams to score|btts|ambos marcam|ambas equipes marcam/.test(s)) return `AMBAS_MARCAM_${periodo(s)}`;
+  // BTTS — aceita "ambas"/"ambos ... marcam" e variações.
+  if (/amb[oa]s.*marcam|both teams to score|btts/.test(s)) return `AMBAS_MARCAM_${periodo(s)}`;
   if (/resultado final|match winner|1\s*x\s*2|vencedor|money\s*line|full time result|resultado do jogo|1x2/.test(s)) {
     return `RESULTADO_FINAL_${periodo(s)}`;
   }

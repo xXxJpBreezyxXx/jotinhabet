@@ -214,6 +214,29 @@ export class SuperbetScraper implements OddsScraper {
         });
       }
     }
+
+    // --- BTTS / Ambas as Equipes Marcam (futebol): Sim/Não ---
+    const btts = (ev.odds || []).filter((o) => o.marketName === 'Ambas as Equipes Marcam' && o.status === 'active');
+    const sim = btts.find((o) => /^sim$/i.test(o.name || ''));
+    const nao = btts.find((o) => /^n[aã]o$/i.test(o.name || ''));
+    if (sim && nao && sim.price > 1 && nao.price > 1) {
+      out.push({
+        esporte, evento: eventoStr, dataHora, mercado: 'Ambas equipes marcam',
+        opcaoA: 'Sim', opcaoB: 'Não', oddA: sim.price, oddB: nao.price,
+      });
+    }
+
+    // --- DNB / Empate Anula Aposta (futebol): home vs away (code 1/2) ---
+    const dnb = (ev.odds || []).filter((o) => o.marketName === 'Empate Anula Aposta' && o.status === 'active');
+    const dHome = dnb.find((o) => o.code === '1');
+    const dAway = dnb.find((o) => o.code === '2');
+    if (dHome && dAway && dHome.price > 1 && dAway.price > 1) {
+      out.push({
+        esporte, evento: eventoStr, dataHora, mercado: 'Empate Anula',
+        opcaoA: home, opcaoB: away, oddA: dHome.price, oddB: dAway.price,
+      });
+    }
+
     return out;
   }
 }

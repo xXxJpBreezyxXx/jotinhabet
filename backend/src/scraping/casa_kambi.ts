@@ -240,6 +240,24 @@ export class KambiScraper implements OddsScraper {
       };
     }
 
+    // --- BTTS / Ambas equipes marcam (OT_YES/OT_NO), só o mercado da PARTIDA ---
+    const yes = byType('OT_YES');
+    const no = byType('OT_NO');
+    if (yes && no && criterio === 'Ambos os times marcam') {
+      const oddA = o(yes.odds);
+      const oddB = o(no.odds);
+      if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
+      return { esporte, evento, dataHora, url, mercado: 'Ambas equipes marcam', opcaoA: 'Sim', opcaoB: 'Não', oddA, oddB };
+    }
+
+    // --- DNB / Empate Anula (OT_ONE/OT_TWO, sem empate e sem linha) — ANTES do RF ---
+    if (one && two && !cross && !one.line && /empate anula|draw no bet|sem empate/i.test(criterio)) {
+      const oddA = o(one.odds);
+      const oddB = o(two.odds);
+      if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
+      return { esporte, evento, dataHora, url, mercado: 'Empate Anula', opcaoA: ev.homeName!, opcaoB: ev.awayName!, oddA, oddB };
+    }
+
     // --- RESULTADO FINAL (Jogo) ---
     if (one && two && !one.line) {
       const oddHome = o(one.odds);

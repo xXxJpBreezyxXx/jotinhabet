@@ -209,6 +209,28 @@ export class AltenarWidgetScraper implements OddsScraper {
             oddA: oHome!.price, oddB: oAway!.price,
           });
         }
+
+        // --- Ambas equipes marcam (BTTS): Sim/Não ---
+        else if (base === 'Ambas equipes marcam') {
+          const sim = oddsM.find((o) => /^sim$/i.test(o.name || ''));
+          const nao = oddsM.find((o) => /^n[aã]o$/i.test(o.name || ''));
+          if (!ativa(sim) || !ativa(nao)) continue;
+          out.push({
+            esporte, evento, dataHora, mercado: 'Ambas equipes marcam',
+            opcaoA: 'Sim', opcaoB: 'Não', oddA: sim!.price, oddB: nao!.price,
+          });
+        }
+
+        // --- DNB / Empate devolve aposta: home vs away (empate reembolsa) ---
+        else if (base === 'Empate devolve aposta') {
+          const oHome = oddsM.find((o) => o.competitorId === cids[0]);
+          const oAway = oddsM.find((o) => o.competitorId === cids[1]);
+          if (!ativa(oHome) || !ativa(oAway)) continue;
+          out.push({
+            esporte, evento, dataHora, mercado: 'Empate Anula',
+            opcaoA: home, opcaoB: away, oddA: oHome!.price, oddB: oAway!.price,
+          });
+        }
       }
     }
   }
