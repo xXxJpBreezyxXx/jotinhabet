@@ -1117,10 +1117,10 @@ export default function App() {
 
             {dashboardSubTab === 'radar' && (
               /* Dashboard main layout - Two Column Layout (Sidebar filter + 3-col Cards Grid) */
-              <div style={{ display: 'flex', gap: '24px', width: '100%', alignItems: 'flex-start' }}>
-              
+              <div className="resp-stack" style={{ display: 'flex', gap: '24px', width: '100%', alignItems: 'flex-start' }}>
+
               {/* Lateral Sidebar Filter */}
-              <div className="glass-panel" style={{ width: '260px', padding: '20px', position: 'sticky', top: '24px', display: 'flex', flexDirection: 'column', gap: '16px', flexShrink: 0 }}>
+              <div className="glass-panel resp-full" style={{ width: '260px', padding: '20px', position: 'sticky', top: '24px', display: 'flex', flexDirection: 'column', gap: '16px', flexShrink: 0 }}>
                 <h3 style={{ fontSize: '14px', fontWeight: 'bold', margin: 0, display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)' }}>
                   <Layers size={16} style={{ color: 'var(--color-primary)' }} />
                   Minhas Contas
@@ -1396,7 +1396,7 @@ export default function App() {
                       Nenhuma surebet encontrada. Clique em "Escanear" no topo direito para buscar oportunidades!
                     </div>
                   ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '20px', width: '100%' }}>
+                    <div className="surebets-cards">
                       {sortedOpportunities.map(opp => {
                         const isV2 = !!opp.casa_a_nome;
                         const casaA = opp.casa_a_nome || 'Casa 1';
@@ -1744,7 +1744,7 @@ export default function App() {
                 Calculadora de Arbitragem (Surebet)
               </h3>
               
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
+              <div className="resp-grid-2" style={{ gap: '16px', marginBottom: '20px' }}>
                 <div className="form-group">
                   <label>Odd Casa 1 (O1)</label>
                   <input className="form-control" type="number" step="0.01" value={calcOdd1} onChange={(e) => setCalcOdd1(e.target.value)} />
@@ -1798,7 +1798,7 @@ export default function App() {
                     </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', fontSize: '14px' }}>
+                  <div className="resp-grid-2" style={{ gap: '14px', fontSize: '14px' }}>
                     <div>
                       <div style={{ color: 'var(--text-secondary)' }}>Aposta Casa 1:</div>
                       <div style={{ fontSize: '18px', fontWeight: 'bold' }}>R$ {calcResult.stake1.toFixed(2)}</div>
@@ -1826,7 +1826,7 @@ export default function App() {
         )}
 
         {activeTab === 'juros-compostos' && (
-          <div className="dashboard-grid" style={{ gridTemplateColumns: '0.8fr 2fr' }}>
+          <div className="resp-grid-08">
             {/* Control Form */}
             <div className="glass-panel" style={{ padding: '24px', height: 'fit-content' }}>
               <h3 className="card-title">
@@ -2019,7 +2019,7 @@ export default function App() {
               </div>
 
               {/* Editable Odds inputs */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '-8px', marginBottom: '8px' }}>
+              <div className="resp-grid-2" style={{ gap: '16px', marginTop: '-8px', marginBottom: '8px' }}>
                 <div className="form-group" style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '12px', borderRadius: '8px', border: '1px dashed var(--panel-border)' }}>
                   <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Odd {selectedOpp.casa_a_nome || 'Casa 1'}</label>
                   <input 
@@ -2044,7 +2044,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+              <div className="resp-grid-2" style={{ gap: '16px' }}>
                 <div 
                   className="odd-box clickable-odd-box" 
                   style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}
@@ -2186,7 +2186,7 @@ export default function App() {
                         </div>
 
                         {typeof revalResult.odd_a === 'number' && typeof revalResult.odd_b === 'number' && (
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: revalResult.movimento?.explicacao ? '8px' : 0 }}>
+                          <div className="resp-grid-2" style={{ gap: '8px', marginBottom: revalResult.movimento?.explicacao ? '8px' : 0 }}>
                             {[
                               { casa: selectedOpp.casa_a_nome, opc: selectedOpp.opcao_a, old: selectedOpp.odd_casa_1, novo: revalResult.odd_a as number },
                               { casa: selectedOpp.casa_b_nome, opc: selectedOpp.opcao_b, old: selectedOpp.odd_casa_2, novo: revalResult.odd_b as number }
