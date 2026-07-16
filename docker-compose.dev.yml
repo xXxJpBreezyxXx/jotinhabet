@@ -1,0 +1,108 @@
+# JotinhaBet — stack de DESENVOLVIMENTO (hot-reload) para DOCKER SWARM.
+#
+# Objetivo: alterar código do backend/frontend e ver o efeito SEM rebuildar a
+# imagem nem re-deployar. Mesmo nome de stack (`jotinhabet`), mesmo domínio e
+# mesmos roteadores Traefik da produção — esta stack SUBSTITUI a de produção
+# enquanto você desenvolve.
+#
+# COMO FUNCIONA
+#  - backend : roda `npm run dev` (ts-node-dev --respawn) sobre a MESMA imagem de
+#              produção (que já tem ts-node-dev/typescript). Bind-mount de
+#              ./backend/src → recarrega a cada mudança.
+#  - frontend: roda o Vite dev server (estágio `build` do Dockerfile), com HMR
+#              atrás do Traefik/HTTPS. Bind-mount de ./frontend → HMR na hora.
+#
+# ENTRAR EM MODO DEV (rodar da RAIZ do projeto na VPS):
+#   1) docker compose -f docker-compose.dev.yml build frontend   # imagem dev do Vite (1x; e quando mudar deps)
+#   2) docker compose build backend                              # só se jotinhabet-backend:latest ainda não existir
+#   3) docker stack deploy -c docker-compose.dev.yml jotinhabet --resolve-image never
+#
+# DESENVOLVER: editar no PC → git push → na VPS `git pull`.
+#   ts-node-dev respawna o backend e o Vite aplica HMR — sem build, sem redeploy.
+#
+# VOLTAR PARA PRODUÇÃO:
+#   docker compose build \
+#     && docker stack deploy -c docker-compose.yml jotinhabet --resolve-image never \
+#     && docker service update --force jotinhabet_backend \
+#     && docker service update --force jotinhabet_frontend
+
+services:
+  backend:
+    # Reaproveita a imagem de produção — ela JÁ contém ts-node-dev + typescript
+    # (o Dockerfile faz `npm ci --include=dev`). Só trocamos o comando.
+    image: jotinhabet-backend:latest
+    command: ["npm", "run", "dev"]   # ts-node-dev --respawn --transpile-only src/index.ts
+    env_file:
+      - ./backend/.env
+    environment:
+      - TZ=America/Sao_Paulo
+      - NODE_ENV=development
+      - PORT=4000
+      - FRONTEND_ORIGIN=https://jotinhabet.eurekmind.com
+      - SURERADAR_COOKIES_PATH=/app/sureradar.json
+    volumes:
+      - ./sureradar.json:/app/sureradar.json:ro
+      - jotinhabet_logs:/app/logs
+      # Hot-reload: só o fonte é montado — /app/node_modules e /app/dist da imagem ficam intactos.
+      - ./backend/src:/app/src
+    networks:
+      - RedeEurek
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=RedeEurek"
+        - "traefik.http.routers.jotinhabet-api.rule=Host(`jotinhabet.eurekmind.com`) && PathPrefix(`/api`)"
+        - "traefik.http.routers.jotinhabet-api.entrypoints=websecure"
+        - "traefik.http.routers.jotinhabet-api.tls=true"
+        - "traefik.http.routers.jotinhabet-api.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.jotinhabet-api.priority=100"
+        - "traefik.http.services.jotinhabet-api.loadbalancer.server.port=4000"
+
+  frontend:
+    # Reaproveita o estágio `build` do Dockerfile existente (node:20-alpine com Vite) —
+    # NÃO precisa de Dockerfile novo. `docker stack deploy` ignora build:, então
+    # buildar antes: docker compose -f docker-compose.dev.yml build frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: build
+    image: jotinhabet-frontend:dev
+    # Vite dev server escutando na 80 → mantém a label Traefik server.port=80 da produção.
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "80"]
+    environment:
+      - VITE_PORT=80
+      - VITE_ALLOWED_HOST=jotinhabet.eurekmind.com
+      - VITE_HMR_HOST=jotinhabet.eurekmind.com
+      # Fallback de detecção de mudanças caso o inotify não propague pelo bind-mount.
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      # Projeto inteiro por bind (index.html, vite.config.ts, src/, configs) …
+      - ./frontend:/app
+      # … e um volume anônimo preservando o node_modules da imagem (senão o bind o esconderia).
+      - /app/node_modules
+    networks:
+      - RedeEurek
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=RedeEurek"
+        - "traefik.http.routers.jotinhabet-web.rule=Host(`jotinhabet.eurekmind.com`)"
+        - "traefik.http.routers.jotinhabet-web.entrypoints=websecure"
+        - "traefik.http.routers.jotinhabet-web.tls=true"
+        - "traefik.http.routers.jotinhabet-web.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.jotinhabet-web.priority=1"
+        - "traefik.http.services.jotinhabet-web.loadbalancer.server.port=80"
+
+volumes:
+  jotinhabet_logs:
+
+networks:
+  RedeEurek:
+    external: true
+    name: RedeEurek
