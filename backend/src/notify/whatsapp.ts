@@ -35,6 +35,85 @@ export class WhatsAppNotifier {
   }
 
   /**
+   * Resolve o destino do envio a partir de EVOLUTION_RECIPIENT:
+   *  - JID (grupo "…@g.us" ou contato "…@s.whatsapp.net") → usado COMO ESTÁ.
+   *  - número de telefone → mantém só os dígitos (remove +, espaços, etc.).
+   * Sem isto, um JID de grupo perderia o sufixo "@g.us" no replace(/\D/g) e a
+   * Evolution não o reconheceria como grupo.
+   */
+  private formatarDestino(recipient: string): string {
+    const r = (recipient || '').trim();
+    if (r.includes('@')) return r; // já é um JID (grupo/contato)
+    return r.replace(/\D/g, '');   // número de telefone
+  }
+
+  /**
+   * Busca no Evolution GO o token da instância configurada (necessário para enviar).
+   * Retorna null (e loga) se as instâncias não puderem ser lidas ou a instância não existir.
+   */
+  private async obterTokenInstancia(): Promise<string | null> {
+    console.log(`✉️ [WhatsApp] Buscando token da instância "${this.instanceName}" no Evolution GO...`);
+    const instancesResponse = await fetch(`${this.apiUrl}/instance/all`, {
+      method: 'GET',
+      headers: { apikey: this.apiKey },
+    });
+    if (!instancesResponse.ok) {
+      const errText = await instancesResponse.text();
+      console.error(`❌ [WhatsApp] Falha ao obter instâncias da Evolution GO (${instancesResponse.status}):`, errText);
+      return null;
+    }
+    const instancesJson: any = await instancesResponse.json();
+    const targetInstance = (instancesJson.data || []).find((inst: any) => inst.name === this.instanceName);
+    if (!targetInstance) {
+      console.error(`❌ [WhatsApp] Instância "${this.instanceName}" não encontrada no servidor.`);
+      return null;
+    }
+    if (!targetInstance.connected) {
+      console.warn(`⚠️ [WhatsApp] Instância "${this.instanceName}" está desconectada do WhatsApp.`);
+    }
+    return targetInstance.token;
+  }
+
+  /**
+   * Best-effort: lista os grupos do WhatsApp (subject + JID "…@g.us"), para descobrir
+   * qual JID colocar em EVOLUTION_RECIPIENT. A rota de grupos varia por versão do
+   * evolution-go; tenta uma lista de candidatos e devolve a 1ª que responder com grupos.
+   * Se nenhuma responder, veja o Swagger em <EVOLUTION_API_URL>/swagger/index.html.
+   */
+  async listarGrupos(): Promise<Array<{ subject: string; id: string }>> {
+    if (!this.apiUrl || !this.apiKey || !this.instanceName) {
+      console.warn('⚠️ [WhatsApp] Configuração da Evolution API incompleta no .env.');
+      return [];
+    }
+    const token = await this.obterTokenInstancia();
+    if (!token) return [];
+
+    const candidatos = ['/group/all', '/group/list', '/groups', '/group/fetchAll', '/chat/all', '/chats'];
+    for (const path of candidatos) {
+      try {
+        const r = await fetch(`${this.apiUrl}${path}`, { headers: { apikey: token } });
+        if (!r.ok) continue;
+        const j: any = await r.json();
+        const arr = Array.isArray(j) ? j : j.data || j.groups || j.chats || [];
+        const grupos = (Array.isArray(arr) ? arr : [])
+          .map((g: any) => ({
+            subject: g.subject || g.name || g.pushName || '(sem nome)',
+            id: g.id || g.jid || g.remoteJid || '',
+          }))
+          .filter((g: any) => /@g\.us$/i.test(g.id));
+        if (grupos.length) {
+          console.log(`   [WhatsApp] ${grupos.length} grupo(s) via ${path}`);
+          return grupos;
+        }
+      } catch {
+        /* tenta o próximo candidato */
+      }
+    }
+    console.warn('⚠️ [WhatsApp] Nenhuma rota de grupos respondeu. Confira <EVOLUTION_API_URL>/swagger/index.html.');
+    return [];
+  }
+
+  /**
    * Obtém o link direto da casa de aposta.
    */
   private obterLinkCasa(casaName: string): string {
@@ -62,43 +141,18 @@ export class WhatsAppNotifier {
     }
 
     const mensagem = this.formatarMensagem(alert);
-    const numeroLimpo = this.recipient.replace(/\D/g, '');
+    const destino = this.formatarDestino(this.recipient);
+    const ehGrupo = /@g\.us$/i.test(destino);
 
     try {
-      console.log(`✉️ [WhatsApp] Buscando token da instância "${this.instanceName}" no Evolution GO...`);
-      
-      // 1. Obter todas as instâncias para encontrar o token
-      const instancesResponse = await fetch(`${this.apiUrl}/instance/all`, {
-        method: 'GET',
-        headers: {
-          'apikey': this.apiKey
-        }
-      });
+      const instanceToken = await this.obterTokenInstancia();
+      if (!instanceToken) return false;
 
-      if (!instancesResponse.ok) {
-        const errText = await instancesResponse.text();
-        console.error(`❌ [WhatsApp] Falha ao obter instâncias da Evolution GO (${instancesResponse.status}):`, errText);
-        return false;
-      }
-
-      const instancesJson: any = await instancesResponse.json();
-      const instancesList = instancesJson.data || [];
-      const targetInstance = instancesList.find((inst: any) => inst.name === this.instanceName);
-
-      if (!targetInstance) {
-        console.error(`❌ [WhatsApp] Instância "${this.instanceName}" não encontrada no servidor.`);
-        return false;
-      }
-
-      if (!targetInstance.connected) {
-        console.warn(`⚠️ [WhatsApp] Instância "${this.instanceName}" está desconectada do WhatsApp.`);
-      }
-
-      const instanceToken = targetInstance.token;
       const sendEndpoint = `${this.apiUrl}/send/text`;
+      console.log(
+        `✉️ [WhatsApp] Enviando alerta de surebet para ${ehGrupo ? 'o grupo' : 'o número'} ${destino} usando a instância "${this.instanceName}"...`
+      );
 
-      console.log(`✉️ [WhatsApp] Enviando alerta de surebet para o número ${numeroLimpo} usando a instância "${this.instanceName}"...`);
-      
       const response = await fetch(sendEndpoint, {
         method: 'POST',
         headers: {
@@ -106,7 +160,7 @@ export class WhatsAppNotifier {
           'apikey': instanceToken
         },
         body: JSON.stringify({
-          number: numeroLimpo,
+          number: destino,
           text: mensagem
         })
       });

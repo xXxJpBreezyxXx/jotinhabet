@@ -12,6 +12,7 @@ import { EnrichmentService } from './scheduler/enrichmentService';
 import { RevalidationService } from './core/revalidationService';
 import { requireApiToken } from './auth/apiToken';
 import { generateWithFallback } from './IA/aiProvider';
+import { WhatsAppNotifier } from './notify/whatsapp';
 
 dotenv.config();
 
@@ -116,6 +117,17 @@ app.post('/api/ai/chat', requireApiToken, async (req, res) => {
   } catch (error: any) {
     console.error('[ai/chat] erro:', error?.message || error);
     res.status(500).json({ error: 'Erro no chat de IA' });
+  }
+});
+
+// WhatsApp: lista os grupos (subject + JID "…@g.us") para descobrir o EVOLUTION_RECIPIENT.
+// Abra no navegador, copie o "id" do grupo desejado e coloque em EVOLUTION_RECIPIENT no .env.
+app.get('/api/whatsapp/grupos', async (_req, res) => {
+  try {
+    const grupos = await new WhatsAppNotifier().listarGrupos();
+    res.json({ count: grupos.length, grupos });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Erro ao listar grupos do WhatsApp' });
   }
 });
 
