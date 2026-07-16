@@ -21,6 +21,11 @@ interface KambiConfig {
   host?: string; // default us.offering-api.kambicdn.com
   referer: string; // ex: 'https://www.kto.bet.br/'
   maxEventosPorEsporte?: number; // limita o custo (default 60)
+  // client_id/channel_id do Kambi: SELECIONAM a configuração de odds do operador.
+  // SEM eles a API devolve uma oferta genérica DIFERENTE do que o site mostra (odds
+  // inconsistentes). Capturado do próprio site (KTO: client_id=200, channel_id=1).
+  clientId?: number;
+  channelId?: number;
 }
 
 interface KambiOutcome {
@@ -66,6 +71,8 @@ export class KambiScraper implements OddsScraper {
     this.cfg = {
       host: 'us.offering-api.kambicdn.com',
       maxEventosPorEsporte: 60,
+      clientId: 0,
+      channelId: 1,
       ...cfg,
     };
   }
@@ -76,6 +83,12 @@ export class KambiScraper implements OddsScraper {
 
   private base(): string {
     return `https://${this.cfg.host}/offering/v2018/${this.cfg.offering}`;
+  }
+
+  /** Params comuns; client_id/channel_id alinham as odds ao que o operador exibe. */
+  private commonParams(): string {
+    const cid = this.cfg.clientId ? `&client_id=${this.cfg.clientId}&channel_id=${this.cfg.channelId}` : '';
+    return `lang=pt_BR&market=BR${cid}`;
   }
 
   private headers() {
@@ -110,7 +123,7 @@ export class KambiScraper implements OddsScraper {
 
   private async extrairEsporte(sportPath: string): Promise<ScrapedOdd[]> {
     // 1) Lista de eventos (para obter IDs + nomes + horários).
-    const lvUrl = `${this.base()}/listView/${sportPath}.json?lang=pt_BR&market=BR`;
+    const lvUrl = `${this.base()}/listView/${sportPath}.json?${this.commonParams()}`;
     const lv = await fetchTextoComRetry(lvUrl, { headers: this.headers() }, 3, `${this.cfg.nome}/list`);
     if (lv.status !== 200) throw new Error(`listView HTTP ${lv.status}`);
     const lvJson = JSON.parse(lv.body);
@@ -137,7 +150,7 @@ export class KambiScraper implements OddsScraper {
     const ids = eventosLimitados.map((e) => e.id);
     for (let i = 0; i < ids.length; i += 25) {
       const lote = ids.slice(i, i + 25);
-      const boUrl = `${this.base()}/betoffer/event/${lote.join(',')}?lang=pt_BR&market=BR&includeParticipants=false&onlyMain=false`;
+      const boUrl = `${this.base()}/betoffer/event/${lote.join(',')}.json?${this.commonParams()}&includeParticipants=false&onlyMain=false`;
       let resp;
       try {
         resp = await fetchTextoComRetry(boUrl, { headers: this.headers() }, 2, `${this.cfg.nome}/bo`);
@@ -266,21 +279,23 @@ export class KambiScraper implements OddsScraper {
   }
 }
 
-/** KTO — Kambi offering "ktobr". */
+/** KTO — Kambi offering "ktobr", client_id=200 (capturado do site → odds consistentes). */
 export class KtoScraper extends KambiScraper {
   constructor() {
-    super({ nome: 'KTO', offering: 'ktobr', referer: 'https://www.kto.bet.br/' });
+    super({ nome: 'KTO', offering: 'ktobr', referer: 'https://www.kto.bet.br/', clientId: 200, channelId: 1 });
   }
 }
 
-/** BetWarrior — Kambi offering "bwpe" (descoberto no HTML do site; host EU responde). */
+/** BetWarrior — Kambi offering "bwbr", client_id=200 (capturado do site; host EU). */
 export class BetWarriorScraper extends KambiScraper {
   constructor() {
     super({
       nome: 'BetWarrior',
-      offering: 'bwpe',
+      offering: 'bwbr',
       host: 'eu.offering-api.kambicdn.com',
       referer: 'https://apostas.betwarrior.bet.br/',
+      clientId: 200,
+      channelId: 1,
     });
   }
 }
