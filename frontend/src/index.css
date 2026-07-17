@@ -270,7 +270,7 @@ h1, h2, h3, h4 {
   flex: 1;
   padding: 40px;
   overflow-y: auto;
-  max-width: 1440px;
+  max-width: 1600px; /* monitores largos: mais respiro p/ as 3 colunas de cards */
   margin: 0 auto;
   width: 100%;
 }
@@ -374,14 +374,16 @@ h1, h2, h3, h4 {
   .resp-grid-08 { display: grid; grid-template-columns: 0.8fr 2fr; }
 }
 
-/* Cards do radar de surebets: 3 colunas no desktop (menos scroll), 2 no tablet, 1 no
-   celular. Mobile-first flex (empilha) → grid no desktop, mesma técnica dos forms. */
+/* Cards do radar de surebets: 3 colunas SÓ em tela larga (>=1400px), 2 no desktop
+   comum/tablet, 1 no celular. Entre a sidebar (260px) e o filtro (260px), 3 colunas
+   abaixo de 1400px deixavam o card com ~220px e o conteúdo era cortado.
+   Mobile-first flex (empilha) → grid no desktop, mesma técnica dos forms. */
 .surebets-cards { display: flex; flex-direction: column; gap: 20px; width: 100%; }
 @media (min-width: 769px) {
-  .surebets-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .surebets-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (min-width: 769px) and (max-width: 1100px) {
-  .surebets-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 1400px) {
+  .surebets-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 768px) {
@@ -790,11 +792,12 @@ h1, h2, h3, h4 {
 .roi-badge {
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   color: white;
-  padding: 8px 16px;
+  padding: 8px 12px;
   border-radius: 8px;
   font-weight: 800;
   font-size: 12px;
   text-transform: uppercase;
+  white-space: nowrap; /* 1 linha sempre (o rodapé faz wrap do botão, não do chip) */
   display: flex;
   align-items: center;
   gap: 6px;

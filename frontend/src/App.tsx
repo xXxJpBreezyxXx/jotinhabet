@@ -1596,7 +1596,9 @@ export default function App() {
                         <div key={opp.id} className="surebet-card" style={{ border: isVip ? '1px solid rgba(234, 179, 8, 0.5)' : opp.roi_pct > 2.5 ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid #1e293b' }}>
                           <div className="surebet-header">
                             <span>{getSportBadge(opp.esporte)} • {new Date(opp.detectada_em).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            {/* flexWrap: com 3 colunas no desktop o card fica ~280px e a fileira de
+                                badges estourava — o overflow:hidden do card CORTAVA as últimas. */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end', rowGap: '6px' }}>
                               {oddAge && (
                                 <span
                                   title={`Odd coletada ${oddAge.label}${oddAge.level !== 'fresh' ? ' — revalide antes de apostar' : ''}`}
@@ -1700,7 +1702,9 @@ export default function App() {
                           </div>
 
                           <div className="surebet-footer" style={{ flexDirection: 'column', gap: '12px' }}>
-                            <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'space-between', gap: '12px', width: '100%' }}>
+                            {/* flexWrap: em card estreito o CALCULAR desce p/ baixo do chip de ROI
+                                (que aí fica em 1 linha) em vez de espremê-lo em 3 linhas. */}
+                            <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'space-between', gap: '12px', width: '100%', flexWrap: 'wrap' }}>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1 }}>
                                 <div className="roi-badge" style={{ justifyContent: 'flex-start' }}>
                                   📈 {opp.roi_pct}% RETORNO CERTO
