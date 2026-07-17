@@ -133,15 +133,19 @@ export class PinnacleScraper implements OddsScraper {
     const sids = esporte && SPORT_ID[esporte] ? [SPORT_ID[esporte]] : [...new Set(Object.values(SPORT_ID))];
     for (const sid of sids) {
       try {
+        // 1 tentativa/10s: com o túnel morto, o gate não pode pendurar a varredura.
         const rMatch = await fetchTextoComRetry(
           `${BASE}/sports/${sid}/matchups?withSpecials=false&brandId=0`,
-          this.fetchInit(), 2, 'Pinnacle/reval', 15000
+          this.fetchInit(), 1, 'Pinnacle/reval', 10000
         );
         if (rMatch.status !== 200) continue;
         const matchups: PinMatchup[] = JSON.parse(rMatch.body);
         const alvo = matchups
           .filter((m) => {
-            if (m.parentId || (m.participants?.length || 0) < 2) return false;
+            // Mesmos filtros da varredura: raiz, 2 participantes, NÃO ao vivo, pré-jogo.
+            if (m.parentId || (m.participants?.length || 0) < 2 || m.isLive) return false;
+            const t = Date.parse(m.startTime || '');
+            if (!isNaN(t) && t <= Date.now()) return false;
             const home = m.participants!.find((p) => p.alignment === 'home')?.name;
             const away = m.participants!.find((p) => p.alignment === 'away')?.name;
             return !!home && !!away && areEventsSame(`${home} vs ${away}`, evento);

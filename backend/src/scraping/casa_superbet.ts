@@ -129,9 +129,15 @@ export class SuperbetScraper implements OddsScraper {
     for (const sid of sids) {
       try {
         const url = `${BASE}/events/by-date?currentStatus=active&offerState=prematch&startDate=${this.fmtData(now)}&endDate=${this.fmtData(end)}&sportId=${sid}`;
-        const r = await fetchTextoComRetry(url, { headers: this.headers() }, 2, 'Superbet/reval', 15000);
+        const r = await fetchTextoComRetry(url, { headers: this.headers() }, 1, 'Superbet/reval', 10000);
         if (r.status !== 200) continue;
+        const agora = Date.now();
         const evs: SbEvent[] = ((JSON.parse(r.body).data || []) as SbEvent[])
+          // Mesmo filtro da varredura: só PRÉ-JOGO (início no futuro).
+          .filter((ev) => {
+            const t = Date.parse((ev.matchDate || '').replace(' ', 'T') + 'Z');
+            return isNaN(t) || t > agora;
+          })
           .filter((ev) => {
             const par = this.evento(ev.matchName);
             return !!par && areEventsSame(`${par[0]} vs ${par[1]}`, evento);

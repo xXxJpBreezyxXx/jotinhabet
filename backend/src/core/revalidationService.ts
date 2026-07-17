@@ -1,7 +1,7 @@
 import { supabase } from '../db/client';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { ArbitrageOpportunity } from '../arbitrage/engine';
-import { areEventsSame, areTeamsSame } from '../arbitrage/matcher';
+import { areEventsSame, areTeamsSame, jaroWinkler } from '../arbitrage/matcher';
 import { mesmaOferta } from '../arbitrage/markets';
 import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
@@ -94,6 +94,33 @@ export class RevalidationService {
     return (s || '').toString().trim().toLowerCase();
   }
 
+  /**
+   * Semeia o cache do SureRadar com a extração feita pela PRÓPRIA varredura — o gate
+   * pré-alerta reusa a mesma lista em vez de re-extrair tudo (2ª extração completa
+   * por scan, incluindo chromium no modo fallback).
+   */
+  seedSureRadarCache(ops: ArbitrageOpportunity[], fonte: string): void {
+    if (ops && (ops.length > 0 || fonte === 'api')) {
+      this.cache = { at: Date.now(), ops, fonte };
+      this.ultimaFonteFresh = fonte;
+    }
+  }
+
+  /** Memo por varredura das odds re-buscadas (casa|evento|esporte → odds, TTL 60s). */
+  private memoOdds = new Map<string, { at: number; odds: ScrapedOdd[] }>();
+  private async oddsDoEventoMemo(casa: string, evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    const key = `${this.norm(casa)}|${this.norm(evento)}|${this.norm(esporte)}`;
+    const hit = this.memoOdds.get(key);
+    if (hit && Date.now() - hit.at < 60_000) return hit.odds;
+    const fab = SCRAPER_FACTORY[this.norm(casa)];
+    if (!fab) return [];
+    const odds = await fab().oddsDoEvento(evento, esporte);
+    this.memoOdds.set(key, { at: Date.now(), odds });
+    // higiene: não deixa o memo crescer sem limite entre varreduras
+    if (this.memoOdds.size > 200) this.memoOdds.clear();
+    return odds;
+  }
+
   /** True se o par de casas do card fresco é o mesmo da oportunidade salva. */
   private casasBatem(fresh: ArbitrageOpportunity, opp: any): boolean {
     const a = [this.norm(fresh.casaA), this.norm(fresh.casaB)].sort();
@@ -141,19 +168,38 @@ export class RevalidationService {
     return m ? parseFloat(m[1]) : null;
   }
 
-  /** Última linha numérica de um rótulo de opção ("Mais de 2.5" → 2.5), ou null. */
+  /**
+   * Linha de um rótulo de opção, SÓ quando ele a carrega explicitamente:
+   * handicap embutido "Time (-1.5)" → 1.5; total "Mais de 2.5" → 2.5; senão null.
+   * (Regex genérico de dígitos pegava número de NOME DE TIME — "Philadelphia 76ers"
+   * virava linha 76 e a perna ficava inencontrável.)
+   */
   private linhaDaOpcao(s: string): number | null {
-    const nums = (s || '').match(/[+-]?\d+(?:\.\d+)?/g);
-    return nums && nums.length ? Math.abs(parseFloat(nums[nums.length - 1])) : null;
+    const emb = this.linhaEmbutida(s);
+    if (emb !== null) return Math.abs(emb);
+    const m = (s || '').match(/\b(?:mais de|menos de|over|under|acima de|abaixo de)\s+([+-]?\d+(?:\.\d+)?)/i);
+    return m ? Math.abs(parseFloat(m[1])) : null;
+  }
+
+  /** Direção over/under de um rótulo de total, ou null quando não é total. */
+  private direcaoTotal(s: string): 'over' | 'under' | null {
+    const n = this.norm(s);
+    if (/^(mais de|over|acima)/.test(n)) return 'over';
+    if (/^(menos de|under|abaixo)/.test(n)) return 'under';
+    return null;
   }
 
   /**
-   * A opção fresca é a MESMA seleção da armazenada? Nome de time ignora o sinal do
-   * handicap, então quando ambas embutem linha ("K27 (+1.5)" vs "K27 (-1.5)"), o valor
-   * COM SINAL também tem que bater — lição do pareamento sign-aware do motor.
+   * A opção fresca é a MESMA seleção da armazenada? Duas guardas antes do fuzzy:
+   *  - direções over/under opostas nunca casam ("Mais de X" × "Menos de X" tem
+   *    Jaro-Winkler ~0.86 e enganava o areTeamsSame — devolvia a odd da perna ERRADA);
+   *  - handicap embutido com valor COM SINAL diferente nunca casa (lição sign-aware).
    */
   private opcaoIgual(fresca: string, salva: string): boolean {
     if (this.norm(fresca) === this.norm(salva)) return true;
+    const df = this.direcaoTotal(fresca);
+    const ds = this.direcaoTotal(salva);
+    if ((df || ds) && df !== ds) return false;
     const lf = this.linhaEmbutida(fresca);
     const ls = this.linhaEmbutida(salva);
     if (lf !== null && ls !== null && Math.abs(lf - ls) > 1e-9) return false;
@@ -168,13 +214,37 @@ export class RevalidationService {
     opcao: string
   ): number | null {
     // Sem linha armazenada (coluna não existe no banco), deriva do rótulo da opção.
-    const linhaAlvo = linha ?? this.linhaDaOpcao(opcao) ?? null;
+    // Comparação por MÓDULO nos dois lados: ScrapedOdd.linha de handicap é assinada
+    // (-1.5) e a derivada do rótulo é absoluta — sem abs, handicap negativo dava
+    // 'expirada' falsa. A identidade da seleção continua sign-aware via opcaoIgual.
+    const alvoRaw = linha ?? this.linhaDaOpcao(opcao) ?? null;
+    const linhaAlvo = alvoRaw === null ? null : Math.abs(alvoRaw);
     for (const o of odds) {
-      if (!mesmaOferta(o.mercado, o.linha ?? this.linhaDaOpcao(o.opcaoA), mercado, linhaAlvo)) continue;
-      if (this.opcaoIgual(o.opcaoA, opcao)) return o.oddA;
-      if (this.opcaoIgual(o.opcaoB, opcao)) return o.oddB;
+      const lo = o.linha ?? this.linhaDaOpcao(o.opcaoA);
+      if (!mesmaOferta(o.mercado, lo == null ? null : Math.abs(lo), mercado, linhaAlvo)) continue;
+      // Igualdade EXATA primeiro nas duas opções (os parsers usam rótulos canônicos,
+      // então o exato resolve totais); o fuzzy fica só p/ variação de nome de time.
+      if (this.norm(o.opcaoA) === this.norm(opcao)) return o.oddA;
+      if (this.norm(o.opcaoB) === this.norm(opcao)) return o.oddB;
+      // Fase fuzzy com DESAMBIGUAÇÃO: compara só a parte do TIME (sem a linha) e só o
+      // lado que casa MELHOR pode decidir — o sinal daquele lado é a palavra final.
+      // Sem isso, times de nomes parecidos ("Atletico GO"/"Atletico MG") deixavam a
+      // perna espelhada (+1.5 do outro time) responder pela seleção buscada.
+      const alvoTime = this.norm(this.semLinha(opcao));
+      const simA = jaroWinkler(this.norm(this.semLinha(o.opcaoA)), alvoTime);
+      const simB = jaroWinkler(this.norm(this.semLinha(o.opcaoB)), alvoTime);
+      if (simA >= simB) {
+        if (this.opcaoIgual(o.opcaoA, opcao)) return o.oddA;
+      } else if (this.opcaoIgual(o.opcaoB, opcao)) {
+        return o.oddB;
+      }
     }
     return null;
+  }
+
+  /** Rótulo de opção sem a linha embutida no fim ("Time A (-1.5)" → "Time A"). */
+  private semLinha(s: string): string {
+    return (s || '').replace(/\(([+-]?\d+(?:\.\d+)?)\)\s*$/, '').trim();
   }
 
   /**
@@ -201,14 +271,19 @@ export class RevalidationService {
         if ((!fresh || fresh.length === 0) && this.ultimaFonteFresh !== 'api') {
           return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: 'SureRadar indisponível agora (fonte degradada)' };
         }
+        // Confere também as OPÇÕES (em qualquer ordem) — sem isso, um card do mesmo
+        // evento/mercado com LINHA diferente validava a oportunidade errada.
         const match = fresh.find(
           (o) =>
             areEventsSame(String(o.evento || ''), String(opp.evento || '')) &&
             [this.norm(o.casaA), this.norm(o.casaB)].sort().join('|') === [this.norm(opp.casaA), this.norm(opp.casaB)].sort().join('|') &&
-            this.norm(o.mercado) === this.norm(opp.mercado)
+            this.norm(o.mercado) === this.norm(opp.mercado) &&
+            ((this.opcaoIgual(o.opcaoA, opp.opcaoA) && this.opcaoIgual(o.opcaoB, opp.opcaoB)) ||
+              (this.opcaoIgual(o.opcaoA, opp.opcaoB) && this.opcaoIgual(o.opcaoB, opp.opcaoA)))
         );
         if (!match) return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: 'não está mais na lista do SureRadar' };
-        const alinhado = this.norm(match.casaA) === this.norm(opp.casaA);
+        // Alinha as odds à SELEÇÃO salva (não só à casa): opcaoA salva ↔ odd da mesma opção.
+        const alinhado = this.opcaoIgual(match.opcaoA, opp.opcaoA);
         const oddA = alinhado ? match.oddA : match.oddB;
         const oddB = alinhado ? match.oddB : match.oddA;
         const roi = this.roiVerdadeiro(oddA, oddB);
@@ -226,8 +301,8 @@ export class RevalidationService {
     }
     try {
       const [oddsA, oddsB] = await Promise.all([
-        fabA().oddsDoEvento(opp.evento, opp.esporte),
-        fabB().oddsDoEvento(opp.evento, opp.esporte),
+        this.oddsDoEventoMemo(opp.casaA, opp.evento, opp.esporte),
+        this.oddsDoEventoMemo(opp.casaB, opp.evento, opp.esporte),
       ]);
       const oddA = this.acharPerna(oddsA, opp.mercado, opp.linha, opp.opcaoA);
       const oddB = this.acharPerna(oddsB, opp.mercado, opp.linha, opp.opcaoB);

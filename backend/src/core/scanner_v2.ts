@@ -238,6 +238,8 @@ export class ArbitrageScannerV2 {
         );
         srOps = permitidas; // usa a lista filtrada também na reconciliação (limpa bloqueadas do banco)
         oportunidadesGerais.push(...srOps);
+        // Gate pré-alerta reusa ESTA extração (evita 2ª extração completa do SureRadar).
+        this.revalidador.seedSureRadarCache(srOps, sureradarScraper.ultimaFonte);
       }
     } catch (err: any) {
       console.error(`❌ Erro ao extrair dados do SureRadar:`, err.message);
@@ -419,9 +421,31 @@ export class ArbitrageScannerV2 {
                    `🛡️ [WhatsApp] Alerta ${fonte} SUPRIMIDO pela revalidação: ${opp.evento} | ${opp.mercado} ` +
                    `(scan ${roi}% → agora ${reval.roiAtual ?? '?'}%) — ${reval.motivo}`
                  );
+                 // Falha de INFRA (casa/túnel/SureRadar fora, não "arb morreu"): remove a
+                 // linha recém-inserida — o alerta só roda em INSERT novo, então sem isto
+                 // uma falha transitória suprimiria o alerta PARA SEMPRE enquanto a linha
+                 // vivesse no banco. Removida, a próxima varredura (5 min) reinsere e
+                 // re-passa pelo gate.
+                 if (/falha ao|indisponível/i.test(reval.motivo)) {
+                   try {
+                     await supabase.from('oportunidades').delete().eq('id', novaOpp.id);
+                     console.log('   ↳ linha removida p/ re-gate na próxima varredura (falha de infra).');
+                   } catch { /* segue */ }
+                 }
                } else {
-                 // Usa as odds FRESCAS no alerta (o apostador vê o que a casa mostra agora).
-                 const oppFresca = { ...opp, oddA: reval.oddA!, oddB: reval.oddB!, lucroGarantidoPerc: reval.roiAtual! };
+                 // Usa as odds FRESCAS no alerta (o apostador vê o que a casa mostra agora)
+                 // — recomputando TAMBÉM totalPerc/oddCombinada, senão as stakes sairiam
+                 // com os pesos DEFASADOS do scan e a distribuição não travaria o lucro.
+                 const totalPercFresco = 1 / reval.oddA! + 1 / reval.oddB!;
+                 const oppFresca = {
+                   ...opp,
+                   oddA: reval.oddA!,
+                   oddB: reval.oddB!,
+                   lucroGarantidoPerc: reval.roiAtual!,
+                   totalPerc: totalPercFresco,
+                   oddCombinadaA: (1 / reval.oddA!) / totalPercFresco,
+                   oddCombinadaB: (1 / reval.oddB!) / totalPercFresco,
+                 };
                  const distrFresca = this.engine.calcularDistribuicaoStake(oppFresca, stake);
                  console.log(
                    `✉️ [WhatsApp] Disparando alerta ${fonte} (scan ${roi}% → revalidado ${reval.roiAtual}%${ehSureRadar ? '' : `, conf ${opp.confianca}`}) para: ${opp.evento}`

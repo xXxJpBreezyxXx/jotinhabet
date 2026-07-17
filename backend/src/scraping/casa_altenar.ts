@@ -108,7 +108,7 @@ export class AltenarWidgetScraper implements OddsScraper {
   async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
     try {
       const menuResp = await fetchTextoComRetry(
-        `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 2, `${this.cfg.nome}/reval-menu`, 15000
+        `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 1, `${this.cfg.nome}/reval-menu`, 10000
       );
       const menu: AltResp = JSON.parse(menuResp.body);
       const sids = esporte && SPORT_ID[esporte] ? [SPORT_ID[esporte]] : [...new Set(Object.values(SPORT_ID))];

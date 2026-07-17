@@ -155,17 +155,25 @@ export class KambiScraper implements OddsScraper {
     for (const sportPath of paths) {
       try {
         const lvUrl = `${this.base()}/listView/${sportPath}.json?${this.commonParams()}`;
-        const lv = await fetchTextoComRetry(lvUrl, { headers: this.headers() }, 2, `${this.cfg.nome}/reval-list`, 15000);
+        // 1 tentativa/10s: revalidação precisa ser rápida; falha vira re-gate no próximo scan.
+        const lv = await fetchTextoComRetry(lvUrl, { headers: this.headers() }, 1, `${this.cfg.nome}/reval-list`, 10000);
         if (lv.status !== 200) continue;
         const eventos: KambiEvent[] = (JSON.parse(lv.body).events || [])
           .map((e: any) => e.event)
           .filter((ev: KambiEvent) => ev?.homeName && ev?.awayName)
+          // Mesmos filtros da varredura: sem virtuais/e-soccer "(handle)" e só PRÉ-JOGO —
+          // sem eles, a revalidação podia casar o evento virtual homônimo.
+          .filter((ev: KambiEvent) => !/\([^)]+\)/.test(ev.homeName!) && !/\([^)]+\)/.test(ev.awayName!))
+          .filter((ev: KambiEvent) => {
+            const t = Date.parse(ev.start || '');
+            return isNaN(t) || t > Date.now();
+          })
           .filter((ev: KambiEvent) => areEventsSame(`${ev.homeName} vs ${ev.awayName}`, evento))
           .slice(0, 2);
         if (!eventos.length) continue;
         const mapa = new Map<number, KambiEvent>(eventos.map((e) => [e.id, e]));
         const boUrl = `${this.base()}/betoffer/event/${eventos.map((e) => e.id).join(',')}.json?${this.commonParams()}&includeParticipants=false&onlyMain=false`;
-        const resp = await fetchTextoComRetry(boUrl, { headers: this.headers() }, 2, `${this.cfg.nome}/reval-bo`, 15000);
+        const resp = await fetchTextoComRetry(boUrl, { headers: this.headers() }, 1, `${this.cfg.nome}/reval-bo`, 10000);
         if (resp.status !== 200) continue;
         const j = JSON.parse(resp.body);
         const odds: ScrapedOdd[] = [];
