@@ -5,7 +5,21 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(git push *)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(docker stack *)",
+      "Bash(docker service *)",
+      "Bash(docker image *)",
+      "Bash(git -C /root/jotinhabet log --oneline -8 -- backend/src/notify/whatsapp.ts)",
+      "Bash(git -C /root/jotinhabet log --oneline -1)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"---EXIT: $?---\")",
+      "Bash(gh auth *)",
+      "Bash(git fetch *)",
+      "Bash(git rev-list *)",
+      "Bash(grep -iE \"docker|compose|makefile|\\\\.sh$\")",
+      "Bash(docker --version)",
+      "Bash(docker info *)",
+      "WebSearch"
     ]
   }
 }

@@ -31,3 +31,5 @@ docs/*.mp4
 # === SO / editor ===
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
