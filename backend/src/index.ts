@@ -414,7 +414,7 @@ app.listen(port, () => {
 
   // Scan agendado do SureRadar a cada 10 min (alinhado ao ciclo de atualização do próprio SureRadar)
   const scheduler = new SchedulerService();
-  scheduler.start(10);
+  scheduler.start(5); // pré-match sempre fresco: varredura + reconciliação a cada 5 min
 
   // Enriquecimento de IA é MANUAL (botão "Analisar IA") para poupar tokens/cota das APIs.
   // O worker automático fica desligado de propósito; a análise roda sob demanda via

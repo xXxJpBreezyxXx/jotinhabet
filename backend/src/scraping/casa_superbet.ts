@@ -1,5 +1,6 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
 import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 
 /**
@@ -110,6 +111,46 @@ export class SuperbetScraper implements OddsScraper {
     }
     console.log(`✅ [Superbet] Total: ${todas.length} odds.`);
     return todas;
+  }
+
+  /**
+   * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento, 2-3 requests
+   * (by-date do esporte + detalhe só do evento casado). Reusa os parsers de produção.
+   */
+  async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    const ehEsports = /^e-?sports?$/i.test(esporte || '');
+    const sids = ehEsports
+      ? ESPORTS_SPORT_IDS
+      : esporte && SPORT_ID[esporte]
+        ? [SPORT_ID[esporte]]
+        : [...new Set(Object.values(SPORT_ID))];
+    const now = new Date();
+    const end = new Date(now.getTime() + 48 * 3600 * 1000);
+    for (const sid of sids) {
+      try {
+        const url = `${BASE}/events/by-date?currentStatus=active&offerState=prematch&startDate=${this.fmtData(now)}&endDate=${this.fmtData(end)}&sportId=${sid}`;
+        const r = await fetchTextoComRetry(url, { headers: this.headers() }, 2, 'Superbet/reval', 15000);
+        if (r.status !== 200) continue;
+        const evs: SbEvent[] = ((JSON.parse(r.body).data || []) as SbEvent[])
+          .filter((ev) => {
+            const par = this.evento(ev.matchName);
+            return !!par && areEventsSame(`${par[0]} vs ${par[1]}`, evento);
+          })
+          .slice(0, 2);
+        const odds: ScrapedOdd[] = [];
+        for (const ev of evs) {
+          const mw = this.parseMatchWinner(ev, sid);
+          if (mw) odds.push(mw);
+          try {
+            odds.push(...(ehEsports ? await this.extrairMercadosEsports(ev.eventId) : await this.extrairMercadosEvento(ev.eventId, sid)));
+          } catch { /* segue */ }
+        }
+        if (odds.length) return odds;
+      } catch {
+        /* tenta o próximo esporte */
+      }
+    }
+    return [];
   }
 
   private async extrairEsporte(sportId: number): Promise<ScrapedOdd[]> {

@@ -2,7 +2,31 @@ import { supabase } from '../db/client';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { ArbitrageOpportunity } from '../arbitrage/engine';
 import { areEventsSame, areTeamsSame } from '../arbitrage/matcher';
+import { mesmaOferta } from '../arbitrage/markets';
 import { generateWithFallback } from '../IA/aiProvider';
+import { ScrapedOdd } from '../scraping/scraper_base';
+import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
+import { SuperbetScraper } from '../scraping/casa_superbet';
+import { Aposta1Scraper } from '../scraping/casa_altenar';
+import { PinnacleScraper } from '../scraping/casa_pinnacle';
+
+/** Casas com scraper próprio que sabem re-buscar UM evento (oddsDoEvento). */
+const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> }> = {
+  kto: () => new KtoScraper(),
+  betwarrior: () => new BetWarriorScraper(),
+  superbet: () => new SuperbetScraper(),
+  aposta1: () => new Aposta1Scraper(),
+  pinnacle: () => new PinnacleScraper(),
+};
+
+/** Resultado da checagem ao vivo das duas pernas (gate pré-alerta). */
+export interface PernasFrescas {
+  ok: boolean;            // surebet segue de pé (ROI > 0) com odds atuais
+  oddA: number | null;
+  oddB: number | null;
+  roiAtual: number | null;
+  motivo: string;
+}
 
 export type RevalStatus =
   | 'ok'
@@ -15,7 +39,7 @@ export type RevalStatus =
 
 export interface RevalidacaoResultado {
   checado_em: string;
-  fonte: 'sureradar' | 'nao_suportado';
+  fonte: 'sureradar' | 'casas' | 'nao_suportado';
   odd_a: number | null;
   odd_b: number | null;
   roi_anterior: number;
@@ -111,6 +135,113 @@ export class RevalidationService {
     return Number(((1 / totalPerc - 1) * 100).toFixed(2));
   }
 
+  /** Handicap COM SINAL embutido no rótulo ("Time A (-1.5)"), ou null. */
+  private linhaEmbutida(s: string): number | null {
+    const m = (s || '').match(/\(([+-]?\d+(?:\.\d+)?)\)\s*$/);
+    return m ? parseFloat(m[1]) : null;
+  }
+
+  /** Última linha numérica de um rótulo de opção ("Mais de 2.5" → 2.5), ou null. */
+  private linhaDaOpcao(s: string): number | null {
+    const nums = (s || '').match(/[+-]?\d+(?:\.\d+)?/g);
+    return nums && nums.length ? Math.abs(parseFloat(nums[nums.length - 1])) : null;
+  }
+
+  /**
+   * A opção fresca é a MESMA seleção da armazenada? Nome de time ignora o sinal do
+   * handicap, então quando ambas embutem linha ("K27 (+1.5)" vs "K27 (-1.5)"), o valor
+   * COM SINAL também tem que bater — lição do pareamento sign-aware do motor.
+   */
+  private opcaoIgual(fresca: string, salva: string): boolean {
+    if (this.norm(fresca) === this.norm(salva)) return true;
+    const lf = this.linhaEmbutida(fresca);
+    const ls = this.linhaEmbutida(salva);
+    if (lf !== null && ls !== null && Math.abs(lf - ls) > 1e-9) return false;
+    return areTeamsSame(String(fresca), String(salva));
+  }
+
+  /** Acha a odd atual da SELEÇÃO salva dentro das odds frescas da casa (mercado + linha + opção). */
+  private acharPerna(
+    odds: ScrapedOdd[],
+    mercado: string,
+    linha: number | null | undefined,
+    opcao: string
+  ): number | null {
+    // Sem linha armazenada (coluna não existe no banco), deriva do rótulo da opção.
+    const linhaAlvo = linha ?? this.linhaDaOpcao(opcao) ?? null;
+    for (const o of odds) {
+      if (!mesmaOferta(o.mercado, o.linha ?? this.linhaDaOpcao(o.opcaoA), mercado, linhaAlvo)) continue;
+      if (this.opcaoIgual(o.opcaoA, opcao)) return o.oddA;
+      if (this.opcaoIgual(o.opcaoB, opcao)) return o.oddB;
+    }
+    return null;
+  }
+
+  /**
+   * GATE PRÉ-ALERTA: re-busca as DUAS pernas na casa de origem AGORA e recalcula o ROI.
+   * Cobre todas as fontes de alerta: casas com scraper próprio re-buscam o evento
+   * (oddsDoEvento) e SureRadar reconsulta a lista curada. Em falha, responde ok:false
+   * (conservador: sem confirmação, sem alerta).
+   */
+  async checarPernasAoVivo(opp: {
+    evento: string;
+    mercado: string;
+    linha?: number | null;
+    esporte?: string;
+    casaA: string;
+    casaB: string;
+    opcaoA: string;
+    opcaoB: string;
+    url?: string;
+  }): Promise<PernasFrescas> {
+    // --- Fonte SureRadar: reconsulta a lista (casas de lá não têm scraper próprio) ---
+    if (this.norm(opp.url).includes('sureradar')) {
+      try {
+        const fresh = await this.getSureRadarFresh();
+        if ((!fresh || fresh.length === 0) && this.ultimaFonteFresh !== 'api') {
+          return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: 'SureRadar indisponível agora (fonte degradada)' };
+        }
+        const match = fresh.find(
+          (o) =>
+            areEventsSame(String(o.evento || ''), String(opp.evento || '')) &&
+            [this.norm(o.casaA), this.norm(o.casaB)].sort().join('|') === [this.norm(opp.casaA), this.norm(opp.casaB)].sort().join('|') &&
+            this.norm(o.mercado) === this.norm(opp.mercado)
+        );
+        if (!match) return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: 'não está mais na lista do SureRadar' };
+        const alinhado = this.norm(match.casaA) === this.norm(opp.casaA);
+        const oddA = alinhado ? match.oddA : match.oddB;
+        const oddB = alinhado ? match.oddB : match.oddA;
+        const roi = this.roiVerdadeiro(oddA, oddB);
+        return { ok: roi !== null && roi > 0, oddA, oddB, roiAtual: roi, motivo: roi === null ? 'odds inválidas' : `confirmada no SureRadar (ROI ${roi}%)` };
+      } catch (e: any) {
+        return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `falha ao reconsultar SureRadar: ${e?.message || e}` };
+      }
+    }
+
+    // --- Motor próprio: re-busca cada perna na casa de origem ---
+    const fabA = SCRAPER_FACTORY[this.norm(opp.casaA)];
+    const fabB = SCRAPER_FACTORY[this.norm(opp.casaB)];
+    if (!fabA || !fabB) {
+      return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `casa sem scraper próprio (${!fabA ? opp.casaA : opp.casaB})` };
+    }
+    try {
+      const [oddsA, oddsB] = await Promise.all([
+        fabA().oddsDoEvento(opp.evento, opp.esporte),
+        fabB().oddsDoEvento(opp.evento, opp.esporte),
+      ]);
+      const oddA = this.acharPerna(oddsA, opp.mercado, opp.linha, opp.opcaoA);
+      const oddB = this.acharPerna(oddsB, opp.mercado, opp.linha, opp.opcaoB);
+      if (oddA === null || oddB === null) {
+        const faltou = [oddA === null ? opp.casaA : null, oddB === null ? opp.casaB : null].filter(Boolean).join(' e ');
+        return { ok: false, oddA, oddB, roiAtual: null, motivo: `perna não encontrada agora em ${faltou} (linha removida/movida?)` };
+      }
+      const roi = this.roiVerdadeiro(oddA, oddB);
+      return { ok: roi !== null && roi > 0, oddA, oddB, roiAtual: roi, motivo: roi === null ? 'odds inválidas' : `odds atuais ${oddA}/${oddB} (ROI ${roi}%)` };
+    } catch (e: any) {
+      return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `falha ao re-buscar pernas: ${e?.message || e}` };
+    }
+  }
+
   async revalidar(id: string): Promise<RevalidacaoResultado> {
     const { data: opp, error } = await supabase.from('oportunidades').select('*').eq('id', id).single();
     if (error || !opp) throw new Error('Oportunidade não encontrada');
@@ -131,16 +262,42 @@ export class RevalidationService {
       movimento: null,
     };
 
-    // Só o SureRadar é suportado para revalidação nesta versão.
+    // Motor próprio: re-busca as pernas nas casas de origem (KTO/BetWarrior/Superbet/
+    // Aposta1/Pinnacle). Casas fora do registry seguem 'nao_suportado'.
     if (!this.norm(opp.url).includes('sureradar')) {
+      const vivo = await this.checarPernasAoVivo({
+        evento: String(opp.evento || ''),
+        mercado: String(opp.mercado || ''),
+        esporte: opp.esporte || undefined,
+        casaA: String(opp.casa_a_nome || ''),
+        casaB: String(opp.casa_b_nome || ''),
+        opcaoA: String(opp.opcao_a || ''),
+        opcaoB: String(opp.opcao_b || ''),
+        url: opp.url || undefined,
+      });
+
+      let status: RevalStatus;
+      if (/casa sem scraper/.test(vivo.motivo)) status = 'nao_suportado';
+      else if (/falha ao/.test(vivo.motivo)) status = 'erro';
+      else if (vivo.oddA === null || vivo.oddB === null) status = 'expirada';
+      else if (!vivo.ok || (vivo.roiAtual ?? 0) <= 0) status = 'expirada';
+      else if ((vivo.roiAtual ?? 0) < roiAnterior - 0.1) status = 'reduzida';
+      else if ((vivo.roiAtual ?? 0) > roiAnterior + 0.1) status = 'melhorou';
+      else status = 'ok';
+
+      const movimento =
+        status === 'nao_suportado' || status === 'erro'
+          ? { tipo: status, explicacao: vivo.motivo }
+          : await this.classificarMovimento(opp, vivo.oddA ?? 0, vivo.oddB ?? 0, roiAnterior, vivo.roiAtual ?? 0, status);
+
       const res: RevalidacaoResultado = {
         ...base,
-        fonte: 'nao_suportado',
-        status: 'nao_suportado',
-        movimento: {
-          tipo: 'nao_suportado',
-          explicacao: 'Revalidação automática disponível apenas para oportunidades do SureRadar nesta versão.',
-        },
+        fonte: status === 'nao_suportado' ? 'nao_suportado' : 'casas',
+        odd_a: vivo.oddA,
+        odd_b: vivo.oddB,
+        roi_atual: vivo.roiAtual,
+        status,
+        movimento,
       };
       await this.persist(id, res);
       return res;

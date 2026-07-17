@@ -12,6 +12,7 @@ import { Aposta1Scraper } from '../scraping/casa_altenar';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
+import { RevalidationService } from './revalidationService';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -152,6 +153,8 @@ export class ArbitrageScannerV2 {
     new OneXBetScraper()
   ];
   private engine = new ArbitrageEngine();
+  /** Revalidação pré-alerta: reconsulta as pernas na casa de origem antes do WhatsApp. */
+  private revalidador = new RevalidationService();
 
   /** Nomes dos scrapers que usam API direta (rápidos, sem browser) — usados no modo apenasApi. */
   private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']); // Aposta1 já ativo
@@ -179,6 +182,9 @@ export class ArbitrageScannerV2 {
     }
 
     const oportunidadesGerais: ArbitrageOpportunity[] = [];
+    // Lista fresca do MOTOR desta varredura (p/ reconciliação) + se o cruzamento rodou.
+    let motorOps: ArbitrageOpportunity[] = [];
+    let motorVarreu = false;
 
     if (sureradarOnly) {
       console.log(`\n🔍 [Scanner V2] Iniciando varredura RÁPIDA (Apenas SureRadar)...`);
@@ -211,6 +217,8 @@ export class ArbitrageScannerV2 {
       if (fontes.length >= 2) {
         const ops = await this.engine.encontrarMelhoresOportunidades(fontes);
         oportunidadesGerais.push(...ops);
+        motorOps = ops;
+        motorVarreu = true; // cruzamento rodou → a lista (mesmo vazia) é autoritativa p/ reconciliar
       }
     }
 
@@ -400,34 +408,52 @@ export class ArbitrageScannerV2 {
              const fonte = ehSureRadar ? 'SureRadar' : 'Motor';
              const alertKey = `${fonte}_${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${roi.toFixed(1)}`;
              if (!alertAlreadySent(alertKey)) {
-               console.log(`✉️ [WhatsApp] Disparando alerta ${fonte} (ROI ${roi}%${ehSureRadar ? '' : `, conf ${opp.confianca}`}) para: ${opp.evento}`);
-               const notifier = new WhatsAppNotifier();
-               const success = await notifier.enviarAlerta({
-                 evento: opp.evento,
-                 mercado: opp.mercado,
-                 opcao1: opp.opcaoA,
-                 opcao2: opp.opcaoB,
-                 odd1: opp.oddA,
-                 odd2: opp.oddB,
-                 stake1: parseFloat(distr.apostaA),
-                 stake2: parseFloat(distr.apostaB),
-                 investimento: stake,
-                 lucro: parseFloat(distr.lucroR$),
-                 roi: roi,
-                 casa1: opp.casaA,
-                 casa2: opp.casaB,
-                 esporte: opp.esporte,
-                 dataPartida: (opp.evento.match(/\((\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})\)\s*$/) || [])[1],
-                 fonte: ehSureRadar ? 'SureRadar' : 'Pré-match (motor próprio)',
-                 nota: ehSureRadar
-                   ? undefined
-                   : `Cruzamento ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`,
-               });
-               if (success) {
-                 markAlertAsSent(alertKey);
-                 if (alertarMotor) {
-                   alertasMotorEnviados++;
-                   eventosAlertadosMotor.add(base); // consome o teto/dedup só em envio real
+               // REVALIDAÇÃO PRÉ-ALERTA: reconsulta as pernas na casa de origem AGORA.
+               // Só alerta se a surebet segue de pé com as odds ATUAIS e ROI >= piso —
+               // mata alertas de linha defasada/removida (e classes de bug desconhecidas:
+               // a perna re-buscada é comparada por mercado exato na origem, sem cluster).
+               const reval = await this.revalidador.checarPernasAoVivo(opp);
+               const ROI_MIN_ALERTA = 1.5;
+               if (!reval.ok || (reval.roiAtual ?? 0) < ROI_MIN_ALERTA) {
+                 console.log(
+                   `🛡️ [WhatsApp] Alerta ${fonte} SUPRIMIDO pela revalidação: ${opp.evento} | ${opp.mercado} ` +
+                   `(scan ${roi}% → agora ${reval.roiAtual ?? '?'}%) — ${reval.motivo}`
+                 );
+               } else {
+                 // Usa as odds FRESCAS no alerta (o apostador vê o que a casa mostra agora).
+                 const oppFresca = { ...opp, oddA: reval.oddA!, oddB: reval.oddB!, lucroGarantidoPerc: reval.roiAtual! };
+                 const distrFresca = this.engine.calcularDistribuicaoStake(oppFresca, stake);
+                 console.log(
+                   `✉️ [WhatsApp] Disparando alerta ${fonte} (scan ${roi}% → revalidado ${reval.roiAtual}%${ehSureRadar ? '' : `, conf ${opp.confianca}`}) para: ${opp.evento}`
+                 );
+                 const notifier = new WhatsAppNotifier();
+                 const success = await notifier.enviarAlerta({
+                   evento: opp.evento,
+                   mercado: opp.mercado,
+                   opcao1: opp.opcaoA,
+                   opcao2: opp.opcaoB,
+                   odd1: reval.oddA!,
+                   odd2: reval.oddB!,
+                   stake1: parseFloat(distrFresca.apostaA),
+                   stake2: parseFloat(distrFresca.apostaB),
+                   investimento: stake,
+                   lucro: parseFloat(distrFresca.lucroR$),
+                   roi: reval.roiAtual!,
+                   casa1: opp.casaA,
+                   casa2: opp.casaB,
+                   esporte: opp.esporte,
+                   dataPartida: (opp.evento.match(/\((\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})\)\s*$/) || [])[1],
+                   fonte: ehSureRadar ? 'SureRadar' : 'Pré-match (motor próprio)',
+                   nota:
+                     `✅ Revalidada agora nas casas (odds ao vivo)` +
+                     (ehSureRadar ? '' : ` · Cruzamento ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`),
+                 });
+                 if (success) {
+                   markAlertAsSent(alertKey);
+                   if (alertarMotor) {
+                     alertasMotorEnviados++;
+                     eventosAlertadosMotor.add(base); // consome o teto/dedup só em envio real
+                   }
                  }
                }
              } else {
@@ -450,6 +476,14 @@ export class ArbitrageScannerV2 {
       console.log(`ℹ️ [Scanner V2] Reconciliação pulada (fonte: ${sureradarScraper.ultimaFonte} — lista parcial).`);
     }
 
+    // Reconciliação do MOTOR PRÓPRIO (mesma lógica do SureRadar): o que não foi
+    // re-encontrado NESTA varredura sai do banco — o radar mostra só o que existe
+    // AGORA nas casas. Diferente do SureRadar, lista vazia É estado válido
+    // ("0 arbs agora"); a guarda é o cruzamento ter RODADO (fontes >= 2).
+    if (motorVarreu) {
+      await this.reconciliarMotor(motorOps);
+    }
+
     console.log(`📊 [Scanner V2] Varredura finalizada. ${oportunidadesSalvas.length} surebets salvas no banco.`);
     return oportunidadesSalvas;
   }
@@ -463,9 +497,42 @@ export class ArbitrageScannerV2 {
   }
 
   /**
+   * Remove as oportunidades do MOTOR PRÓPRIO ('detectada', url nula/não-SureRadar) que
+   * não foram re-encontradas na varredura atual (linha morta/movida/partida iniciada).
+   * Auto-corrigível: removida por engano (ex.: casa falhou nesta varredura), o próximo
+   * scan (5 min) reinsere — e sem a casa a arb é inverificável mesmo.
+   */
+  private async reconciliarMotor(freshOps: ArbitrageOpportunity[]): Promise<void> {
+    const validos = new Set(freshOps.map((o) => this.assinaturaSurebet(o.evento, o.casaA, o.casaB, o.mercado)));
+    try {
+      const { data: rows, error } = await supabase
+        .from('oportunidades')
+        .select('id, evento, casa_a_nome, casa_b_nome, mercado, url')
+        .eq('status', 'detectada')
+        .or('url.is.null,url.not.ilike.*sureradar*');
+      if (error || !rows || rows.length === 0) return;
+
+      const idsRemover = rows
+        .filter((r) => !validos.has(this.assinaturaSurebet(r.evento, r.casa_a_nome, r.casa_b_nome, r.mercado)))
+        .map((r) => r.id);
+
+      if (idsRemover.length > 0) {
+        const { error: delErr } = await supabase.from('oportunidades').delete().in('id', idsRemover);
+        if (delErr) {
+          console.error('⚠️ [Scanner V2] Erro na reconciliação do motor:', delErr.message);
+        } else {
+          console.log(`🧹 [Scanner V2] Reconciliação do motor: ${idsRemover.length} oportunidade(s) que sumiram removida(s).`);
+        }
+      }
+    } catch (e: any) {
+      console.error('⚠️ [Scanner V2] Falha na reconciliação do motor:', e?.message || e);
+    }
+  }
+
+  /**
    * Remove as oportunidades do SureRadar ('detectada') que não estão mais na lista fresca.
    * Guarda: se a lista fresca vier vazia (scrape falho/indisponível), NÃO remove nada.
-   * Auto-corrigível: se algo for removido por engano, o próximo scan (10 min) reinsere.
+   * Auto-corrigível: se algo for removido por engano, o próximo scan (5 min) reinsere.
    */
   private async reconciliarSureRadar(freshOps: ArbitrageOpportunity[]): Promise<void> {
     if (!freshOps || freshOps.length === 0) return;

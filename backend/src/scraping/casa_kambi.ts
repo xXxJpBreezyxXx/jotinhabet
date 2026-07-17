@@ -1,5 +1,6 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
 import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 
 /**
@@ -138,6 +139,48 @@ export class KambiScraper implements OddsScraper {
 
     console.log(`✅ [${this.cfg.nome}] Total: ${todas.length} odds.`);
     return todas;
+  }
+
+  /**
+   * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento, 2-3 requests
+   * (listView + betoffer só dos ids casados). Reusa o parseBetOffer de produção.
+   */
+  async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    const ehEsports = /^e-?sports?$/i.test(esporte || '');
+    const paths = ehEsports
+      ? ESPORTS_PATHS
+      : esporte && SPORT_PATHS[esporte]
+        ? [SPORT_PATHS[esporte]]
+        : [...new Set(Object.values(SPORT_PATHS))];
+    for (const sportPath of paths) {
+      try {
+        const lvUrl = `${this.base()}/listView/${sportPath}.json?${this.commonParams()}`;
+        const lv = await fetchTextoComRetry(lvUrl, { headers: this.headers() }, 2, `${this.cfg.nome}/reval-list`, 15000);
+        if (lv.status !== 200) continue;
+        const eventos: KambiEvent[] = (JSON.parse(lv.body).events || [])
+          .map((e: any) => e.event)
+          .filter((ev: KambiEvent) => ev?.homeName && ev?.awayName)
+          .filter((ev: KambiEvent) => areEventsSame(`${ev.homeName} vs ${ev.awayName}`, evento))
+          .slice(0, 2);
+        if (!eventos.length) continue;
+        const mapa = new Map<number, KambiEvent>(eventos.map((e) => [e.id, e]));
+        const boUrl = `${this.base()}/betoffer/event/${eventos.map((e) => e.id).join(',')}.json?${this.commonParams()}&includeParticipants=false&onlyMain=false`;
+        const resp = await fetchTextoComRetry(boUrl, { headers: this.headers() }, 2, `${this.cfg.nome}/reval-bo`, 15000);
+        if (resp.status !== 200) continue;
+        const j = JSON.parse(resp.body);
+        const odds: ScrapedOdd[] = [];
+        for (const bo of (j.betOffers || []) as KambiBetOffer[]) {
+          const ev = mapa.get(bo.eventId);
+          if (!ev?.homeName || !ev?.awayName) continue;
+          const scraped = this.parseBetOffer(bo, ev, sportPath);
+          if (scraped) odds.push(scraped);
+        }
+        if (odds.length) return odds;
+      } catch {
+        /* tenta o próximo path */
+      }
+    }
+    return [];
   }
 
   private async extrairEsporte(sportPath: string): Promise<ScrapedOdd[]> {

@@ -1,5 +1,6 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
 import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 import { ProxyAgent } from 'undici';
 
@@ -122,6 +123,40 @@ export class PinnacleScraper implements OddsScraper {
     }
     console.log(`✅ [Pinnacle] Total: ${todas.length} odds.`);
     return todas;
+  }
+
+  /**
+   * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento, 2-3 requests
+   * (matchups do esporte + markets só do matchup casado). Reusa o parser de produção.
+   */
+  async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    const sids = esporte && SPORT_ID[esporte] ? [SPORT_ID[esporte]] : [...new Set(Object.values(SPORT_ID))];
+    for (const sid of sids) {
+      try {
+        const rMatch = await fetchTextoComRetry(
+          `${BASE}/sports/${sid}/matchups?withSpecials=false&brandId=0`,
+          this.fetchInit(), 2, 'Pinnacle/reval', 15000
+        );
+        if (rMatch.status !== 200) continue;
+        const matchups: PinMatchup[] = JSON.parse(rMatch.body);
+        const alvo = matchups
+          .filter((m) => {
+            if (m.parentId || (m.participants?.length || 0) < 2) return false;
+            const home = m.participants!.find((p) => p.alignment === 'home')?.name;
+            const away = m.participants!.find((p) => p.alignment === 'away')?.name;
+            return !!home && !!away && areEventsSame(`${home} vs ${away}`, evento);
+          })
+          .slice(0, 2);
+        const odds: ScrapedOdd[] = [];
+        for (const ev of alvo) {
+          try { odds.push(...(await this.extrairMercadosEvento(ev, sid))); } catch { /* segue */ }
+        }
+        if (odds.length) return odds;
+      } catch {
+        /* tenta o próximo esporte */
+      }
+    }
+    return [];
   }
 
   private async extrairEsporte(sportId: number): Promise<ScrapedOdd[]> {

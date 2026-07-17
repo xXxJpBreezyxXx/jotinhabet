@@ -1,5 +1,6 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
 import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 
 /**
@@ -97,6 +98,29 @@ export class AltenarWidgetScraper implements OddsScraper {
     }
     console.log(`✅ [${this.cfg.nome}] Total: ${todas.length} odds.`);
     return todas;
+  }
+
+  /**
+   * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento. A API do widget
+   * só busca por campeonato, então re-extrai o esporte (menu + lotes) e filtra o evento
+   * — ~5 requests. Reusa o parser de produção.
+   */
+  async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    try {
+      const menuResp = await fetchTextoComRetry(
+        `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 2, `${this.cfg.nome}/reval-menu`, 15000
+      );
+      const menu: AltResp = JSON.parse(menuResp.body);
+      const sids = esporte && SPORT_ID[esporte] ? [SPORT_ID[esporte]] : [...new Set(Object.values(SPORT_ID))];
+      for (const sid of sids) {
+        const odds = await this.extrairEsporte(sid, menu, new Set());
+        const doEvento = odds.filter((o) => areEventsSame(o.evento, evento));
+        if (doEvento.length) return doEvento;
+      }
+    } catch {
+      /* melhor esforço */
+    }
+    return [];
   }
 
   private async extrairEsporte(sportId: number, menu: AltResp, vistos: Set<number>): Promise<ScrapedOdd[]> {
