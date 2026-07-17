@@ -12,12 +12,18 @@
 import { normalizarMercado } from './markets';
 
 // Grupos de regra de W.O. do tênis (Diretrizes §3).
+//  - Grupo A: ANULA a aposta (Void) em abandono/lesão.
+//  - Grupo B: regra de "1 Set Concluído" — liquida quem AVANÇA como vencedor
+//    (o outro lado perde). Cruzar A×B é prejuízo garantido: um anula, o outro perde.
+// KTO rebaixada A→B em 17/07/2026 (ver KTO.md): o provedor dela (Altenar) NÃO anula
+// no Vencedor da Partida — aplica avanço de fase. Ficar no Grupo A causou perda real
+// (Jacob Brumm x Ivan Savkin: Superbet[A] anulou, KTO liquidou vitória/derrota).
 const GRUPO_A = new Set([
   'alfabet', 'aposta1', 'apostaganha', 'bet365', 'bet7k', 'betboom', 'betao',
-  'betnacional', 'betsul', 'blaze', 'bolsadeaposta', 'kto', 'novibet', 'pixbet',
+  'betnacional', 'betsul', 'blaze', 'bolsadeaposta', 'novibet', 'pixbet',
   'reidopitaco', 'seubet', 'stake', 'superbet',
 ]);
-const GRUPO_B = new Set(['pinnacle', 'betano', 'betwarrior']);
+const GRUPO_B = new Set(['pinnacle', 'betano', 'betwarrior', 'kto']);
 
 /** Normaliza o nome da casa: sem acento, minúsculo, sem "(BR)" e sem pontuação. */
 function normCasa(casa: string): string {
@@ -43,6 +49,11 @@ export function mesmoGrupoTenis(casaA: string, casaB: string): boolean {
   const ga = grupoTenis(casaA);
   const gb = grupoTenis(casaB);
   return ga !== null && ga === gb;
+}
+
+/** True se a casa é a KTO (após normalização — cobre "KTO", "KTO (BR)"). */
+function ehKto(casa: string): boolean {
+  return normCasa(casa) === 'kto';
 }
 
 function normEsporte(e?: string): 'futebol' | 'basquete' | 'tenis' | 'esports' | 'outro' {
@@ -94,11 +105,20 @@ export function regraPermiteOportunidade(opp: {
   if (!mercadoPermitido(opp.esporte, opp.mercado)) {
     return { ok: false, motivo: `mercado bloqueado (${opp.esporte}): ${opp.mercado}` };
   }
-  if (normEsporte(opp.esporte) === 'tenis' && !mesmoGrupoTenis(opp.casaA, opp.casaB)) {
-    return {
-      ok: false,
-      motivo: `tênis: grupos de W.O. incompatíveis (${opp.casaA}[${grupoTenis(opp.casaA) || '?'}] x ${opp.casaB}[${grupoTenis(opp.casaB) || '?'}])`,
-    };
+  if (normEsporte(opp.esporte) === 'tenis') {
+    // KTO.md §3: bloqueia KTO em Handicap/Totais de tênis — o provedor anula o bilhete
+    // em lesão, EXCETO se o limite já foi ultrapassado (interpretação ambígua = risco).
+    const canon = normalizarMercado(opp.mercado);
+    if ((ehKto(opp.casaA) || ehKto(opp.casaB)) && (canon.startsWith('HANDICAP') || canon.startsWith('TOTAIS'))) {
+      return { ok: false, motivo: `tênis: KTO bloqueada em Handicap/Totais (KTO.md §3): ${opp.mercado}` };
+    }
+    // Grupos de W.O. incompatíveis (A×B) = uma perna anula e a outra perde.
+    if (!mesmoGrupoTenis(opp.casaA, opp.casaB)) {
+      return {
+        ok: false,
+        motivo: `tênis: grupos de W.O. incompatíveis (${opp.casaA}[${grupoTenis(opp.casaA) || '?'}] x ${opp.casaB}[${grupoTenis(opp.casaB) || '?'}])`,
+      };
+    }
   }
   return { ok: true };
 }
