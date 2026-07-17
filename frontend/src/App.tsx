@@ -598,21 +598,37 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        sureradarOnly
+        sureradarOnly,
+        apenasApi: true // varredura GERAL rápida (SureRadar + pré-match via API), sem Playwright
       })
     })
       .then(res => res.json())
       .then(data => {
         if (data.success) {
-          fetchOpportunities();
+          // Scan roda em background (fire-and-forget). Mantém o spinner via polling do
+          // status até concluir; o radar atualiza sozinho pelo fetchOpportunities de 8s.
+          if (data.started === false) { setLoadingScan(false); return; }
+          const poll = setInterval(() => {
+            fetch('/api/scan/status')
+              .then(r => r.json())
+              .then(s => {
+                if (!s.running) {
+                  clearInterval(poll);
+                  setLoadingScan(false);
+                  fetchOpportunities();
+                }
+              })
+              .catch(() => { clearInterval(poll); setLoadingScan(false); });
+          }, 4000);
+          // trava de segurança: nunca deixa o spinner preso além de 2 min
+          setTimeout(() => { clearInterval(poll); setLoadingScan(false); }, 120000);
         } else if (data.error) {
           alert(`Erro na varredura: ${data.error}`);
+          setLoadingScan(false);
         }
       })
       .catch(err => {
         console.error('Scan failed:', err);
-      })
-      .finally(() => {
         setLoadingScan(false);
       });
   };
@@ -1411,15 +1427,16 @@ export default function App() {
                     </button>
  
                     {/* Scan Trigger Buttons */}
-                    <button 
-                      className="btn" 
-                      onClick={() => handleRunScan(true)} 
-                      disabled={loadingScan} 
-                      style={{ 
-                        padding: '5px 10px', 
-                        fontSize: '11px', 
-                        display: 'flex', 
-                        gap: '4px', 
+                    <button
+                      className="btn"
+                      onClick={() => handleRunScan(false)}
+                      disabled={loadingScan}
+                      title="Varredura geral: SureRadar + pré-match (cruzamento entre casas via API)"
+                      style={{
+                        padding: '5px 10px',
+                        fontSize: '11px',
+                        display: 'flex',
+                        gap: '4px',
                         alignItems: 'center',
                         background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
                         color: '#000',
@@ -1429,7 +1446,7 @@ export default function App() {
                       }}
                     >
                       <RefreshCw size={11} className={loadingScan ? 'spin-anim' : ''} />
-                      {loadingScan ? 'Buscando...' : 'Escanear SureRadar'}
+                      {loadingScan ? 'Escaneando...' : 'Escanear Tudo'}
                     </button>
                   </div>
                 </div>

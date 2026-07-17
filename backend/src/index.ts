@@ -160,14 +160,36 @@ import { ArbitrageScannerV2 } from './core/scanner_v2';
 
 // Manual Scanner Endpoint
 const scanner = new ArbitrageScannerV2();
+let scanManualEmAndamento = false;
 app.post('/api/scan', async (req, res) => {
-  const { dataFiltro, aoVivo, sureradarOnly } = req.body;
-  try {
-    const opports = await scanner.executarVarredura(dataFiltro, !!aoVivo, !!sureradarOnly);
-    res.json({ success: true, count: opports.length, opportunities: opports });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Erro ao executar varredura' });
+  const { dataFiltro, aoVivo, sureradarOnly, apenasApi } = req.body;
+  // apenasApi default = true: varredura GERAL manual usa o caminho de API (KTO,
+  // Superbet, BetWarrior, Aposta1, Pinnacle + SureRadar), rápido e sem Playwright —
+  // igual ao scheduler. Só o scan completo (browser: Blaze/Betano/1xBet) exige
+  // apenasApi:false explícito (lento; evitar num clique de botão).
+  const usarApenasApi = apenasApi !== false;
+
+  if (scanManualEmAndamento) {
+    return res.json({ success: true, started: false, message: 'Uma varredura manual já está em andamento.' });
   }
+
+  // FIRE-AND-FORGET: a varredura geral leva ~60s (motor + SureRadar + revalidação),
+  // acima do timeout de proxy de 60s. Responde já e roda em background — o painel
+  // atualiza pelo polling (a cada 8s). Guard evita disparos concorrentes.
+  scanManualEmAndamento = true;
+  res.json({ success: true, started: true });
+  scanner
+    .executarVarredura(dataFiltro, !!aoVivo, !!sureradarOnly, usarApenasApi)
+    .then((ops) => console.log(`✅ [scan manual] concluído — ${ops.length} nova(s) surebet(s).`))
+    .catch((err) => console.error('❌ [scan manual] erro:', err?.message || err))
+    .finally(() => {
+      scanManualEmAndamento = false;
+    });
+});
+
+// Status da varredura manual (o painel usa p/ manter o spinner até concluir).
+app.get('/api/scan/status', (_req, res) => {
+  res.json({ running: scanManualEmAndamento });
 });
 
 // GET list of opportunities
