@@ -1,6 +1,6 @@
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { areEventsSame, areTeamsSame, mesmoHorario, forcaMatchEvento, parseKickoff } from './matcher';
-import { mesmaOferta } from './markets';
+import { mesmaOferta, ehLinhaQuarter, normalizarMercado } from './markets';
 import { regraPermiteOportunidade } from './regras';
 
 export interface ArbitrageOpportunity {
@@ -94,6 +94,18 @@ export class ArbitrageEngine {
       return m ? parseFloat(m[1]) : null;
     };
     const clusters: Cluster[] = [];
+    // ÍNDICE de clusters por (esporte | mercado canônico | linha): com 7 casas são
+    // ~20k+ odds e a varredura linear clusters×odds virou O(n²) real — a varredura
+    // passou de 7 min e derrubou a VPS (load 56) em 17/07/2026. A chave reproduz
+    // EXATAMENTE o corte de mesmaOferta: canônico ≠ DESCONHECIDO → (canônico, linha);
+    // DESCONHECIDO → (rótulo cru exato, linha) — então buscar só no bucket é
+    // equivalente a testar mesmaOferta contra todos.
+    const buckets = new Map<string, Cluster[]>();
+    const chaveBucket = (esporte: string | undefined, mercado: string, linha: number | null | undefined) => {
+      const canon = normalizarMercado(mercado);
+      const m = canon === 'DESCONHECIDO' ? `D|${(mercado || '').trim().toLowerCase()}` : canon;
+      return `${normEsp(esporte)}|${m}|${linha ?? '∅'}`;
+    };
 
     /**
      * Alinhamento da oferta ao cluster, SIGN-AWARE para handicaps. Alinhar só por
@@ -118,15 +130,14 @@ export class ArbitrageEngine {
     for (const fonte of fontes) {
       for (const odd of fonte.odds) {
         if (!(odd.oddA > 1) || !(odd.oddB > 1)) continue;
+        const chave = chaveBucket(odd.esporte, odd.mercado, odd.linha);
+        const bucket = buckets.get(chave) || [];
         let c: Cluster | undefined;
         let swap = false;
-        for (const cl of clusters) {
-          if (
-            normEsp(cl.esporte) === normEsp(odd.esporte) &&
-            mesmaOferta(cl.mercado, cl.linha, odd.mercado, odd.linha) &&
-            mesmoHorario(cl.dataHora, odd.dataHora) &&
-            areEventsSame(cl.evento, odd.evento)
-          ) {
+        for (const cl of bucket) {
+          // Dentro do bucket, mesmaOferta é garantida pela chave; sobram horário
+          // (numérico, barato) e o casamento fuzzy de evento.
+          if (mesmoHorario(cl.dataHora, odd.dataHora) && areEventsSame(cl.evento, odd.evento)) {
             const al = alinharAoCluster(cl, odd);
             if (al) { c = cl; swap = al.swap; break; }
             // sign-aware rejeitou: segue procurando (pode existir o cluster espelhado)
@@ -139,6 +150,8 @@ export class ArbitrageEngine {
             dataHora: odd.dataHora, labelA: odd.opcaoA, labelB: odd.opcaoB, ofertas: [], casas: new Set(),
           };
           clusters.push(c);
+          bucket.push(c);
+          buckets.set(chave, bucket);
         } else if (swap) {
           // Casa listou os lados invertidos em relação ao cluster → troca.
           oddA = odd.oddB; oddB = odd.oddA; opcaoA = odd.opcaoB; opcaoB = odd.opcaoA;
@@ -257,6 +270,15 @@ export class ArbitrageEngine {
   ): ArbitrageOpportunity {
     opp.linha = linha;
     opp.dataHora = dataHora;
+    // QUARTER-LINE (.25/.75): a aposta é dividida nas duas linhas vizinhas e o
+    // cenário do MEIO devolve metade de cada perna → com os stakes da arbitragem
+    // (s=k/odd), o retorno do meio é 0.5·k·(1+totalPerc) e o lucro cai para
+    // EXATAMENTE metade do nominal. O lucroGarantidoPerc passa a ser esse PISO —
+    // nos demais cenários o lucro real é o dobro do informado. (A distribuição de
+    // stake não muda; só o lucro garantido.)
+    if (linha !== undefined && ehLinhaQuarter(linha)) {
+      opp.lucroGarantidoPerc = parseFloat((opp.lucroGarantidoPerc / 2).toFixed(2));
+    }
     const quando = this.fmtDataEvento(dataHora);
     // Anexa "(DD/MM/AAAA HH:MM)" ao evento (mesmo formato do SureRadar) para o
     // filtro de data e a exibição funcionarem uniformemente.
@@ -307,12 +329,17 @@ export class ArbitrageEngine {
 
   /**
    * Calcula quanto apostar em cada ponta dado um valor de banca (stake) total.
+   * Em QUARTER-LINE (.25/.75) o lucroR$ informado é o PISO (o cenário do meio
+   * devolve metade de cada perna → lucro = metade do nominal); nos demais
+   * cenários o lucro real é o dobro. As apostas em si não mudam.
    */
   calcularDistribuicaoStake(opp: ArbitrageOpportunity, stakeTotal: number) {
     const apostaA = stakeTotal * opp.oddCombinadaA;
     const apostaB = stakeTotal * opp.oddCombinadaB;
     const retorno = apostaA * opp.oddA; // retorno é igual em qualquer lado se hitar
-    const lucroR$ = retorno - stakeTotal;
+    const lucroNominal = retorno - stakeTotal;
+    const ehQuarter = opp.linha != null && ehLinhaQuarter(opp.linha);
+    const lucroR$ = ehQuarter ? lucroNominal / 2 : lucroNominal;
 
     return {
       apostaA: apostaA.toFixed(2),

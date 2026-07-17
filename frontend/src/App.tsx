@@ -17,7 +17,9 @@ import {
   ExternalLink,
   Sun,
   Moon,
-  Save
+  Save,
+  Bookmark,
+  BookmarkCheck
 } from 'lucide-react';
 
 interface HealthStatus {
@@ -70,6 +72,7 @@ interface OpportunityItem {
   mercado?: string;
   analise_ia?: string;
   esporte?: string;
+  salva?: boolean; // salva pelo usuário: o rescan nunca a remove (migration 009)
   url?: string;
   // Enriquecimento de risco por IA (async)
   ia_status?: 'pendente' | 'processando' | 'concluido' | 'erro';
@@ -502,8 +505,12 @@ export default function App() {
     
     if (normalized.includes('futebol')) return 'Futebol';
     if (normalized.includes('basquete') || normalized.includes('basketball')) return 'Basquete';
+    // Mesa ANTES de tênis: "tenis de mesa" contém "tenis".
+    if (normalized.includes('mesa') || normalized.includes('table tennis')) return 'Tênis de Mesa';
     if (normalized.includes('tenis') || normalized.includes('tennis')) return 'Tênis';
     if (normalized.includes('esports') || normalized.includes('eletronicos') || normalized.includes('esport')) return 'Esports';
+    if (normalized.includes('volei') || normalized.includes('volley')) return 'Vôlei';
+    if (normalized.includes('beisebol') || normalized.includes('baseball')) return 'Beisebol';
 
     // Fallbacks based on typical text/names
     const eventLower = opp.evento.toLowerCase();
@@ -676,6 +683,29 @@ export default function App() {
         .catch(err => {
           console.error('Erro ao excluir oportunidade:', err);
         });
+    }
+  };
+
+  // Salvar/dessalvar oportunidade: salva fica IMUNE à limpeza automática do rescan
+  // (>24h, reconciliação, expiradas) — p/ entrada mais tarde ou jogo de outro dia.
+  const handleToggleSave = async (opp: OpportunityItem) => {
+    if (!opp.id || opp.id.includes('mock-')) return;
+    const salva = !opp.salva;
+    // otimista: reflete já na UI; reverte se a API falhar
+    setOpportunities(prev => prev.map(o => (o.id === opp.id ? { ...o, salva } : o)));
+    setSelectedOpp(prev => (prev && prev.id === opp.id ? { ...prev, salva } : prev));
+    try {
+      const r = await fetch(`/api/opportunities/${opp.id}/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ salva }),
+      });
+      const data = await r.json();
+      if (!data.success) throw new Error(data.error || 'falha');
+    } catch (err) {
+      console.error('Erro ao salvar oportunidade:', err);
+      setOpportunities(prev => prev.map(o => (o.id === opp.id ? { ...o, salva: !salva } : o)));
+      setSelectedOpp(prev => (prev && prev.id === opp.id ? { ...prev, salva: !salva } : prev));
     }
   };
 
@@ -1467,7 +1497,7 @@ export default function App() {
                         color: active ? '#fff' : 'var(--text-secondary)',
                         transition: 'all 0.15s ease'
                       });
-                      const emoji = (s: string) => (s === 'Futebol' ? '⚽' : s === 'Basquete' ? '🏀' : s === 'Tênis' ? '🎾' : s === 'Esports' ? '🎮' : '🏆');
+                      const emoji = (s: string) => (s === 'Futebol' ? '⚽' : s === 'Basquete' ? '🏀' : s === 'Tênis de Mesa' ? '🏓' : s === 'Tênis' ? '🎾' : s === 'Esports' ? '🎮' : s === 'Vôlei' ? '🏐' : s === 'Beisebol' ? '⚾' : '🏆');
                       const vipCount = opportunitiesToShow.filter(isVipOpportunity).length;
                       return (
                         <>
@@ -1561,9 +1591,12 @@ export default function App() {
                           if (esp) {
                             if (esp.includes('futebol') || esp.includes('football') || esp.includes('soccer')) return '⚽ Futebol';
                             if (esp.includes('basquete') || esp.includes('basket')) return '🏀 Basquete';
+                            // Mesa ANTES de tênis: "tenis de mesa" contém "tenis".
+                            if (esp.includes('mesa') || esp.includes('table tennis')) return '🏓 Tênis de Mesa';
                             if (esp.includes('tenis') || esp.includes('tennis')) return '🎾 Tênis';
                             if (esp.includes('esport')) return '🎮 Esports';
                             if (esp.includes('volei') || esp.includes('volley')) return '🏐 Vôlei';
+                            if (esp.includes('beisebol') || esp.includes('baseball')) return '⚾ Beisebol';
                             if (esp.includes('hoquei') || esp.includes('hockey')) return '🏒 Hóquei';
                           }
                           // 2) Fallback por nome do evento (só quando `esporte` não veio).
@@ -1667,7 +1700,36 @@ export default function App() {
                               <span className="surebet-badge" style={{ background: opp.roi_pct > 2.5 ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.12)', color: opp.roi_pct > 2.5 ? '#34d399' : '#cbd5e1', border: opp.roi_pct > 2.5 ? '1px solid #10b981' : '1px solid rgba(148, 163, 184, 0.3)' }}>
                                 {opp.roi_pct > 2.5 ? '🔥 ALTO RETORNO' : 'SUREBET'}
                               </span>
-                              <button 
+                              {opp.salva && (
+                                <span
+                                  title="Oportunidade salva: o rescan automático não a remove nem sobrescreve"
+                                  style={{ background: 'rgba(96, 165, 250, 0.18)', color: '#60a5fa', border: '1px solid rgba(96, 165, 250, 0.5)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+                                >
+                                  📌 SALVA
+                                </span>
+                              )}
+                              {!opp.id.includes('mock-') && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleToggleSave(opp); }}
+                                  style={{
+                                    background: opp.salva ? 'rgba(96, 165, 250, 0.2)' : 'rgba(96, 165, 250, 0.08)',
+                                    border: opp.salva ? '1px solid rgba(96, 165, 250, 0.6)' : '1px solid rgba(96, 165, 250, 0.25)',
+                                    borderRadius: '6px',
+                                    width: '24px',
+                                    height: '24px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    cursor: 'pointer',
+                                    color: '#60a5fa',
+                                    transition: 'all 0.15s ease'
+                                  }}
+                                  title={opp.salva ? 'Remover dos salvos (volta a ser limpa pelo rescan)' : 'Salvar: o rescan de 5 min não remove esta oportunidade'}
+                                >
+                                  {opp.salva ? <BookmarkCheck size={12} /> : <Bookmark size={12} />}
+                                </button>
+                              )}
+                              <button
                                 onClick={() => handleExcludeOpp(opp.id)}
                                 style={{
                                   background: 'rgba(239, 68, 68, 0.1)',

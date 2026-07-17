@@ -1,5 +1,5 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
-import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { rotuloOver, rotuloUnder, linhaArbitravel } from '../arbitrage/markets';
 import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 import { ProxyAgent } from 'undici';
@@ -28,7 +28,8 @@ const pinnacleDispatcher = PINNACLE_PROXY ? new ProxyAgent(PINNACLE_PROXY) : und
 const BASE = 'https://guest.api.arcadia.pinnacle.com/0.1';
 const API_KEY = 'CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R'; // guest key pública usada pelo site da Pinnacle
 
-// esporte interno → Pinnacle sportId (descoberto: Soccer=29, Tennis=33, Basketball=4, E-Sports=12).
+// esporte interno → Pinnacle sportId (descoberto: Soccer=29, Tennis=33, Basketball=4,
+// E-Sports=12, Volleyball=34, Baseball=3). Tênis de Mesa NÃO existe na Pinnacle.
 const SPORT_ID: Record<string, number> = {
   Futebol: 29,
   Tenis: 33,
@@ -36,15 +37,28 @@ const SPORT_ID: Record<string, number> = {
   Basquete: 4,
   Esports: 12,
   'E-Sports': 12,
+  Volei: 34,
+  'Vôlei': 34,
+  Beisebol: 3,
 };
-const SPORT_LABEL: Record<number, string> = { 29: 'Futebol', 33: 'Tenis', 4: 'Basquete', 12: 'Esports' };
+const SPORT_LABEL: Record<number, string> = {
+  29: 'Futebol', 33: 'Tenis', 4: 'Basquete', 12: 'Esports', 34: 'Volei', 3: 'Beisebol',
+};
 // Rótulo do total por esporte, para o assunto normalizar certo (gols/games/pontos/mapas).
 // Em e-sports o total de jogo completo (period 0) é o total de MAPAS → normaliza p/ TOTAIS_MAPAS.
+// VÔLEI (period 0): total e spread são em SETS (linhas 3.5/4.5 e 1.5/2.5 — confirmado
+// ao vivo), NÃO em pontos — rotular como pontos cruzaria com mercado errado da Kambi.
 const TOTAL_LABEL: Record<number, string> = {
   29: 'Total de Gols',
   33: 'Total de Games',
   4: 'Total de Pontos',
   12: 'Total de Mapas',
+  34: 'Total de Sets',
+  3: 'Total de Corridas',
+};
+// Rótulo do spread por esporte (default 'Handicap'; e-sports vira Handicap de Mapas no parser).
+const HANDICAP_LABEL: Record<number, string> = {
+  34: 'Handicap de Sets',
 };
 
 interface PinPrice {
@@ -75,7 +89,7 @@ interface PinMatchup {
 }
 
 export class PinnacleScraper implements OddsScraper {
-  private maxEventosPorEsporte = 25;
+  private maxEventosPorEsporte = 80;
 
   getNome(): string {
     return 'Pinnacle';
@@ -184,12 +198,36 @@ export class PinnacleScraper implements OddsScraper {
       })
       .sort((a, b) => (Date.parse(a.startTime || '') || 0) - (Date.parse(b.startTime || '') || 0))
       .slice(0, this.maxEventosPorEsporte);
+    if (eventos.length === 0) return [];
+
+    // BULK: todos os mercados straight do esporte em 1 request. Com o teto de 80
+    // eventos, o modelo por-evento seriam ~80 requests por esporte pelo túnel
+    // Tailscale; o bulk resolve o esporte inteiro com 2. Se falhar, cai no
+    // per-evento (comportamento antigo).
+    let porMatchup: Map<number, PinMarket[]> | null = null;
+    try {
+      const rB = await fetchTextoComRetry(
+        `${BASE}/sports/${sportId}/markets/straight?primaryOnly=false&withSpecials=false`,
+        this.fetchInit(), 2, 'Pinnacle/bulk', 30000
+      );
+      if (rB.status === 200) {
+        const todos: PinMarket[] = JSON.parse(rB.body);
+        porMatchup = new Map();
+        for (const mk of todos) {
+          const arr = porMatchup.get(mk.matchupId);
+          if (arr) arr.push(mk);
+          else porMatchup.set(mk.matchupId, [mk]);
+        }
+      }
+    } catch {
+      /* bulk indisponível — segue no per-evento */
+    }
 
     const odds: ScrapedOdd[] = [];
     for (const ev of eventos) {
       try {
-        const parsed = await this.extrairMercadosEvento(ev, sportId);
-        odds.push(...parsed);
+        const markets = porMatchup ? porMatchup.get(ev.id) || [] : await this.buscarMercadosEvento(ev.id);
+        odds.push(...this.parseMercados(ev, sportId, markets));
       } catch {
         /* evento sem mercados — ignora */
       }
@@ -197,19 +235,27 @@ export class PinnacleScraper implements OddsScraper {
     return odds;
   }
 
-  private async extrairMercadosEvento(ev: PinMatchup, sportId: number): Promise<ScrapedOdd[]> {
-    const home = ev.participants?.find((p) => p.alignment === 'home')?.name;
-    const away = ev.participants?.find((p) => p.alignment === 'away')?.name;
-    if (!home || !away) return [];
-
+  /** Mercados straight de UM matchup (usado na revalidação e no fallback sem bulk). */
+  private async buscarMercadosEvento(matchupId: number): Promise<PinMarket[]> {
     const r = await fetchTextoComRetry(
-      `${BASE}/matchups/${ev.id}/markets/related/straight`,
+      `${BASE}/matchups/${matchupId}/markets/related/straight`,
       this.fetchInit(),
       2,
       'Pinnacle/mkt'
     );
     if (r.status !== 200) return [];
-    const markets: PinMarket[] = JSON.parse(r.body);
+    return JSON.parse(r.body);
+  }
+
+  private async extrairMercadosEvento(ev: PinMatchup, sportId: number): Promise<ScrapedOdd[]> {
+    return this.parseMercados(ev, sportId, await this.buscarMercadosEvento(ev.id));
+  }
+
+  /** Converte os mercados crus de um matchup em ScrapedOdds (moneyline/total/spread, period 0). */
+  private parseMercados(ev: PinMatchup, sportId: number, markets: PinMarket[]): ScrapedOdd[] {
+    const home = ev.participants?.find((p) => p.alignment === 'home')?.name;
+    const away = ev.participants?.find((p) => p.alignment === 'away')?.name;
+    if (!home || !away) return [];
 
     const esporte = SPORT_LABEL[sportId] || String(sportId);
     const ehEsports = sportId === 12;
@@ -217,8 +263,9 @@ export class PinnacleScraper implements OddsScraper {
     const eventoStr = `${home} vs ${away}`;
     const dec = (p?: number) => (typeof p === 'number' ? this.americanoParaDecimal(p) : NaN);
     const ok = (n: number) => Number.isFinite(n) && n > 1;
-    // Só meia-linha (.5) é arbitragem 2-way limpa (inteira = push; quarto = split).
-    const ehMeiaLinha = (l: number) => Math.abs(l % 1) === 0.5;
+    // Meia-linha (.5) e quarter asiática (.25/.75) — a Pinnacle é a maior fonte de
+    // quarters. Inteira segue barrada (push). O piso de lucro da quarter (cenário do
+    // meio paga metade) é aplicado no engine, não aqui.
     const out: ScrapedOdd[] = [];
 
     for (const mk of markets) {
@@ -259,7 +306,7 @@ export class PinnacleScraper implements OddsScraper {
         const oOver = dec(over?.price);
         const oUnder = dec(under?.price);
         const linha = over?.points;
-        if (ok(oOver) && ok(oUnder) && typeof linha === 'number' && ehMeiaLinha(linha)) {
+        if (ok(oOver) && ok(oUnder) && typeof linha === 'number' && linhaArbitravel(linha)) {
           out.push({
             esporte, evento: eventoStr, dataHora,
             mercado: TOTAL_LABEL[sportId] || 'Total',
@@ -275,12 +322,13 @@ export class PinnacleScraper implements OddsScraper {
         const oH = dec(hp?.price);
         const oA = dec(ap?.price);
         const linha = hp?.points;
-        if (ok(oH) && ok(oA) && typeof linha === 'number' && ehMeiaLinha(linha)) {
+        if (ok(oH) && ok(oA) && typeof linha === 'number' && linhaArbitravel(linha)) {
           const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
           out.push({
             esporte, evento: eventoStr, dataHora,
-            // Em e-sports o spread de jogo completo é handicap de MAPAS → normaliza p/ HANDICAP_MAPAS.
-            mercado: ehEsports ? 'Handicap de Mapas' : 'Handicap',
+            // Em e-sports o spread de jogo completo é handicap de MAPAS → normaliza p/ HANDICAP_MAPAS;
+            // no vôlei é handicap de SETS (HANDICAP_LABEL).
+            mercado: ehEsports ? 'Handicap de Mapas' : HANDICAP_LABEL[sportId] || 'Handicap',
             linha,
             opcaoA: `${home} (${sinal(linha)})`,
             opcaoB: `${away} (${sinal(-linha)})`,

@@ -207,18 +207,39 @@ app.get('/api/opportunities', async (req, res) => {
   }
 });
 
-// DELETE all opportunities (useful for clearing dashboard list)
+// DELETE all opportunities (useful for clearing dashboard list).
+// Oportunidades SALVAS pelo usuário ficam — só o delete individual as remove.
 app.delete('/api/opportunities', async (req, res) => {
   try {
     const { error } = await supabase
       .from('oportunidades')
       .delete()
-      .neq('id', '00000000-0000-0000-0000-000000000000'); // delete all
-    
+      .eq('salva', false);
+
     if (error) throw error;
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao limpar histórico' });
+  }
+});
+
+// Salvar/dessalvar uma oportunidade (fica imune a TODA limpeza automática do rescan:
+// >24h, reconciliação SureRadar/motor e expiradas — ver migration 009).
+app.post('/api/opportunities/:id/save', async (req, res) => {
+  const salva = req.body?.salva !== false; // default: salvar
+  try {
+    const { data, error } = await supabase
+      .from('oportunidades')
+      .update({ salva })
+      .eq('id', req.params.id)
+      .select('id, salva')
+      .single();
+
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Oportunidade não encontrada' });
+    res.json({ success: true, salva: data.salva });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao salvar oportunidade' });
   }
 });
 

@@ -123,12 +123,47 @@ export class WhatsAppNotifier {
     if (c.includes('superbet')) return 'https://superbet.bet.br';
     if (c.includes('blaze')) return 'https://blaze.bet.br';
     if (c.includes('1xbet')) return 'https://1xbet.bet.br';
-    if (c.includes('betnacional')) return 'https://betnacional.com';
-    if (c.includes('seubet')) return 'https://www.seubet.com';
+    if (c.includes('betnacional')) return 'https://betnacional.bet.br';
+    if (c.includes('seubet') || c.includes('seu.bet')) return 'https://www.seu.bet.br';
+    if (c.includes('betboom')) return 'https://betboom.bet.br';
+    if (c.includes('betwarrior')) return 'https://apostas.betwarrior.bet.br';
+    if (c.includes('aposta1')) return 'https://www.aposta1.bet.br';
+    if (c.includes('pinnacle')) return 'https://www.pinnacle.com';
     if (c.includes('pixbet')) return 'https://pixbet.com';
     if (c.includes('sportingbet')) return 'https://sportingbet.com';
     if (c.includes('bet365')) return 'https://www.bet365.com';
     return `https://www.google.com/search?q=${encodeURIComponent(casaName)}`;
+  }
+
+  /**
+   * Envia uma mensagem de TEXTO LIVRE para o destino configurado (grupo/contato).
+   * Usado para avisos operacionais (ex.: deploy concluído) — os alertas de surebet
+   * continuam no enviarAlerta (formatado).
+   */
+  async enviarTexto(texto: string): Promise<boolean> {
+    if (!this.apiUrl || !this.apiKey || !this.instanceName || !this.recipient || this.recipient.includes('xxxxx')) {
+      console.warn('⚠️ [WhatsApp] Configuração da Evolution API incompleta no .env.');
+      return false;
+    }
+    const destino = this.formatarDestino(this.recipient);
+    try {
+      const instanceToken = await this.obterTokenInstancia();
+      if (!instanceToken) return false;
+      const response = await fetch(`${this.apiUrl}/send/text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: instanceToken },
+        body: JSON.stringify({ number: destino, text: texto }),
+      });
+      if (!response.ok) {
+        console.error(`❌ [WhatsApp] Falha ao enviar texto (${response.status}):`, await response.text());
+        return false;
+      }
+      console.log('✅ [WhatsApp] Mensagem de texto enviada.');
+      return true;
+    } catch (err: any) {
+      console.error('❌ [WhatsApp] Erro no envio de texto:', err.message || err);
+      return false;
+    }
   }
 
   /**

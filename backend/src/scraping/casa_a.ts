@@ -62,8 +62,12 @@ export class BetanoScraper extends ScraperBase {
       'Basquete': 'sport/basquete/',
       'Tenis': 'sport/tenis/'
     };
-    const rota = rotas[esporte] || 'sport/futebol/jogos-de-hoje/';
-    
+    // Esporte sem rota mapeada (ex.: Volei/TenisDeMesa/Beisebol, cobertos só pelos
+    // scrapers de API) → pula. O fallback antigo caía na rota de FUTEBOL e re-varria
+    // futebol rotulado com o esporte errado.
+    const rota = rotas[esporte];
+    if (!rota) return [];
+
     await page.goto(`${this.urlBase}/${rota}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
     await this.resolverPopups(page);

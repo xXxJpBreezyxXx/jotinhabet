@@ -76,11 +76,62 @@ function getTranspositions(s1: string, s2: string): number {
  * Remove acentos, pontuações, converte para minúsculas.
  */
 export function normalizeTeamName(name: string): string {
-  return name.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-             .toLowerCase()
-             .replace(/[^a-z0-9 ]/g, '')
-             .replace(/\b(fc|clube|club|ec|sp)\b/g, '')
-             .trim();
+  const p = analisarTime(name);
+  return `${p.nome}${p.sub ? ' sub' + p.sub : ''}${p.fem ? ' fem' : ''}`;
+}
+
+/**
+ * Perfil estrutural do nome do time/jogador, extra\u00eddo ANTES do fuzzy matching:
+ *  - "Sobrenome, Nome" \u2192 "Nome Sobrenome" (Kambi/Altenar listam t\u00eanis/mesa com v\u00edrgula);
+ *  - remove c\u00f3digo de pa\u00eds "(BRA)" e demais par\u00eanteses;
+ *  - detecta marcadores de FEMININO ("(W)"/"(F)"/"Feminino"), de BASE ("Sub-20"/"U19")
+ *    e de time RESERVA ("B"/"II") \u2014 viram FLAGS usadas como GUARDA DURA no matching:
+ *    um lado com marcador e o outro sem NUNCA casam. Sem a guarda, o substring rule
+ *    cruzava "Barcelona" com "Barcelona Feminino" (times diferentes, dinheiro real).
+ */
+interface PerfilTime {
+  nome: string;       // nome normalizado SEM os marcadores
+  fem: boolean;       // time/torneio feminino
+  sub: string | null; // categoria de base ("20" de Sub-20/U20)
+  reserva: boolean;   // time B / II / reservas
+}
+
+const RE_FEM_TEST = /\((?:w|f|fem)\)|\b(?:feminino|feminina|femenino|femenina|women'?s?|woman|ladies)\b/i;
+const RE_FEM_STRIP = /\((?:w|f|fem)\)|\b(?:feminino|feminina|femenino|femenina|women'?s?|woman|ladies)\b/gi;
+
+const cacheAnalise = new Map<string, PerfilTime>();
+
+function analisarTime(name: string): PerfilTime {
+  const key = name || '';
+  const hit = cacheAnalise.get(key);
+  if (hit) return hit;
+
+  let s = key.trim();
+  // "Sobrenome, Nome" \u2192 "Nome Sobrenome"
+  const partes = s.split(',');
+  if (partes.length === 2 && partes[0].trim() && partes[1].trim()) {
+    s = `${partes[1].trim()} ${partes[0].trim()}`;
+  }
+  const fem = RE_FEM_TEST.test(s);
+  s = s.replace(RE_FEM_STRIP, ' ');
+  s = s.replace(/\([^)]*\)/g, ' '); // c\u00f3digo de pa\u00eds "(BRA)" e afins
+  s = s
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\b(fc|clube|club|ec|sp)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const mSub = s.match(/\b(?:sub|u)\s?(\d{2})\b/);
+  const sub = mSub ? mSub[1] : null;
+  if (mSub) s = s.replace(/\b(?:sub|u)\s?\d{2}\b/g, ' ').replace(/\s+/g, ' ').trim();
+  const reserva = /\b(?:b|ii|iii|reservas?|reserves?)$/.test(s);
+  s = s.replace(/\bii$/, 'b'); // "Sporting II" e "Sporting B" s\u00e3o o mesmo time reserva
+
+  const p: PerfilTime = { nome: s, fem, sub, reserva };
+  if (cacheAnalise.size > 5000) cacheAnalise.clear();
+  cacheAnalise.set(key, p);
+  return p;
 }
 
 /**
@@ -139,41 +190,98 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'hungria': ['hungary'],
   'austria': ['austria'],
   'polonia': ['poland', 'polska'],
+  'ira': ['iran'],
+  'eslovenia': ['slovenia'],
+  'grecia': ['greece'],
+  'letonia': ['latvia'],
+  'lituania': ['lithuania'],
+  'finlandia': ['finland'],
+  'irlanda': ['ireland'],
+  'nova zelandia': ['new zealand'],
+  'tailandia': ['thailand'],
+  'republica dominicana': ['dominican republic'],
+  'porto rico': ['puerto rico'],
+  // MLB — abreviações de cidade divergem entre casas (Altenar usa "LA Dodgers")
+  'los angeles dodgers': ['la dodgers'],
+  'los angeles angels': ['la angels'],
+  'new york yankees': ['ny yankees'],
+  'new york mets': ['ny mets'],
+  'san francisco giants': ['sf giants'],
+  'san diego padres': ['sd padres'],
+  'tampa bay rays': ['tb rays'],
 };
 
 /**
- * Retorna o nome canônico (normalizado) de um time, resolvendo aliases entre idiomas.
+ * Resolve o nome JÁ normalizado (sem marcadores) para o canônico do dicionário de aliases.
  */
-function canonicalTeamName(name: string): string {
-  const normalized = normalizeTeamName(name);
+function canonicalDoNome(nomeNormalizado: string): string {
   for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
-    if (canonical === normalized || aliases.includes(normalized)) {
+    if (canonical === nomeNormalizado || aliases.includes(nomeNormalizado)) {
       return canonical;
     }
   }
-  return normalized;
+  return nomeNormalizado;
+}
+
+/** Tokens iguais em qualquer ordem ("Zuzanek Jiri" × "Jiri Zuzanek") — casas listam sobrenome primeiro sem vírgula. */
+function mesmosTokens(a: string, b: string): boolean {
+  const ta = a.split(' ').filter(Boolean).sort().join(' ');
+  const tb = b.split(' ').filter(Boolean).sort().join(' ');
+  return ta.length > 0 && ta === tb;
+}
+
+/**
+ * Casamento por SOBRENOME + INICIAL ("alcaraz c" × "carlos alcaraz") — formato comum
+ * em tênis/tênis de mesa. Exige que TODOS os tokens completos do lado abreviado
+ * existam no outro nome, e que cada inicial seja compatível com uma palavra restante.
+ * ("Zverev A." × "Mischa Zverev" NÃO casa: a inicial não bate.)
+ */
+function casaPorIniciais(na: string, nb: string): boolean {
+  const ta = na.split(' ').filter(Boolean);
+  const tb = nb.split(' ').filter(Boolean);
+  const inicA = ta.filter((t) => t.length === 1);
+  const inicB = tb.filter((t) => t.length === 1);
+  if (inicA.length === 0 && inicB.length === 0) return false;
+  if (inicA.length > 0 && inicB.length > 0) return false; // ambos abreviados → decide o exato/JW
+  const [curto, longo] = inicA.length > 0 ? [ta, tb] : [tb, ta];
+  const completos = curto.filter((t) => t.length > 1);
+  if (completos.length === 0) return false;
+  if (!completos.every((c) => longo.includes(c))) return false;
+  const restantes = longo.filter((t) => !completos.includes(t));
+  const iniciais = curto.filter((t) => t.length === 1);
+  return iniciais.every((i) => restantes.some((r) => r.startsWith(i)));
 }
 
 /**
  * Retorna true se os dois times são considerados o mesmo (similaridade Jaro-Winkler >= 0.75)
  */
 export function areTeamsSame(teamA: string, teamB: string, threshold = 0.75): boolean {
-  // 1. Normalização básica
-  const normA = normalizeTeamName(teamA);
-  const normB = normalizeTeamName(teamB);
-  
+  const a = analisarTime(teamA);
+  const b = analisarTime(teamB);
+  // GUARDAS DURAS: feminino×masculino, categoria de base (Sub-20) e time reserva (B/II)
+  // nunca casam com o time principal — mesmo com o resto do nome idêntico.
+  if (a.fem !== b.fem || a.sub !== b.sub || a.reserva !== b.reserva) return false;
+
+  const normA = a.nome;
+  const normB = b.nome;
+  if (!normA || !normB) return false;
+
   if (normA === normB) return true;
   if (normA.includes(normB) && normB.length > 3) return true;
   if (normB.includes(normA) && normA.length > 3) return true;
-  
-  // 2. Tenta resolver via dicionário de aliases (cross-language)
-  const canonA = canonicalTeamName(teamA);
-  const canonB = canonicalTeamName(teamB);
+  // Mesmos tokens em ordem diferente (sobrenome-primeiro sem vírgula)
+  if (mesmosTokens(normA, normB)) return true;
+
+  // Dicionário de aliases (cross-language)
+  const canonA = canonicalDoNome(normA);
+  const canonB = canonicalDoNome(normB);
   if (canonA === canonB) return true;
-  
-  // 3. Jaro-Winkler sobre os nomes normalizados
+
+  // Sobrenome + inicial ("alcaraz c" × "carlos alcaraz")
+  if (casaPorIniciais(normA, normB)) return true;
+
+  // Jaro-Winkler sobre os nomes normalizados e canônicos
   if (jaroWinkler(normA, normB) >= threshold) return true;
-  // 4. Jaro-Winkler sobre os nomes canônicos
   if (jaroWinkler(canonA, canonB) >= threshold) return true;
 
   return false;
@@ -228,12 +336,20 @@ export function areEventsSame(event1: string, event2: string): boolean {
  * Aceita ISO ("2026-07-15T10:00:00Z") e formato "AAAA-MM-DD HH:MM:SS" (tratado como UTC,
  * consistente com o que as casas retornam). Retorna null para "Hoje"/"Amanhã"/inválido.
  */
+const memoKickoff = new Map<string, number | null>();
+
 export function parseKickoff(dataHora?: string): number | null {
   if (!dataHora || typeof dataHora !== 'string') return null;
+  // Memoizado: chamado milhões de vezes por varredura via mesmoHorario (hot path do motor).
+  const hit = memoKickoff.get(dataHora);
+  if (hit !== undefined) return hit;
   let iso = dataHora.includes('T') ? dataHora.trim() : dataHora.trim().replace(' ', 'T');
   if (!/[Zz]$|[+-]\d\d:?\d\d$/.test(iso)) iso += 'Z';
   const t = Date.parse(iso);
-  return isNaN(t) ? null : t;
+  const r = isNaN(t) ? null : t;
+  if (memoKickoff.size > 20000) memoKickoff.clear();
+  memoKickoff.set(dataHora, r);
+  return r;
 }
 
 /**
@@ -251,11 +367,18 @@ export function mesmoHorario(dh1?: string, dh2?: string, tolMin = 10): boolean {
 
 /** Similaridade [0..1] de um par de times (exato/substring/alias fortes; senão Jaro-Winkler). */
 function simTime(a: string, b: string): number {
-  const na = normalizeTeamName(a);
-  const nb = normalizeTeamName(b);
+  const pa = analisarTime(a);
+  const pb = analisarTime(b);
+  // Guardas duras (mesmas do areTeamsSame): categorias diferentes têm força 0.
+  if (pa.fem !== pb.fem || pa.sub !== pb.sub || pa.reserva !== pb.reserva) return 0;
+  const na = pa.nome;
+  const nb = pb.nome;
+  if (!na || !nb) return 0;
   if (na === nb) return 1;
   if ((na.includes(nb) && nb.length > 3) || (nb.includes(na) && na.length > 3)) return 0.95;
-  if (canonicalTeamName(a) === canonicalTeamName(b)) return 0.9;
+  if (mesmosTokens(na, nb)) return 0.95;
+  if (canonicalDoNome(na) === canonicalDoNome(nb)) return 0.9;
+  if (casaPorIniciais(na, nb)) return 0.9;
   return jaroWinkler(na, nb);
 }
 

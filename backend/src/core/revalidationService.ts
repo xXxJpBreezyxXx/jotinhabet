@@ -2,13 +2,15 @@ import { supabase } from '../db/client';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { ArbitrageOpportunity } from '../arbitrage/engine';
 import { areEventsSame, areTeamsSame, jaroWinkler } from '../arbitrage/matcher';
-import { mesmaOferta } from '../arbitrage/markets';
+import { mesmaOferta, ehLinhaQuarter } from '../arbitrage/markets';
 import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
 import { Aposta1Scraper } from '../scraping/casa_altenar';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
+import { BetBoomScraper } from '../scraping/casa_betboom';
+import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 
 /** Casas com scraper próprio que sabem re-buscar UM evento (oddsDoEvento). */
 const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> }> = {
@@ -17,6 +19,9 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   superbet: () => new SuperbetScraper(),
   aposta1: () => new Aposta1Scraper(),
   pinnacle: () => new PinnacleScraper(),
+  betboom: () => new BetBoomScraper(),
+  seubet: () => new SeuBetScraper(),
+  vbet: () => new VbetScraper(),
 };
 
 /** Resultado da checagem ao vivo das duas pernas (gate pré-alerta). */
@@ -310,8 +315,16 @@ export class RevalidationService {
         const faltou = [oddA === null ? opp.casaA : null, oddB === null ? opp.casaB : null].filter(Boolean).join(' e ');
         return { ok: false, oddA, oddB, roiAtual: null, motivo: `perna não encontrada agora em ${faltou} (linha removida/movida?)` };
       }
-      const roi = this.roiVerdadeiro(oddA, oddB);
-      return { ok: roi !== null && roi > 0, oddA, oddB, roiAtual: roi, motivo: roi === null ? 'odds inválidas' : `odds atuais ${oddA}/${oddB} (ROI ${roi}%)` };
+      let roi = this.roiVerdadeiro(oddA, oddB);
+      // QUARTER-LINE (.25/.75): o ROI garantido é o PISO (o cenário do meio devolve
+      // metade de cada perna → lucro = metade do nominal) — MESMA convenção do
+      // engine.enriquecer, senão o alerta diria "revalidado 3%" para um piso de 1.5%.
+      // Sem linha armazenada (revalidação via banco), deriva do rótulo da opção.
+      const linhaEfetiva = opp.linha ?? this.linhaDaOpcao(opp.opcaoA) ?? this.linhaDaOpcao(opp.opcaoB);
+      if (roi !== null && linhaEfetiva != null && ehLinhaQuarter(linhaEfetiva)) {
+        roi = Number((roi / 2).toFixed(2));
+      }
+      return { ok: roi !== null && roi > 0, oddA, oddB, roiAtual: roi, motivo: roi === null ? 'odds inválidas' : `odds atuais ${oddA}/${oddB} (ROI garantido ${roi}%)` };
     } catch (e: any) {
       return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `falha ao re-buscar pernas: ${e?.message || e}` };
     }
@@ -323,8 +336,15 @@ export class RevalidationService {
 
     // Baseline calculado das MESMAS odds armazenadas (apples-to-apples com roiAtual),
     // caindo para o roi_pct só se as odds não estiverem disponíveis.
-    const roiAnterior =
+    let roiAnterior =
       this.roiVerdadeiro(Number(opp.odd_casa_1), Number(opp.odd_casa_2)) ?? (Number(opp.roi_pct) || 0);
+    // Quarter-line no MOTOR próprio: o roiAtual do checarPernasAoVivo é o PISO, então
+    // o baseline precisa ser o piso também — senão odds inalteradas viravam 'reduzida'.
+    // (No SureRadar os dois lados seguem nominais → consistente sem ajuste.)
+    if (!this.norm(opp.url).includes('sureradar')) {
+      const linhaDb = this.linhaDaOpcao(String(opp.opcao_a || '')) ?? this.linhaDaOpcao(String(opp.opcao_b || ''));
+      if (linhaDb != null && ehLinhaQuarter(linhaDb)) roiAnterior = Number((roiAnterior / 2).toFixed(2));
+    }
 
     const base: RevalidacaoResultado = {
       checado_em: new Date().toISOString(),

@@ -26,14 +26,25 @@ function periodo(s: string): string {
   // Segmentos específicos ANTES dos tempos — "1º quarto"/"3º set"/"2º período" não
   // podem virar FT nem colidir entre si (mesma família do bug Mapa 1 × Mapa 2:
   // total do 1º quarto a 43.5 não pode cruzar com o do 2º quarto a 43.5).
-  const q = s.match(/([1-4])º?\s*quarto|\bq([1-4])\b|([1-4])(?:st|nd|rd|th)\s*quarter/);
-  if (q) return `Q${q[1] || q[2] || q[3]}`;
-  const st = s.match(/([1-5])º?\s*set|([1-5])(?:st|nd|rd|th)\s*set/);
-  if (st) return `S${st[1] || st[2]}`;
-  const pr = s.match(/([1-3])º?\s*per[ií]odo/);
-  if (pr) return `P${pr[1]}`;
-  if (/1º?\s*tempo|primeiro tempo|1st half|\b1t\b/.test(s)) return '1T';
-  if (/2º?\s*tempo|segundo tempo|2nd half|\b2t\b/.test(s)) return '2T';
+  // Aceita o ordinal DEPOIS da palavra ("Set 3", padrão Kambi vôlei/mesa) e o símbolo
+  // de grau "°" no lugar do ordinal "º" (padrão Superbet) — sem isso, "Handicap de
+  // Pontos - Set 3" colapsava em FT e cruzava com o handicap da partida inteira.
+  const q = s.match(/([1-4])[º°]?\s*quarto|\bq([1-4])\b|([1-4])(?:st|nd|rd|th)\s*quarter|quarto\s*([1-4])\b/);
+  if (q) return `Q${q[1] || q[2] || q[3] || q[4]}`;
+  const st = s.match(/([1-7])[º°]?\s*set|([1-7])(?:st|nd|rd|th)\s*set|\bset\s*([1-7])\b/);
+  if (st) return `S${st[1] || st[2] || st[3]}`;
+  const pr = s.match(/([1-3])[º°]?\s*per[ií]odo|per[ií]odo\s*([1-3])\b/);
+  if (pr) return `P${pr[1] || pr[2]}`;
+  // Beisebol: "após/primeiro(s) N entradas/innings" (parcial agregado, ex.: F5) e
+  // "entrada/turno N" (uma entrada só) são períodos distintos entre si e do jogo
+  // completo. Cobre as variações reais: "Primeiros 5 innings" (BetWarrior),
+  // "Primeiro(s) 5 Innings", "Após 5 Entradas" (Superbet), "Turnos 1" (Kambi).
+  const ea = s.match(/(?:ap[oó]s|primeir[\w()]*|first|after)\s*(\d+)\s*(?:entradas?|innings?|turnos?)/);
+  if (ea) return `E${ea[1]}`;
+  const e1 = s.match(/entradas?\s*(\d+)|(\d+)ª?\s*entrada|innings?\s*(\d+)|turnos?\s*(\d+)/);
+  if (e1) return `I${e1[1] || e1[2] || e1[3] || e1[4]}`;
+  if (/1[º°]?\s*tempo|primeiro tempo|1st half|\b1t\b/.test(s)) return '1T';
+  if (/2[º°]?\s*tempo|segundo tempo|2nd half|\b2t\b/.test(s)) return '2T';
   return 'FT';
 }
 
@@ -49,7 +60,7 @@ function mapa(s: string): string {
 
 // Termos que indicam que um sufixo pós-hífen é TEXTO DE MERCADO, não nome de time.
 const TERMO_MERCADO =
-  /total|mais|menos|over|under|handicap|vencedor|resultado|placar|rodada|round|mapa|\bmap\b|kill|gol|goal|ponto|game|\bset\b|escanteio|cart[aã]o|cart[oõ]es|chute|shot|prorroga|[ií]mpar|\bpar\b|corret|margem|dura[cç][aã]o|jogador|player|pistol|d[uú]pla|quarto|quarter|per[ií]odo|tempo|half/;
+  /total|mais|menos|over|under|handicap|vencedor|resultado|placar|rodada|round|mapa|\bmap\b|kill|gol|goal|ponto|game|\bset\b|escanteio|cart[aã]o|cart[oõ]es|chute|shot|prorroga|[ií]mpar|\bpar\b|corret|margem|dura[cç][aã]o|jogador|player|pistol|d[uú]pla|quarto|quarter|per[ií]odo|tempo|half|corrida|entrada|inning|turno|rebatedor/;
 
 /**
  * Escopo POR TIME no fim do rótulo ("Total de cartões - Chapecoense" → "_CHAPECOENSE").
@@ -73,10 +84,16 @@ function assunto(s: string): string {
   // Chutes ANTES de gols: "total de chutes a gol" contém "gol" e colidia com
   // TOTAIS_GOLS (pareava chutes com gols/escanteios de outra casa).
   if (/chute|shot|finaliza/.test(s)) return 'CHUTES';
+  // Beisebol: corridas (runs) têm assunto próprio — em GERAL, "total de corridas 8.5"
+  // poderia colidir com outro total desconhecido de linha igual (ex.: hits).
+  if (/corrida|\brun\b|\bruns\b/.test(s)) return 'CORRIDAS';
   if (/gol|goal/.test(s)) return 'GOLS';
   if (/game/.test(s)) return 'GAMES';
-  if (/\bset/.test(s)) return 'SETS';
+  // PONTOS antes de SETS: em "Total de pontos - Set 3" o "Set 3" é o PERÍODO
+  // (extraído por periodo()), não o assunto — o que se conta ali são pontos.
+  // "Total de sets"/"Handicap de Set" não contêm "ponto" e seguem caindo em SETS.
   if (/ponto|point/.test(s)) return 'PONTOS';
+  if (/\bset/.test(s)) return 'SETS';
   // E-sports: o ASSUNTO da estatística separa mercados que senão colapsariam em GERAL
   // (kills ≠ torres ≠ minutos) e poderiam cruzar falso ao coincidir a linha.
   if (/kill|abate/.test(s)) return 'KILLS';
@@ -93,8 +110,23 @@ function assunto(s: string): string {
  * Ordem importa: handicap/total antes de "resultado final" para combos não se
  * disfarçarem de match-winner.
  */
+const memoNormalizar = new Map<string, string>();
+
 export function normalizarMercado(raw: string): string {
-  const s = (raw || '').toString().toLowerCase();
+  // Memoizado: com 7 casas o motor faz milhões de normalizações por varredura sobre
+  // poucos milhares de rótulos distintos — sem o memo, os regex desta função eram
+  // parte do gargalo que levou a varredura a >7 min (load 56 na VPS em 17/07/2026).
+  const key = (raw || '').toString();
+  const hit = memoNormalizar.get(key);
+  if (hit !== undefined) return hit;
+  const r = normalizarMercadoCru(key);
+  if (memoNormalizar.size > 20000) memoNormalizar.clear();
+  memoNormalizar.set(key, r);
+  return r;
+}
+
+function normalizarMercadoCru(raw: string): string {
+  const s = raw.toLowerCase();
   // Segmento: em e-sports usa o mapa (M1/M2/...); nos demais, o período (FT/1T/2T).
   const seg = mapa(s) || periodo(s);
   // DNB (Empate Anula / Draw No Bet) antes de tudo — não deve virar RESULTADO_FINAL.
@@ -150,3 +182,22 @@ export function mesmaOferta(
 /** Rótulos canônicos de totais — parsers emitem estes para o alinhamento bater entre casas. */
 export const rotuloOver = (linha: number): string => `Mais de ${linha}`;
 export const rotuloUnder = (linha: number): string => `Menos de ${linha}`;
+
+/** True se a linha é quarter asiática (.25/.75) — aposta dividida nas duas linhas vizinhas. */
+export function ehLinhaQuarter(linha: number): boolean {
+  const f = Math.abs(linha) % 1;
+  return Math.abs(f - 0.25) < 1e-9 || Math.abs(f - 0.75) < 1e-9;
+}
+
+/**
+ * Linha ARBITRÁVEL em 2 pernas: meia-linha (.5) ou quarter asiática (.25/.75).
+ * Linha INTEIRA fica de fora: o push devolve as duas pernas e o "arb" vira lucro zero.
+ * Na quarter, o cenário do MEIO (resultado exatamente na linha vizinha inteira)
+ * devolve metade de cada perna → o lucro GARANTIDO é o PISO = metade do nominal.
+ * O piso é aplicado em ArbitrageEngine.enriquecer/calcularDistribuicaoStake e na
+ * revalidação pré-alerta — o ROI exibido/alertado de quarter é sempre o piso.
+ */
+export function linhaArbitravel(linha: number): boolean {
+  const f = Math.abs(linha) % 1;
+  return Math.abs(f - 0.5) < 1e-9 || ehLinhaQuarter(linha);
+}

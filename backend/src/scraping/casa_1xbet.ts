@@ -37,7 +37,10 @@ export class OneXBetScraper extends ScraperBase {
       'Tenis': 'line/tennis'
     };
     
-    const rota = rotas[esporte] || 'line/football';
+    // Esporte sem rota mapeada → pula. O fallback antigo caía em football e emitia
+    // odds de futebol ROTULADAS com o esporte errado (ex.: 'Volei').
+    const rota = rotas[esporte];
+    if (!rota) return [];
     const targetUrl = `${this.urlBase}${rota}`;
     
     console.log(`   [1xBet] Acessando lista de ${esporte}: ${targetUrl}`);

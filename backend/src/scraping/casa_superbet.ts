@@ -1,5 +1,5 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
-import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { rotuloOver, rotuloUnder, linhaArbitravel } from '../arbitrage/markets';
 import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 
@@ -17,12 +17,19 @@ import { fetchTextoComRetry } from '../utils/http';
 
 const BASE = 'https://production-superbet-offer-br.freetls.fastly.net/v2/pt-BR';
 
-// esporte interno → sportId da Superbet (confirmado: 5=Futebol, 2=Tenis, 4=Basquete).
+// esporte interno → sportId da Superbet (confirmado: 5=Futebol, 2=Tenis, 4=Basquete,
+// 1=Vôlei, 24=Tênis de Mesa, 20=Beisebol — descobertos via by-date sem filtro).
 const SPORT_ID: Record<string, number> = {
   Futebol: 5,
   Tenis: 2,
   Tênis: 2,
   Basquete: 4,
+  Volei: 1,
+  'Vôlei': 1,
+  TenisDeMesa: 24,
+  'Tenis de Mesa': 24,
+  'Tênis de Mesa': 24,
+  Beisebol: 20,
 };
 // E-Sports: sportIds por jogo (confirmado ao vivo: 39=LoL, 54=Dota 2, 55=CS2/Valorant).
 const ESPORTS_SPORT_IDS = [39, 54, 55];
@@ -30,15 +37,31 @@ const SPORT_LABEL: Record<number, string> = {
   5: 'Futebol',
   2: 'Tenis',
   4: 'Basquete',
+  1: 'Volei',
+  24: 'Tenis de Mesa',
+  20: 'Beisebol',
   39: 'Esports',
   54: 'Esports',
   55: 'Esports',
 };
 
-// Mercado de total DA PARTIDA por esporte (nome exato) — evita props de jogador.
+// Mercado de total DA PARTIDA por esporte (nome exato) — evita props de jogador
+// ("Total de Pontos Jiri Zuzanek" não bate no nome exato).
 const TOTAL_CFG: Record<number, { market: string; label: string }> = {
   5: { market: 'Total de Gols', label: 'Total de Gols' },
   4: { market: 'Total de Pontos (Inc. prorrogação)', label: 'Total de Pontos' },
+  1: { market: 'Total de Pontos', label: 'Total de Pontos' },
+  24: { market: 'Total de Pontos', label: 'Total de Pontos' },
+  20: { market: 'Total de Corridas (incl. entradas extras)', label: 'Total de Corridas' },
+};
+
+// Handicap DA PARTIDA por esporte (nome exato; sv = linha do mandante).
+// Vôlei: o handicap de jogo completo da Superbet é em SETS → rótulo de SETS
+// (cruza com o spread da Pinnacle, também em sets). Mesa: pontos. Beisebol: run line.
+const HANDICAP_CFG: Record<number, { market: string; label: string }> = {
+  1: { market: 'Handicap de Set', label: 'Handicap de Sets' },
+  24: { market: 'Handicap de pontos', label: 'Handicap de Pontos' },
+  20: { market: 'Handicap (incl. entradas extras)', label: 'Handicap' },
 };
 
 interface SbOdd {
@@ -60,8 +83,8 @@ interface SbEvent {
 }
 
 export class SuperbetScraper implements OddsScraper {
-  private maxEventosPorEsporte = 40;
-  private maxEventosDetalhe = 30; // quantos eventos buscar mercados completos (Total)
+  private maxEventosPorEsporte = 80;
+  private maxEventosDetalhe = 40; // quantos eventos buscar mercados completos (Total/Handicap)
 
   getNome(): string {
     return 'Superbet';
@@ -185,7 +208,10 @@ export class SuperbetScraper implements OddsScraper {
 
     // 2) Mercados completos de um subconjunto. Em e-sports os mercados são outros
     //    (mapas/rounds) → parser dedicado; nos demais, o de bola (gols/pontos/BTTS/DNB).
+    //    Esportes sem NENHUM mercado de detalhe configurado (ex.: tênis, sportId 2)
+    //    pulam o loop — economiza ~40 requests de ~270KB por varredura.
     const ehEsports = ESPORTS_SPORT_IDS.includes(sportId);
+    if (!ehEsports && !TOTAL_CFG[sportId] && !HANDICAP_CFG[sportId]) return odds;
     const detalhe = eventos.slice(0, this.maxEventosDetalhe);
     for (const ev of detalhe) {
       try {
@@ -253,30 +279,63 @@ export class SuperbetScraper implements OddsScraper {
     const out: ScrapedOdd[] = [];
 
     // Total DA PARTIDA (gols/pontos por esporte): agrupa por specialBetValue (linha) → Over/Under.
+    // Linha meia (.5) ou quarter (.25/.75); inteira barrada (push → lucro zero).
     const cfg = TOTAL_CFG[sportId];
-    if (!cfg) return out;
-    const totais = (ev.odds || []).filter((o) => o.marketName === cfg.market && o.status === 'active');
-    const porLinha = new Map<string, { over?: SbOdd; under?: SbOdd }>();
-    for (const o of totais) {
-      const sbv = o.specialBetValue || '';
-      if (!sbv) continue;
-      const g = porLinha.get(sbv) || {};
-      if (/mais de/i.test(o.name || '')) g.over = o;
-      else if (/menos de/i.test(o.name || '')) g.under = o;
-      porLinha.set(sbv, g);
+    if (cfg) {
+      const totais = (ev.odds || []).filter((o) => o.marketName === cfg.market && o.status === 'active');
+      const porLinha = new Map<string, { over?: SbOdd; under?: SbOdd }>();
+      for (const o of totais) {
+        const sbv = o.specialBetValue || '';
+        if (!sbv) continue;
+        const g = porLinha.get(sbv) || {};
+        if (/mais de/i.test(o.name || '')) g.over = o;
+        else if (/menos de/i.test(o.name || '')) g.under = o;
+        porLinha.set(sbv, g);
+      }
+      for (const [sbv, g] of porLinha) {
+        if (g.over && g.under && g.over.price > 1 && g.under.price > 1) {
+          const linha = Number(sbv);
+          if (!Number.isFinite(linha) || !linhaArbitravel(linha)) continue;
+          out.push({
+            esporte, evento: eventoStr, dataHora,
+            mercado: cfg.label,
+            linha,
+            opcaoA: rotuloOver(linha),
+            opcaoB: rotuloUnder(linha),
+            oddA: g.over.price,
+            oddB: g.under.price,
+          });
+        }
+      }
     }
-    for (const [sbv, g] of porLinha) {
-      if (g.over && g.under && g.over.price > 1 && g.under.price > 1) {
-        const linha = Number(sbv);
-        if (!Number.isFinite(linha)) continue;
+
+    // Handicap DA PARTIDA (sets/pontos/corridas por esporte): sv = linha do mandante,
+    // codes 1/2. Linha meia (.5) ou quarter (.25/.75); inteira barrada (push).
+    const hcfg = HANDICAP_CFG[sportId];
+    if (hcfg) {
+      const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
+      const hands = (ev.odds || []).filter((o) => o.marketName === hcfg.market && o.status === 'active');
+      const porSv = new Map<string, { home?: SbOdd; away?: SbOdd }>();
+      for (const o of hands) {
+        const sbv = o.specialBetValue || '';
+        if (!sbv) continue;
+        const g = porSv.get(sbv) || {};
+        if (o.code === '1') g.home = o;
+        else if (o.code === '2') g.away = o;
+        porSv.set(sbv, g);
+      }
+      for (const [sbv, g] of porSv) {
+        const linha = parseFloat(sbv);
+        if (!g.home || !g.away || !(g.home.price > 1) || !(g.away.price > 1)) continue;
+        if (!Number.isFinite(linha) || !linhaArbitravel(linha)) continue;
         out.push({
           esporte, evento: eventoStr, dataHora,
-          mercado: cfg.label,
+          mercado: hcfg.label,
           linha,
-          opcaoA: rotuloOver(linha),
-          opcaoB: rotuloUnder(linha),
-          oddA: g.over.price,
-          oddB: g.under.price,
+          opcaoA: `${home} (${sinal(linha)})`,
+          opcaoB: `${away} (${sinal(-linha)})`,
+          oddA: g.home.price,
+          oddB: g.away.price,
         });
       }
     }

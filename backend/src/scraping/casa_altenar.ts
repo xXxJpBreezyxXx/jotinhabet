@@ -1,5 +1,5 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
-import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { rotuloOver, rotuloUnder, linhaArbitravel } from '../arbitrage/markets';
 import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 
@@ -20,7 +20,7 @@ interface AltenarConfig {
   nome: string;
   integration: string; // ex: 'aposta1'
   referer: string; // ex: 'https://www.aposta1.bet.br/'
-  maxCampeonatosPorEsporte?: number; // default 20 (maiores ligas)
+  maxCampeonatosPorEsporte?: number; // default 40 (maiores ligas)
 }
 
 interface AltCompetitor { id: number; name: string; }
@@ -40,16 +40,30 @@ interface AltResp {
 
 // sportId 145 = E-Sports (confirmado ao vivo: VCT/Valorant, Esports World Cup, etc.).
 // Neste endpoint só vem o mercado principal (Vencedor da partida) para e-sports.
-const SPORT_ID: Record<string, number> = { Futebol: 66, Basquete: 67, Tenis: 68, Tênis: 68, Esports: 145 };
-const SPORT_LABEL: Record<number, string> = { 66: 'Futebol', 67: 'Basquete', 68: 'Tenis', 145: 'Esports' };
-const TOTAL_LABEL: Record<number, string> = { 66: 'Total de Gols', 67: 'Total de Pontos', 68: 'Total de Games' };
+// 69=Vôlei, 77=Tênis de Mesa, 76=Beisebol (confirmados no menu ao vivo; vôlei/mesa
+// expõem "Total pontos"/"Handicap pontos", beisebol "Total/Handicap/Vencedor
+// (incluindo innings extra)").
+const SPORT_ID: Record<string, number> = {
+  Futebol: 66, Basquete: 67, Tenis: 68, Tênis: 68, Esports: 145,
+  Volei: 69, 'Vôlei': 69,
+  TenisDeMesa: 77, 'Tenis de Mesa': 77, 'Tênis de Mesa': 77,
+  Beisebol: 76,
+};
+const SPORT_LABEL: Record<number, string> = {
+  66: 'Futebol', 67: 'Basquete', 68: 'Tenis', 145: 'Esports',
+  69: 'Volei', 77: 'Tenis de Mesa', 76: 'Beisebol',
+};
+const TOTAL_LABEL: Record<number, string> = {
+  66: 'Total de Gols', 67: 'Total de Pontos', 68: 'Total de Games',
+  69: 'Total de Pontos', 77: 'Total de Pontos', 76: 'Total de Corridas',
+};
 
 export class AltenarWidgetScraper implements OddsScraper {
   private cfg: Required<AltenarConfig>;
   private readonly F = 'https://sb2frontend-altenar2.biahosted.com/api';
 
   constructor(cfg: AltenarConfig) {
-    this.cfg = { maxCampeonatosPorEsporte: 20, ...cfg };
+    this.cfg = { maxCampeonatosPorEsporte: 40, ...cfg };
   }
 
   getNome(): string {
@@ -157,7 +171,9 @@ export class AltenarWidgetScraper implements OddsScraper {
     const oddById = new Map<number, AltOdd>((j.odds || []).map((o) => [o.id, o]));
     const mktById = new Map<number, AltMarket>((j.markets || []).map((m) => [m.id, m]));
     const agora = Date.now();
-    const ehMeiaLinha = (l: number) => Math.abs(l % 1) === 0.5;
+    // Meia-linha e quarter asiática (.25/.75); inteira barrada (push). Piso da
+    // quarter aplicado no engine.
+    const ehLinhaOk = (l: number) => linhaArbitravel(l);
     const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
 
     for (const ev of j.events || []) {
@@ -184,8 +200,10 @@ export class AltenarWidgetScraper implements OddsScraper {
         if (!m) continue;
         const oddsM = (m.oddIds || []).map((id) => oddById.get(id)).filter(Boolean) as AltOdd[];
         const ativa = (o?: AltOdd) => o && o.price > 1 && o.oddStatus !== 1;
-        // Nome base sem o sufixo "(incluindo Prorrogação)" — normaliza futebol/basquete/tênis.
-        const base = (m.name || '').replace(/\s*\(incluindo prorroga[cç][aã]o\)\s*/i, '').trim();
+        // Nome base sem o sufixo "(incluindo Prorrogação)" / "(incluindo innings extra)"
+        // — normaliza futebol/basquete/tênis/beisebol. (Ambos os sufixos indicam a
+        // convenção padrão de liquidação do esporte, então remover não muda o mercado.)
+        const base = (m.name || '').replace(/\s*\(incluindo (?:prorroga[cç][aã]o|innings? extras?)\)\s*/i, '').trim();
 
         // --- Resultado Final (1x2 3-way / Vencedor 2-way; e-sports: "Vencedor da partida") ---
         if (base === '1x2' || base === 'Vencedor' || base === 'Vencedor da partida') {
@@ -210,10 +228,11 @@ export class AltenarWidgetScraper implements OddsScraper {
         }
 
         // --- Total DA PARTIDA (Over/Under), linha em sv. "base" exatamente "Total"
-        //     exclui "Total de escanteios", "X total" (por-time), "Nº tempo - total". ---
-        else if (base === 'Total' && m.sv) {
+        //     exclui "Total de escanteios", "X total" (por-time), "Nº tempo - total".
+        //     Vôlei/mesa usam "Total pontos" (rótulo final vem de TOTAL_LABEL). ---
+        else if ((base === 'Total' || base === 'Total pontos') && m.sv) {
           const linha = parseFloat(m.sv);
-          if (!Number.isFinite(linha) || !ehMeiaLinha(linha)) continue;
+          if (!Number.isFinite(linha) || !ehLinhaOk(linha)) continue;
           const over = oddsM.find((o) => /mais/i.test(o.name || ''));
           const under = oddsM.find((o) => /menos/i.test(o.name || ''));
           if (!ativa(over) || !ativa(under)) continue;
@@ -224,15 +243,19 @@ export class AltenarWidgetScraper implements OddsScraper {
           });
         }
 
-        // --- Handicap Asiático 2-way (home/away com sinal), linha em sv, só meia-linha ---
-        else if (base === 'Handicap' && m.sv) {
+        // --- Handicap Asiático 2-way (home/away com sinal), linha em sv, só meia-linha.
+        //     Vôlei/mesa usam "Handicap pontos" → rótulo com ASSUNTO ("Handicap de
+        //     Pontos"), para nunca colidir com handicap de SETS de outra casa. ---
+        else if ((base === 'Handicap' || base === 'Handicap pontos') && m.sv) {
           const linha = parseFloat(m.sv); // linha do mandante
-          if (!Number.isFinite(linha) || !ehMeiaLinha(linha)) continue;
+          if (!Number.isFinite(linha) || !ehLinhaOk(linha)) continue;
           const oHome = oddsM.find((o) => o.competitorId === cids[0]);
           const oAway = oddsM.find((o) => o.competitorId === cids[1]);
           if (!ativa(oHome) || !ativa(oAway)) continue;
           out.push({
-            esporte, evento, dataHora, mercado: 'Handicap', linha,
+            esporte, evento, dataHora,
+            mercado: base === 'Handicap pontos' ? 'Handicap de Pontos' : 'Handicap',
+            linha,
             opcaoA: `${home} (${sinal(linha)})`, opcaoB: `${away} (${sinal(-linha)})`,
             oddA: oHome!.price, oddB: oAway!.price,
           });

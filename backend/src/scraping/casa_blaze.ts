@@ -128,8 +128,10 @@ export class BlazeScraper extends ScraperBase {
       'Tenis': 'tenis',
       'Esports': 'esports'
     };
-    const rota = rotas[esporte] || '';
-    const targetUrl = rota ? `${this.urlBase}/${rota}` : this.urlBase;
+    // Esporte sem rota mapeada (cobertos só pelos scrapers de API) → pula.
+    const rota = rotas[esporte];
+    if (!rota) return [];
+    const targetUrl = `${this.urlBase}/${rota}`;
     
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
     await page.waitForTimeout(4000);

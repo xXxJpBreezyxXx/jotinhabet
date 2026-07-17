@@ -1,5 +1,5 @@
 import { ScrapedOdd, OddsScraper } from './scraper_base';
-import { rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { rotuloOver, rotuloUnder, linhaArbitravel } from '../arbitrage/markets';
 import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
 
@@ -21,7 +21,7 @@ interface KambiConfig {
   offering: string; // ex: 'ktobr'
   host?: string; // default us.offering-api.kambicdn.com
   referer: string; // ex: 'https://www.kto.bet.br/'
-  maxEventosPorEsporte?: number; // limita o custo (default 60)
+  maxEventosPorEsporte?: number; // limita o custo (default 120)
   // client_id/channel_id do Kambi: SELECIONAM a configuração de odds do operador.
   // SEM eles a API devolve uma oferta genérica DIFERENTE do que o site mostra (odds
   // inconsistentes). Capturado do próprio site (KTO: client_id=200, channel_id=1).
@@ -57,6 +57,12 @@ const SPORT_PATHS: Record<string, string> = {
   Basquete: 'basketball',
   Tenis: 'tennis',
   Tênis: 'tennis',
+  Volei: 'volleyball',
+  'Vôlei': 'volleyball',
+  TenisDeMesa: 'table_tennis',
+  'Tenis de Mesa': 'table_tennis',
+  'Tênis de Mesa': 'table_tennis',
+  Beisebol: 'baseball',
 };
 
 // E-Sports: paths por jogo da whitelist das Diretrizes §5 (CS2, LoL, Dota 2, Valorant).
@@ -72,7 +78,23 @@ const SPORT_LABEL: Record<string, string> = {
   football: 'Futebol',
   basketball: 'Basquete',
   tennis: 'Tenis',
+  volleyball: 'Volei',
+  table_tennis: 'Tenis de Mesa',
+  baseball: 'Beisebol',
 };
+
+/**
+ * True se TODO conteúdo entre parênteses do nome é marcador seguro: código de país
+ * ("(BRA)") ou feminino ("(W)"/"(F)"/"(Fem)"). O resto continua vetado — partidas
+ * virtuais/e-soccer trazem o handle do jogador minúsculo ("Tottenham (zoyir)") e
+ * ligas "(8 mins)", que geravam "arbs" de odd travada. Antes deste allowlist, o
+ * filtro derrubava também seleções femininas inteiras ("Brasil (W)") como se
+ * fossem virtuais.
+ */
+function parensSeguros(nome?: string): boolean {
+  const grupos = (nome || '').match(/\([^)]*\)/g) || [];
+  return grupos.every((g) => /^\((?:[A-Z]{2,3}|[WF]|Fem(?:inino)?|Women)\)$/.test(g));
+}
 
 /** Rótulo do esporte a partir do path da Kambi (e-sports vira sempre "Esports"). */
 function rotuloEsporte(sportPath: string): string {
@@ -80,13 +102,29 @@ function rotuloEsporte(sportPath: string): string {
   return SPORT_LABEL[sportPath] || sportPath;
 }
 
+/**
+ * Assunto implícito do "Total asiático" por esporte. O critério cru da Kambi não diz
+ * O QUE está sendo contado ("Total asiático" seco) → caía em TOTAIS_GERAL e nunca
+ * cruzava com o total da Pinnacle (TOTAIS_GOLS/_PONTOS/_CORRIDAS) — justamente a
+ * fonte de quarter-lines. O total asiático DA PARTIDA conta o mesmo que o total
+ * padrão do esporte, então re-rotulamos com o assunto explícito.
+ */
+const TOTAL_ASIATICO_LABEL: Record<string, string> = {
+  football: 'Total de Gols',
+  basketball: 'Total de Pontos',
+  tennis: 'Total de Games',
+  volleyball: 'Total de Pontos',
+  table_tennis: 'Total de Pontos',
+  baseball: 'Total de Corridas',
+};
+
 export class KambiScraper implements OddsScraper {
   private cfg: Required<KambiConfig>;
 
   constructor(cfg: KambiConfig) {
     this.cfg = {
       host: 'us.offering-api.kambicdn.com',
-      maxEventosPorEsporte: 60,
+      maxEventosPorEsporte: 120,
       clientId: 0,
       channelId: 1,
       ...cfg,
@@ -163,7 +201,7 @@ export class KambiScraper implements OddsScraper {
           .filter((ev: KambiEvent) => ev?.homeName && ev?.awayName)
           // Mesmos filtros da varredura: sem virtuais/e-soccer "(handle)" e só PRÉ-JOGO —
           // sem eles, a revalidação podia casar o evento virtual homônimo.
-          .filter((ev: KambiEvent) => !/\([^)]+\)/.test(ev.homeName!) && !/\([^)]+\)/.test(ev.awayName!))
+          .filter((ev: KambiEvent) => parensSeguros(ev.homeName) && parensSeguros(ev.awayName))
           .filter((ev: KambiEvent) => {
             const t = Date.parse(ev.start || '');
             return isNaN(t) || t > Date.now();
@@ -204,8 +242,8 @@ export class KambiScraper implements OddsScraper {
       .filter(Boolean)
       // Descarta partidas VIRTUAIS/e-soccer (FIFA): o nome do time traz o handle do
       // jogador entre parênteses (ex.: "Tottenham (zoyir)"). São voláteis e geram
-      // "arbs" de odd travada, não reais.
-      .filter((ev: KambiEvent) => !/\([^)]+\)/.test(ev.homeName || '') && !/\([^)]+\)/.test(ev.awayName || ''))
+      // "arbs" de odd travada, não reais. Marcadores seguros ("(W)", "(BRA)") passam.
+      .filter((ev: KambiEvent) => parensSeguros(ev.homeName) && parensSeguros(ev.awayName))
       // Só PRÉ-JOGO: descarta partidas já iniciadas/ao vivo (start no passado).
       .filter((ev: KambiEvent) => {
         const t = Date.parse(ev.start || '');
@@ -269,26 +307,34 @@ export class KambiScraper implements OddsScraper {
     // o ASSUNTO para a normalização não confundir gols com escanteios/cartões.
     const criterio = bo.criterion?.label || '';
 
-    // Só meia-linha (.5) forma arbitragem 2-way limpa: linha inteira tem push (reembolso)
-    // e quarto de linha (.25/.75) divide a aposta. Ambas quebram o cálculo de surebet.
-    const ehMeiaLinha = (l: number) => Math.abs(l % 1) === 0.5;
+    // Meia-linha (.5) e quarter asiática (.25/.75) formam arbitragem 2-way; inteira
+    // tem push (lucro zero) e segue barrada. O piso de lucro da quarter (cenário do
+    // meio devolve metade) é aplicado no engine.
 
     // --- TOTAL (Over/Under) ---
     if (over && under && typeof over.line === 'number') {
       // Só o total DA PARTIDA cruza de forma confiável. Exclui total por-time
-      // ("Total de gols do X", "Total de Pontos pelo Y") e asiático/quarter-line —
-      // a normalização não carrega o time do MEIO do rótulo, então Heat over 44.5
-      // cruzava com RAPTORS under 44.5 (alerta falso de 2.53% no WhatsApp: o
-      // "pelo" escapava do regex antigo / do | por /).
-      if (/ d[oa] | pel[oa] | por |asi[aá]tic/i.test(criterio)) return null;
+      // ("Total de gols do X", "Total de Pontos pelo Y") — a normalização não
+      // carrega o time do MEIO do rótulo, então Heat over 44.5 cruzava com RAPTORS
+      // under 44.5 (alerta falso de 2.53% no WhatsApp: o "pelo" escapava do regex
+      // antigo / do | por /). O total ASIÁTICO da partida agora é aceito (é a
+      // fonte de quarter-lines) — normaliza no mesmo cluster TOTAIS_<assunto>.
+      if (/ d[oa] | pel[oa] | por /i.test(criterio)) return null;
       const linha = over.line / 1000;
-      if (!ehMeiaLinha(linha)) return null;
+      if (!linhaArbitravel(linha)) return null;
       const oddA = o(over.odds);
       const oddB = o(under.odds);
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
+      // "Total asiático" (sem assunto) → injeta o assunto do esporte p/ cruzar com o
+      // cluster certo (ver TOTAL_ASIATICO_LABEL). Variantes com sufixo ("- 1º tempo")
+      // preservam o resto do rótulo (o período segue extraído pelo normalizador).
+      let mercadoTotal = criterio || 'Total de gols';
+      if (/total asi[aá]tico/i.test(criterio) && TOTAL_ASIATICO_LABEL[sportPath]) {
+        mercadoTotal = criterio.replace(/total asi[aá]tico/i, TOTAL_ASIATICO_LABEL[sportPath]);
+      }
       return {
         esporte, evento, dataHora, url,
-        mercado: criterio || 'Total de gols',
+        mercado: mercadoTotal,
         linha,
         opcaoA: rotuloOver(linha),
         opcaoB: rotuloUnder(linha),
@@ -300,7 +346,7 @@ export class KambiScraper implements OddsScraper {
     // Exclui handicap europeu (3-way, tem empate-handicap) e linhas não-meias (push).
     if (one && two && !cross && typeof one.line === 'number' && !/europ/i.test(criterio)) {
       const linha = one.line / 1000;
-      if (!ehMeiaLinha(linha)) return null;
+      if (!linhaArbitravel(linha)) return null;
       const oddA = o(one.odds);
       const oddB = o(two.odds);
       if (!this.oddOk(oddA) || !this.oddOk(oddB)) return null;
@@ -337,13 +383,22 @@ export class KambiScraper implements OddsScraper {
     if (one && two && !one.line) {
       const oddHome = o(one.odds);
       const oddAway = o(two.odds);
-      // Vencedor de SEGMENTO (1º quarto/tempo/set/período) NÃO é match-winner:
-      // preserva o critério pro normalizador segmentar (RESULTADO_FINAL_Q1 ≠ _FT).
-      // Sem isto, "Vencedor - 1º Quarto" era carimbado 'Resultado Final' e podia
-      // cruzar com o vencedor da PARTIDA de outra casa.
-      const rotuloRF = /quarto|quarter|per[ií]odo|\bset\b|tempo|half/i.test(criterio)
-        ? criterio
-        : 'Resultado Final';
+      // WHITELIST de match-winner (fail-closed): só critérios que são DE FATO o
+      // vencedor da partida viram 'Resultado Final'; qualquer outro preserva o
+      // rótulo cru (→ DESCONHECIDO no normalizador → só cruza com rótulo idêntico).
+      // A heurística antiga era fail-open (preservava só rótulos com termo de
+      // segmento) e, no beisebol da BetWarrior, "Turnos 1" (3-vias do 1º inning),
+      // "Lidera após 5 Innings", "O primeiro a chegar a N runs", "O primeiro time
+      // que marca" e "Odds do jogo (pitcher precisa começar)" eram carimbados de
+      // 'Resultado Final' e cruzavam com o moneyline REAL das outras casas —
+      // ROI falso de até 29% no teste ao vivo de 17/07/2026.
+      // Rótulos confirmados na Offering API: futebol "Resultado Final";
+      // basquete "Vencedor da partida - Incluindo prorrogação"; tênis/vôlei/
+      // mesa/beisebol "Vencedor da partida".
+      const ehMatchWinner =
+        /^(?:resultado final|vencedor da partida(?:\s*-\s*incluindo prorroga[cç][aã]o)?|vencedor do encontro|tempo integral|1x2)$/i
+          .test(criterio.trim());
+      const rotuloRF = ehMatchWinner ? 'Resultado Final' : criterio;
       // 3-way (empate presente): dupla chance sintética SÓ fora de e-sports.
       // Diretrizes §5: e-sports não admite 1X2/3-vias (BO2 empata 1-1) → descarta.
       if (cross && this.oddOk(o(cross.odds))) {

@@ -29,6 +29,7 @@ export const CASAS_ALVO: CasaAlvo[] = [
   { nome: 'Apostaganha', dominio: 'https://apostaganha.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: 'Betao', dominio: 'https://betao.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: 'BetBoom', dominio: 'https://betboom.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
+  { nome: 'Vbet', dominio: 'https://vbet.bet.br', pathsPrematch: ['/pt/sportsbook', '/pt/sports', '/'], pathsAoVivo: ['/pt/live'], pesoCobertura: 3 },
   { nome: 'BetEsporte', dominio: 'https://betesporte.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: 'Betsul', dominio: 'https://betsul.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: 'BolsaDeAposta', dominio: 'https://bolsadeaposta.bet.br', pathsPrematch: ['/exchange/apostas-esportivas', '/'], pathsAoVivo: ['/exchange/ao-vivo'], pesoCobertura: 1 },
@@ -36,7 +37,8 @@ export const CASAS_ALVO: CasaAlvo[] = [
   { nome: 'Donald', dominio: 'https://donald.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: 'Onabet', dominio: 'https://onabet.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: 'Reidopitaco', dominio: 'https://pitaco.bet.br', pathsPrematch: ['/betting', '/'], pathsAoVivo: ['/betting/live'], pesoCobertura: 1 },
-  { nome: 'SeuBet', dominio: 'https://seubet.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
+  // Domínio real é seu.bet.br (seubet.bet.br não resolve — conferido em 17/07/2026).
+  { nome: 'SeuBet', dominio: 'https://seu.bet.br', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
 ];
 
 /** Busca uma casa pelo nome (case-insensitive), para o runner de casa única. */

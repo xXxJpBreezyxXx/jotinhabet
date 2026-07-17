@@ -1,5 +1,6 @@
 import { ArbitrageEngine, ArbitrageOpportunity } from '../arbitrage/engine';
 import { parseKickoff } from '../arbitrage/matcher';
+import { ehLinhaQuarter } from '../arbitrage/markets';
 import { regraPermiteOportunidade } from '../arbitrage/regras';
 import { OddsScraper } from '../scraping/scraper_base';
 import { BetanoScraper } from '../scraping/casa_a';
@@ -9,6 +10,8 @@ import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { Aposta1Scraper } from '../scraping/casa_altenar';
+import { BetBoomScraper } from '../scraping/casa_betboom';
+import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -149,6 +152,9 @@ export class ArbitrageScannerV2 {
     new SuperbetScraper(),
     new PinnacleScraper(),
     new Aposta1Scraper(),
+    new BetBoomScraper(),
+    new SeuBetScraper(),
+    new VbetScraper(),
     new BlazeScraper(),
     new OneXBetScraper()
   ];
@@ -157,20 +163,44 @@ export class ArbitrageScannerV2 {
   private revalidador = new RevalidationService();
 
   /** Nomes dos scrapers que usam API direta (rápidos, sem browser) — usados no modo apenasApi. */
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']); // Aposta1 já ativo
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']); // SeuBet/Vbet: WS Swarm, sem browser
+
+  /**
+   * Trava GLOBAL de varredura — cobre o scheduler E o endpoint do botão "Escanear
+   * Tudo" (que usa outra instância do scanner no index.ts e passava por fora do
+   * isRunning do SchedulerService). Varreduras concorrentes multiplicavam o
+   * cruzamento (CPU-bound) e derrubaram a VPS de 1 core (load 56 em 17/07/2026).
+   */
+  private static varreduraEmAndamento = false;
 
   /**
    * @param apenasApi quando true, o cruzamento entre casas usa SÓ os scrapers de API
    *   (rápidos, sem Playwright) — permite rodar de forma frequente no scheduler.
    */
   async executarVarredura(dataFiltro?: string, aoVivo?: boolean, sureradarOnly?: boolean, apenasApi?: boolean): Promise<any[]> {
-    // 🧹 Limpeza de banco: deletar todas as oportunidades do banco com mais de 24 horas
+    if (ArbitrageScannerV2.varreduraEmAndamento) {
+      console.log('⚠️ [Scanner V2] Varredura IGNORADA: já existe uma em andamento (trava global).');
+      return [];
+    }
+    ArbitrageScannerV2.varreduraEmAndamento = true;
+    try {
+      return await this.executarVarreduraInterna(dataFiltro, aoVivo, sureradarOnly, apenasApi);
+    } finally {
+      ArbitrageScannerV2.varreduraEmAndamento = false;
+    }
+  }
+
+  private async executarVarreduraInterna(dataFiltro?: string, aoVivo?: boolean, sureradarOnly?: boolean, apenasApi?: boolean): Promise<any[]> {
+    // 🧹 Limpeza de banco: deletar todas as oportunidades do banco com mais de 24 horas.
+    // Oportunidades SALVAS pelo usuário (salva=true) ficam de fora de TODA limpeza
+    // automática — o usuário salvou para apostar depois (migration 009).
     try {
       const limite24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { error: deleteError } = await supabase
         .from('oportunidades')
         .delete()
-        .lt('detectada_em', limite24h);
+        .lt('detectada_em', limite24h)
+        .eq('salva', false);
 
       if (deleteError) {
         console.error('⚠️ [Scanner V2] Erro ao limpar oportunidades antigas (>24h):', deleteError);
@@ -195,7 +225,12 @@ export class ArbitrageScannerV2 {
       console.log(
         `\n🔍 [Scanner V2] Iniciando varredura ${apenasApi ? 'API' : 'COMPLETA'} (${scrapersUsados.map((s) => s.getNome()).join(', ')} + SureRadar)...`
       );
-      const esportes = ['Futebol', 'Basquete', 'Tenis', 'Esports'];
+      // Vôlei/Tênis de Mesa/Beisebol: mapeados nos scrapers de API (Kambi/Superbet/
+      // Altenar/Pinnacle); os scrapers de browser ignoram esportes que não conhecem.
+      // Hóquei ficou de FORA de propósito: liquidação regulamentar × prorrogação
+      // diverge entre casas (mesma classe de armadilha do KTO.md) e a NHL está fora
+      // de temporada — reavaliar em outubro com pesquisa de regra por casa.
+      const esportes = ['Futebol', 'Basquete', 'Tenis', 'Esports', 'Volei', 'TenisDeMesa', 'Beisebol'];
       const datas = [dataFiltro || 'Hoje'];
 
       const todasOdds: any[] = [];
@@ -470,7 +505,10 @@ export class ArbitrageScannerV2 {
                    fonte: ehSureRadar ? 'SureRadar' : 'Pré-match (motor próprio)',
                    nota:
                      `✅ Revalidada agora nas casas (odds ao vivo)` +
-                     (ehSureRadar ? '' : ` · Cruzamento ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`),
+                     (ehSureRadar ? '' : ` · Cruzamento ${opp.casaA} × ${opp.casaB} · confiança ${Math.round((opp.confianca ?? 0) * 100)}%`) +
+                     (opp.linha != null && ehLinhaQuarter(opp.linha)
+                       ? ` · ⚠️ Linha asiática ${opp.linha} (.25/.75): o lucro informado é o PISO garantido — no cenário do meio metade de cada aposta é devolvida; nos demais cenários o lucro é o dobro`
+                       : ''),
                  });
                  if (success) {
                    markAlertAsSent(alertKey);
@@ -533,6 +571,7 @@ export class ArbitrageScannerV2 {
         .from('oportunidades')
         .select('id, evento, casa_a_nome, casa_b_nome, mercado, url')
         .eq('status', 'detectada')
+        .eq('salva', false) // salvas pelo usuário nunca são reconciliadas p/ fora
         .or('url.is.null,url.not.ilike.*sureradar*');
       if (error || !rows || rows.length === 0) return;
 
@@ -566,6 +605,7 @@ export class ArbitrageScannerV2 {
         .from('oportunidades')
         .select('id, evento, casa_a_nome, casa_b_nome, mercado')
         .eq('status', 'detectada')
+        .eq('salva', false) // salvas pelo usuário nunca são reconciliadas p/ fora
         .ilike('url', '%sureradar%');
       if (error || !rows || rows.length === 0) return;
 
@@ -592,10 +632,12 @@ export class ArbitrageScannerV2 {
   async limparOportunidadesExpiradas(): Promise<number> {
     console.log('🧹 [Scanner V2] Iniciando varredura para limpar surebets expiradas do banco...');
     try {
-      // 1. Busca todas as oportunidades ativas do Supabase
+      // 1. Busca todas as oportunidades ativas do Supabase (salvas ficam — mesmo
+      // expiradas, o usuário decide quando remover)
       const { data: opportunities, error } = await supabase
         .from('oportunidades')
-        .select('id, evento');
+        .select('id, evento')
+        .eq('salva', false);
 
       if (error) {
         console.error('⚠️ [Scanner V2] Erro ao buscar oportunidades para limpeza:', error);
