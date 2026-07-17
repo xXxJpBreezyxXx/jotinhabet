@@ -225,9 +225,11 @@ export class KambiScraper implements OddsScraper {
     // --- TOTAL (Over/Under) ---
     if (over && under && typeof over.line === 'number') {
       // Só o total DA PARTIDA cruza de forma confiável. Exclui total por-time
-      // ("Total de gols do X", "Total de Escanteio por Y") e asiático/quarter-line —
-      // a normalização não distingue o time, então cruzariam subjects diferentes.
-      if (/ do | por |asi[aá]tic/i.test(criterio)) return null;
+      // ("Total de gols do X", "Total de Pontos pelo Y") e asiático/quarter-line —
+      // a normalização não carrega o time do MEIO do rótulo, então Heat over 44.5
+      // cruzava com RAPTORS under 44.5 (alerta falso de 2.53% no WhatsApp: o
+      // "pelo" escapava do regex antigo / do | por /).
+      if (/ d[oa] | pel[oa] | por |asi[aá]tic/i.test(criterio)) return null;
       const linha = over.line / 1000;
       if (!ehMeiaLinha(linha)) return null;
       const oddA = o(over.odds);
