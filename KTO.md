@@ -14,15 +14,21 @@ Durante o monitoramento de varredura em torneios de menor expressão (*UTR Pro T
 ### 2. Novas Regras de Cruzamento (Engine de Validação)
 Para evitar furos de liquidação e perdas de capital, a KTO foi rebaixada e seu escopo de pareamento no tênis foi estritamente limitado.
 
-**🟢 Whitelist (Cruzamentos Liberados):**
+**🟢 Whitelist (Cruzamentos Liberados):** *(atualizada em 17/07/2026 pela auditoria GRUPOS_WO_CASAS.md)*
 A KTO só pode ser cruzada com casas que possuem a mesma regra matemática de 1 Set Concluído.
 * Pinnacle
-* Betano (BR)
 * BetWarrior / BetWarrior (BR)
+* Stake (regra publicada é de avanço/1 set — reclassificada A→B na auditoria)
+* 1xbet (idem, entidade BR)
+* BolsaDeAposta (idem)
+* Rei do Pitaco (idem)
+* ~~Betano (BR)~~ — **REMOVIDA em 17/07/2026**: a regra publicada da Betano é VOID puro
+  (Grupo A); cruzar KTO×Betano em abandono pós-1º set = red na KTO + void na Betano = prejuízo.
 
 **🔴 Blacklist (Cruzamentos Proibidos):**
 O motor do sistema deve disparar `REJECTED_BY_RISK_MATRIX` se tentar cruzar a KTO com:
-* SuperBet, Bet365, Novibet, KTO, Bolsa de Aposta, ou qualquer outra integrante do **Grupo A**.
+* SuperBet, Bet365, **Betano**, KTO, ou qualquer outra integrante do **Grupo A**;
+* Novibet e demais casas SEM grupo verificado (desconhecida nunca cruza).
 
 ### 3. Restrição de Mercados Secundários na KTO
 A regra de rebaixamento para o Grupo B se aplica primariamente ao Vencedor da Partida (*Moneyline*). 

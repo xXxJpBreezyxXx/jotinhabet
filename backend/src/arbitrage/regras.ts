@@ -18,12 +18,22 @@ import { normalizarMercado } from './markets';
 // KTO rebaixada A→B em 17/07/2026 (ver KTO.md): o provedor dela (Altenar) NÃO anula
 // no Vencedor da Partida — aplica avanço de fase. Ficar no Grupo A causou perda real
 // (Jacob Brumm x Ivan Savkin: Superbet[A] anulou, KTO liquidou vitória/derrota).
+// Vbet classificada A em 17/07/2026 (ver VBET.md): regra publicada anula partida não
+// concluída; "quem avança vence" só em DESQUALIFICAÇÃO (raríssima, ressalva no doc).
+// Auditoria das 23 casas em 17/07/2026 (GRUPOS_WO_CASAS.md), aplicada com aprovação:
+//  - betano B→A: regra publicada é VOID puro (3.3.2/3.3.4) — estava na whitelist da KTO;
+//  - stake, bolsadeaposta e reidopitaco A→B: template de avanço/1 set (red no desistente);
+//  - 1xbet classificada B: entidade BR dá "derrota técnica" ao desistente pós-1º set;
+//  - novibet REMOVIDA: regra inacessível + promo sugere avanço → desconhecida bloqueia;
+//  - betnacional FICA em A: variante "win/void" (ATP: avança ganha + desistente DEVOLVIDO;
+//    ITF/UTR: void) nunca dá red por abandono — em B perderia em ITF/UTR×B;
+//  - apostaganha e bet7k mantidas em A por status quo, mas a regra de tênis delas não está
+//    publicada acessível (só sinal de plataforma/regra genérica) — confirmar se ganharem volume.
 const GRUPO_A = new Set([
-  'alfabet', 'aposta1', 'apostaganha', 'bet365', 'bet7k', 'betboom', 'betao',
-  'betnacional', 'betsul', 'blaze', 'bolsadeaposta', 'novibet', 'pixbet',
-  'reidopitaco', 'seubet', 'stake', 'superbet',
+  'alfabet', 'aposta1', 'apostaganha', 'bet365', 'bet7k', 'betano', 'betao', 'betboom',
+  'betnacional', 'betsul', 'blaze', 'pixbet', 'seubet', 'superbet', 'vbet',
 ]);
-const GRUPO_B = new Set(['pinnacle', 'betano', 'betwarrior', 'kto']);
+const GRUPO_B = new Set(['pinnacle', 'betwarrior', 'kto', 'stake', 'bolsadeaposta', 'reidopitaco', '1xbet']);
 
 /** Normaliza o nome da casa: sem acento, minúsculo, sem "(BR)" e sem pontuação. */
 function normCasa(casa: string): string {
@@ -60,6 +70,10 @@ function normEsporte(e?: string): 'futebol' | 'basquete' | 'tenis' | 'esports' |
   const s = (e || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   if (/futebol|football|soccer/.test(s)) return 'futebol';
   if (/basquete|basket/.test(s)) return 'basquete';
+  // INTENCIONAL: "Tenis de Mesa" também cai aqui (contém "tenis") e herda as regras
+  // de W.O. do tênis (grupos A/B + bloqueio da KTO em Handicap/Totais). Liga Pro/TT Cup
+  // têm desistência frequente e as regras de liquidação por casa não foram verificadas
+  // para mesa — até verificar (como no KTO.md), o conservador é tratar igual ao tênis.
   if (/tenis|tennis/.test(s)) return 'tenis';
   if (/e-?sports?|eletronic|counter|cs2|cs:?go|valorant|league of legends|\blol\b|dota|honor of kings|rainbow/.test(s))
     return 'esports';

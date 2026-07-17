@@ -46,33 +46,37 @@ O motor de varredura deve obedecer à seguinte regra de cruzamento: **Casas do G
 ### Grupo A: Regra da Partida Completa
 *Condição:* A partida inteira deve ser finalizada. Em caso de abandono por lesão em qualquer momento, as apostas de Vencedor do Encontro (Moneyline) são **Anuladas (Devolvidas)**.
 
-**Casas Mapeadas neste grupo:**
+**Casas Mapeadas neste grupo:** *(matriz auditada e atualizada em 17/07/2026 — evidências em GRUPOS_WO_CASAS.md)*
 * AlfaBet (BR)
 * Aposta1 (BR)
-* Apostaganha (BR)
+* Apostaganha (BR) — regra de tênis NÃO publicada acessível; mantida por status quo (plataforma BETBY = Alfa/Blaze), confirmar
 * Bet365 (BR)
-* Bet7k (BR)
+* Bet7k (BR) — só regra genérica de void; mantida por status quo, confirmar
 * BetBoom (BR)
+* Betano (BR) — **movida B→A em 17/07/2026** (regra publicada é void puro)
 * Betao (BR)
-* Betnacional (BR)
+* Betnacional (BR) — variante "win/void" (ATP: avança ganha + desistente devolvido; ITF/UTR: void); segura SÓ no Grupo A
 * Betsul (BR)
 * Blaze
-* BolsaDeAposta (BR)
-* KTO
-* Novibet (BR)
 * PixBet (BR)
-* Reidopitaco (BR)
 * SeuBet (BR)
-* Stake (BR)
 * SuperBet (BR) / Superbet
+* Vbet (BR) — classificada em 17/07/2026 pelas regras publicadas (ver VBET.md)
 
 ### Grupo B: Regra de 1 Set Concluído
 *Condição:* Se o 1º set for finalizado e ocorrer um abandono no 2º ou 3º set, o jogador que avançar de fase é validado como **Vencedor da aposta**.
 
-**Casas Mapeadas neste grupo:**
+**Casas Mapeadas neste grupo:** *(atualizado em 17/07/2026)*
 * Pinnacle
-* Betano (BR)
 * BetWarrior / BetWarrior (BR)
+* KTO — rebaixada A→B em 17/07/2026 (ver KTO.md)
+* Stake (BR) — movida A→B em 17/07/2026 (template de avanço/1 set)
+* BolsaDeAposta (BR) — movida A→B em 17/07/2026
+* Rei do Pitaco (BR) — movida A→B em 17/07/2026
+* 1xbet (BR) — classificada em 17/07/2026 (entidade BR, derrota técnica no desistente)
+
+### Não classificadas (grupo desconhecido → NUNCA cruzam no tênis)
+* Novibet (BR) — removida do Grupo A em 17/07/2026: regra atual inacessível (Cloudflare+geoblock) e promo de desistência sugere liquidação por avanço; re-verificar manualmente num browser no Brasil
 
 ---
 
