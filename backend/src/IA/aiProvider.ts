@@ -7,11 +7,12 @@ export { ImagemEntrada };
 /**
  * Camada única de acesso à IA para o pipeline.
  *
- * Estratégia (decisão do plano): Gemini (gemini-2.5-flash) como provedor
- * principal, com fallback automático para OpenAI (gpt-4o-mini) em caso de
- * erro/rate-limit. Ambos os provedores já implementam `IAProvider` e possuem
- * mock-mode quando a chave não está configurada (nesse caso NÃO lançam erro,
- * retornam uma string de mock — o chamador deve tratar o parsing).
+ * Estratégia (18/07/2026): OpenAI (gpt-4o-mini) como provedor PRINCIPAL, com
+ * fallback automático para Gemini (gemini-2.5-flash) em caso de erro/rate-limit.
+ * (Invertido em 18/07: o Gemini free-tier vinha esgotando crédito/cota e derrubando
+ * a extração de visão dos sinais do Telegram — OpenAI é mais estável como primário.)
+ * Ambos implementam `IAProvider` e têm mock-mode quando a chave não está configurada
+ * (nesse caso NÃO lançam erro, retornam uma string de mock — o chamador trata o parsing).
  */
 
 export type ProviderName = 'gemini' | 'openai';
@@ -41,10 +42,10 @@ function getOpenAI(): OpenAIProvider {
 function delayDe429(err: any): number | null {
   const msg = `${err?.message || err}`;
   if (!/429|RESOURCE_EXHAUSTED|rate limit/i.test(msg)) return null;
-  // Créditos pré-pagos esgotados NÃO voltam em segundos — re-tentar só atrasa
-  // o fallback. Vai direto pra OpenAI (e o log avisa o usuário de recarregar).
-  if (/credits are depleted|prepayment/i.test(msg)) {
-    console.error('💳 [AI] Créditos do Gemini ESGOTADOS — recarregue em https://ai.studio/projects. Usando fallback OpenAI sem re-tentativa.');
+  // Cota/créditos esgotados (Gemini OU OpenAI) NÃO voltam em segundos — re-tentar só
+  // atrasa o fallback. Vai direto pro outro provedor (e o log avisa pra recarregar).
+  if (/credits are depleted|prepayment|insufficient_quota|exceeded your current quota|billing hard limit/i.test(msg)) {
+    console.error('💳 [AI] Cota/créditos ESGOTADOS no provedor primário — usando fallback sem re-tentativa. Recarregue o crédito.');
     return null;
   }
   const m = msg.match(/retry in (\d+(?:\.\d+)?)s/i) || msg.match(/"retryDelay":"(\d+(?:\.\d+)?)s"/);
@@ -75,7 +76,7 @@ async function comRetry429<T>(rotulo: string, fn: () => Promise<T>, tentativas =
 }
 
 /**
- * Gera texto usando Gemini e, em caso de falha, cai para OpenAI.
+ * Gera texto usando OpenAI (primário) e, em caso de falha, cai para Gemini.
  * Lança erro somente se AMBOS os provedores falharem.
  */
 export async function generateWithFallback(
@@ -83,23 +84,23 @@ export async function generateWithFallback(
   systemInstruction?: string
 ): Promise<AIResult> {
   try {
-    const text = await comRetry429('Gemini', () => getGemini().generateText(prompt, systemInstruction));
-    return { text, provider: 'gemini' };
-  } catch (errGemini: any) {
-    console.warn(`⚠️ [AI] Gemini falhou (${errGemini?.message || errGemini}). Tentando OpenAI...`);
+    const text = await comRetry429('OpenAI', () => getOpenAI().generateText(prompt, systemInstruction));
+    return { text, provider: 'openai' };
+  } catch (errOpenAI: any) {
+    console.warn(`⚠️ [AI] OpenAI falhou (${errOpenAI?.message || errOpenAI}). Tentando Gemini...`);
     try {
-      const text = await getOpenAI().generateText(prompt, systemInstruction);
-      return { text, provider: 'openai' };
-    } catch (errOpenAI: any) {
-      console.error(`❌ [AI] Ambos os provedores falharam. OpenAI: ${errOpenAI?.message || errOpenAI}`);
-      throw errOpenAI;
+      const text = await getGemini().generateText(prompt, systemInstruction);
+      return { text, provider: 'gemini' };
+    } catch (errGemini: any) {
+      console.error(`❌ [AI] Ambos os provedores falharam. Gemini: ${errGemini?.message || errGemini}`);
+      throw errGemini;
     }
   }
 }
 
 /**
- * Gera texto a partir de uma IMAGEM (visão) usando Gemini e, em caso de falha,
- * cai para OpenAI. Lança erro somente se AMBOS os provedores falharem.
+ * Gera texto a partir de uma IMAGEM (visão) usando OpenAI (primário) e, em caso de
+ * falha, cai para Gemini. Lança erro somente se AMBOS os provedores falharem.
  * Em mock-mode (chaves ausentes) retorna string '[Mock ...' sem lançar.
  */
 export async function generateFromImageWithFallback(
@@ -108,16 +109,16 @@ export async function generateFromImageWithFallback(
   systemInstruction?: string
 ): Promise<AIResult> {
   try {
-    const text = await comRetry429('Gemini (visão)', () => getGemini().generateFromImage(prompt, imagem, systemInstruction));
-    return { text, provider: 'gemini' };
-  } catch (errGemini: any) {
-    console.warn(`⚠️ [AI] Gemini (visão) falhou (${errGemini?.message || errGemini}). Tentando OpenAI...`);
+    const text = await comRetry429('OpenAI (visão)', () => getOpenAI().generateFromImage(prompt, imagem, systemInstruction));
+    return { text, provider: 'openai' };
+  } catch (errOpenAI: any) {
+    console.warn(`⚠️ [AI] OpenAI (visão) falhou (${errOpenAI?.message || errOpenAI}). Tentando Gemini...`);
     try {
-      const text = await getOpenAI().generateFromImage(prompt, imagem, systemInstruction);
-      return { text, provider: 'openai' };
-    } catch (errOpenAI: any) {
-      console.error(`❌ [AI] Ambos os provedores (visão) falharam. OpenAI: ${errOpenAI?.message || errOpenAI}`);
-      throw errOpenAI;
+      const text = await getGemini().generateFromImage(prompt, imagem, systemInstruction);
+      return { text, provider: 'gemini' };
+    } catch (errGemini: any) {
+      console.error(`❌ [AI] Ambos os provedores (visão) falharam. Gemini: ${errGemini?.message || errGemini}`);
+      throw errGemini;
     }
   }
 }
