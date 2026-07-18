@@ -3,7 +3,7 @@ import { canonizarCasa } from '../../src/signals/casasAliases';
 
 // Chaves do SCRAPER_FACTORY (revalidationService.ts) — a revalidação resolve o
 // scraper por lowercase(nome), então lowercase(canônico) TEM que bater com a chave.
-const CASAS_COM_SCRAPER = ['kto', 'betwarrior', 'superbet', 'aposta1', 'pinnacle', 'betboom', 'seubet', 'vbet'];
+const CASAS_COM_SCRAPER = ['kto', 'betwarrior', 'superbet', 'aposta1', 'pinnacle', 'betboom', 'seubet', 'vbet', 'esportesdasorte', 'betnacional'];
 
 describe('canonizarCasa', () => {
   it('todo canônico de casa com scraper resolve a chave do SCRAPER_FACTORY', () => {

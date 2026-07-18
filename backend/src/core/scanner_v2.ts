@@ -13,6 +13,7 @@ import { Aposta1Scraper } from '../scraping/casa_altenar';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
+import { BetnacionalScraper } from '../scraping/casa_betnacional';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -121,6 +122,7 @@ export class ArbitrageScannerV2 {
     new SeuBetScraper(),
     new VbetScraper(),
     new EsportesDaSorteScraper(),
+    new BetnacionalScraper(),
     new BlazeScraper(),
     new OneXBetScraper()
   ];
@@ -128,8 +130,14 @@ export class ArbitrageScannerV2 {
   /** Revalidação pré-alerta: reconsulta as pernas na casa de origem antes do WhatsApp. */
   private revalidador = new RevalidationService();
 
-  /** Nomes dos scrapers que usam API direta (rápidos, sem browser) — usados no modo apenasApi. */
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle']); // SeuBet/Vbet: WS Swarm, sem browser
+  /**
+   * Scrapers da varredura agendada (5 min). Quase todos são REST/WS sem browser
+   * (SeuBet/Vbet: WS Swarm). EXCEÇÃO: Betnacional exige um browser headless (o feed
+   * bet6 bloqueia por fingerprint TLS — ver casa_betnacional.ts) e adiciona ~20s/scan;
+   * está aqui de propósito para ser fonte REAL de odds (não só revalidação). Se a
+   * carga da VPS pesar, é 1-linha tirá-la daqui (cai só no scan COMPLETO manual).
+   */
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional']);
 
   /**
    * Trava GLOBAL de varredura — cobre o scheduler E o endpoint do botão "Escanear
