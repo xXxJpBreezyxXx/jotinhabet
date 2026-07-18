@@ -1,6 +1,5 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
-import { NewMessage, NewMessageEvent } from 'telegram/events';
 import { Api } from 'telegram';
 import { extrairSinalDeImagem, SinalExtraido } from '../IA/extractors/telegramSignalExtractor';
 import { SignalPipeline, LinkSinal } from './signalPipeline';
@@ -40,6 +39,10 @@ export class TelegramIngestService {
   private ativo = false;
   private stats = { processadas: 0, sinais: 0, descartadas: 0, ultimoEventoEm: null as string | null };
   private ultimoAvisoSessaoEm = 0;
+  /** Polling (o update-loop push do GramJS 2.26 dá "Error: TIMEOUT" e para de
+   *  entregar updates — ver logs 18/07). O pull via getMessages é confiável. */
+  private lastId = new Map<string, number>();
+  private pollTimer: NodeJS.Timeout | null = null;
 
   private envConfigurada(nome: string): string | null {
     let v = process.env[nome];
@@ -104,21 +107,83 @@ export class TelegramIngestService {
       return;
     }
 
-    // SEM filtro `chats` no NewMessage de propósito: a resolução de entidade
-    // do filtro roda DENTRO do update-loop do GramJS e uma falha lá derruba o
-    // processo inteiro (aconteceu com id inválido → "entity NaN"). O filtro por
-    // grupo é feito no handler (onNewMessage), fora do caminho crítico da lib.
-    this.client.addEventHandler(
-      (event: NewMessageEvent) => this.onNewMessage(event),
-      new NewMessage({})
-    );
+    // POLLING em vez de addEventHandler/NewMessage: o update-loop (push) do GramJS
+    // 2.26 quebra com "Error: TIMEOUT" e para de entregar updates silenciosamente
+    // (0 sinais em 9h30 em prod, 18/07). O getMessages (pull) é confiável. Semeia o
+    // último id por grupo (não reprocessa histórico → sem spam de alerta no boot).
+    for (const g of this.grupoIds) {
+      try {
+        const ultimas = await this.client.getMessages(g, { limit: 1 });
+        this.lastId.set(g, ultimas[0]?.id || 0);
+      } catch {
+        this.lastId.set(g, 0);
+      }
+    }
 
     this.ativo = true;
-    console.log(`📲 [Telegram] Listener ativo no(s) grupo(s) ${this.grupoIds.join(', ')} — aguardando sinais (janela de contexto: ${this.janelaContextoMs() / 1000}s).`);
+    this.pollTimer = setInterval(() => {
+      void this.poll().catch((e) => console.error(`⚠️ [Telegram] Erro no poll: ${e?.message || e}`));
+    }, this.pollMs());
+    console.log(
+      `📲 [Telegram] Fonte ATIVA (polling ${this.pollMs() / 1000}s) no(s) grupo(s) ${this.grupoIds.join(', ')} — ` +
+      `janela de contexto ${this.janelaContextoMs() / 1000}s.`
+    );
+  }
+
+  /** Intervalo do polling (pull via getMessages). */
+  private pollMs(): number {
+    const v = Number(process.env.TELEGRAM_POLL_SEGUNDOS);
+    return Number.isFinite(v) && v >= 5 && v <= 120 ? v * 1000 : 15_000;
+  }
+
+  /** Pull das mensagens novas de cada grupo e enfileira o processamento (serializado). */
+  private async poll(): Promise<void> {
+    if (!this.client || !this.ativo) return;
+    // Reconecta se o transporte caiu (o getMessages falharia em cadeia).
+    if (!this.client.connected) {
+      try { await this.client.connect(); } catch { /* próxima rodada tenta de novo */ }
+    }
+    for (const g of this.grupoIds) {
+      try {
+        const msgs = await this.client.getMessages(g, { limit: 40 });
+        const desde = this.lastId.get(g) || 0;
+        const novas = msgs.filter((m) => m.id > desde).sort((a, b) => a.id - b.id);
+        if (novas.length === 0) continue;
+        this.lastId.set(g, novas[novas.length - 1].id);
+        for (const m of novas) this.enfileirar(m);
+      } catch (e: any) {
+        const waitS = Number(e?.seconds);
+        if (/FLOOD/i.test(e?.errorMessage || e?.message || '') && Number.isFinite(waitS)) {
+          console.warn(`⏳ [Telegram] FloodWait ${waitS}s no poll do grupo ${g}.`);
+        } else {
+          console.warn(`⚠️ [Telegram] Falha no poll do grupo ${g}: ${e?.message || e}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Triagem barata + enfileira (nunca lança). Fotos sempre entram; texto só se
+   * carrega URL (contexto). O vínculo com o sinal pendente é decidido em
+   * processarMensagem (no MOMENTO do processamento, já em ordem), não aqui — assim
+   * um lote com [sinal-foto, texto-link] processa a foto antes e o link anexa certo.
+   */
+  private enfileirar(message: Api.Message): void {
+    if (!this.ehDoGrupo(message)) return;
+    const temFoto = !!message.photo;
+    const temUrl = this.extrairUrls(message).length > 0;
+    if (!temFoto && !temUrl) return;
+    this.filaAtual = this.filaAtual
+      .then(() => this.processarMensagem(message))
+      .catch((e) => console.error(`⚠️ [Telegram] Erro ao processar mensagem ${message.id}: ${e?.message || e}`));
   }
 
   async stop(): Promise<void> {
     this.ativo = false;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     if (this.pendente) {
       // Não perde um sinal capturado: despacha com o contexto que já tem.
       await this.flushPendente('serviço parando');
@@ -159,22 +224,6 @@ export class TelegramIngestService {
       if (ent instanceof Api.MessageEntityTextUrl && ent.url) urls.push(ent.url);
     }
     return [...new Set(urls)];
-  }
-
-  private async onNewMessage(event: NewMessageEvent): Promise<void> {
-    const message = event.message;
-    if (!message || !this.ehDoGrupo(message)) return;
-
-    // Triagem barata ANTES de qualquer IA: fotos sempre entram; texto puro só
-    // interessa se carrega URL e há um sinal pendente colhendo contexto.
-    const temFoto = !!message.photo;
-    const temUrl = this.extrairUrls(message).length > 0;
-    if (!temFoto && !(this.pendente && temUrl)) return;
-
-    // Encadeia na fila (nunca lança — exceção não pode derrubar o handler).
-    this.filaAtual = this.filaAtual
-      .then(() => this.processarMensagem(message))
-      .catch((e) => console.error(`⚠️ [Telegram] Erro ao processar mensagem ${message.id}: ${e?.message || e}`));
   }
 
   private async processarMensagem(message: Api.Message): Promise<void> {
