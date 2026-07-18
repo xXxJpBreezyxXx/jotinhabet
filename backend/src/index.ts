@@ -9,6 +9,7 @@ import { calcularArbitragem } from './core/calculator';
 import { projetarEvolucaoDiaria } from './core/evolution';
 import { SchedulerService } from './scheduler/scheduler';
 import { EnrichmentService } from './scheduler/enrichmentService';
+import { GreenMonitorService } from './scheduler/greenMonitorService';
 import { RevalidationService } from './core/revalidationService';
 import { requireApiToken } from './auth/apiToken';
 import { generateWithFallback } from './IA/aiProvider';
@@ -517,6 +518,10 @@ app.listen(port, () => {
   // Fonte Telegram: escuta o grupo de sinais e injeta oportunidades extraídas
   // por IA de visão no pipeline (gates + revalidação + WhatsApp).
   telegramIngest.start().catch((e) => console.error('❌ [Telegram] Falha ao iniciar ingest:', e?.message || e));
+
+  // Monitor pós-partida: quando a partida de uma entrada termina, manda o WhatsApp
+  // de GREEN (parabéns + lucro + banca). Ciclo de 15 min (timing não é crítico).
+  new GreenMonitorService().start(900);
 
   // Enriquecimento de IA é MANUAL (botão "Analisar IA") para poupar tokens/cota das APIs.
   // O worker automático fica desligado de propósito; a análise roda sob demanda via
