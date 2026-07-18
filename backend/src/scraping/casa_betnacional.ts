@@ -304,16 +304,26 @@ export class BetnacionalScraper implements OddsScraper {
    * lista e baixa só o grouped dele. Custa uma abertura de browser (~10s com a CF),
    * mas o memo de 60s do RevalidationService dedup a e o gate roda em Promise.all
    * com a outra perna.
+   *
+   * CONTRATO DE FALHA (importante): distingue INFRA de AUSÊNCIA GENUÍNA. Se o browser
+   * não abre ou a CF não libera (lista vazia em TODOS os esportes — sempre há centenas
+   * de jogos prematch), LANÇA. O gate (checarPernasAoVivo) trata o throw como "falha ao
+   * re-buscar pernas", que casa o guard de INFRA do scanner (/falha ao/) → a linha é
+   * removida e re-gateada na próxima varredura. Devolver [] aqui viraria "perna não
+   * encontrada" (≠ guard) e suprimiria o alerta de uma arb VÁLIDA PARA SEMPRE. Só
+   * devolve [] quando a lista carregou mas o evento/mercado está genuinamente ausente.
    */
   async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
     const sportIds = esporte && ESPORTE_SPORT[esporte] ? ESPORTE_SPORT[esporte] : Object.keys(SPORT_LABEL).map(Number);
     let browser: Browser | null = null;
     try {
-      const aberto = await this.abrir(true);
+      const aberto = await this.abrir(true); // falha de browser/CF PROPAGA (infra)
       browser = aberto.browser;
       const page = aberto.page;
+      let listaCarregou = false;
       for (const sportId of sportIds) {
         const eventos = await this.listaEventos(page, sportId);
+        if (eventos.length > 0) listaCarregou = true;
         const alvo = eventos.filter((e) => areEventsSame(`${e.home} vs ${e.away}`, evento)).slice(0, 2);
         if (alvo.length === 0) continue;
         const resp = await this.grouped(page, alvo.map((e) => e.eid));
@@ -324,9 +334,9 @@ export class BetnacionalScraper implements OddsScraper {
         }
         if (odds.length) return odds;
       }
-      return [];
-    } catch {
-      return [];
+      // Lista vazia em todos os esportes ⇒ CF/feed fora ⇒ sinaliza INFRA (não ausência).
+      if (!listaCarregou) throw new Error('Betnacional indisponível na revalidação (lista vazia — CF/feed fora)');
+      return []; // lista carregou; evento/mercado genuinamente ausente
     } finally {
       if (browser) await browser.close().catch(() => {});
     }

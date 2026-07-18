@@ -135,6 +135,21 @@ describe('BetnacionalScraper.parseGrouped', () => {
     expect(odds.find((x) => x.linha === 3.5)!.oddB).toBe(1.286);
   });
 
+  it('DNB distingue dérbi estadual (Atlético-MG × Atlético-GO) — não derruba por fuzzy', () => {
+    const metaDerby = { ...meta, home: 'Atlético-MG', away: 'Atlético-GO' };
+    const dnbDerby = [
+      o({ market_id: 999134, market_code: '|Draw No Bet|', outcome_name: 'Atlético-MG', odd: '1.800' }),
+      o({ market_id: 999134, market_code: '|Draw No Bet|', outcome_name: 'Atlético-GO', odd: '2.000' }),
+    ];
+    for (const rows of [dnbDerby, [dnbDerby[1], dnbDerby[0]]]) { // ordem não garantida no feed
+      const odds = s.parseGrouped({ odds: rows }, metaDerby);
+      expect(odds.length).toBe(1);
+      expect(odds[0].opcaoA).toBe('Atlético-MG');
+      expect(odds[0].oddA).toBe(1.8); // home
+      expect(odds[0].oddB).toBe(2.0); // away — NÃO some nem troca de lado
+    }
+  });
+
   it('DNB por nome exato normalizado (acento/pontuação) sem fuzzy de quase-homônimo', () => {
     const metaAcento = { ...meta, home: 'Atletico-MG', away: 'Bahia' }; // sem acento na LISTA
     const dnbAcento = [
