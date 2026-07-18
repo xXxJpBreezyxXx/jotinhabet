@@ -41,6 +41,12 @@ function getOpenAI(): OpenAIProvider {
 function delayDe429(err: any): number | null {
   const msg = `${err?.message || err}`;
   if (!/429|RESOURCE_EXHAUSTED|rate limit/i.test(msg)) return null;
+  // Créditos pré-pagos esgotados NÃO voltam em segundos — re-tentar só atrasa
+  // o fallback. Vai direto pra OpenAI (e o log avisa o usuário de recarregar).
+  if (/credits are depleted|prepayment/i.test(msg)) {
+    console.error('💳 [AI] Créditos do Gemini ESGOTADOS — recarregue em https://ai.studio/projects. Usando fallback OpenAI sem re-tentativa.');
+    return null;
+  }
   const m = msg.match(/retry in (\d+(?:\.\d+)?)s/i) || msg.match(/"retryDelay":"(\d+(?:\.\d+)?)s"/);
   const s = m ? parseFloat(m[1]) : 15;
   return Math.min(60, Math.ceil(s) + 1) * 1000;
