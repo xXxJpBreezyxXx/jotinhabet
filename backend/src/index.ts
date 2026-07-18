@@ -13,6 +13,10 @@ import { RevalidationService } from './core/revalidationService';
 import { requireApiToken } from './auth/apiToken';
 import { generateWithFallback } from './IA/aiProvider';
 import { WhatsAppNotifier } from './notify/whatsapp';
+import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
+import { SignalPipeline } from './signals/signalPipeline';
+import { TelegramIngestService } from './signals/telegramIngestService';
+import { regraPermiteOportunidade } from './arbitrage/regras';
 
 dotenv.config();
 
@@ -27,12 +31,18 @@ if (frontendOrigin) {
   console.warn('⚠️ [CORS] FRONTEND_ORIGIN não configurado — CORS aberto (apenas dev). Defina em produção.');
   app.use(cors());
 }
-app.use(express.json());
+// Parser JSON: limite padrão (100kb) em tudo, exceto nas rotas do Telegram —
+// um print de sinal em base64 tem ~1-3 MB e estouraria o parser global.
+const jsonPadrao = express.json();
+const jsonGrande = express.json({ limit: '8mb' });
+app.use((req, res, next) => (req.path.startsWith('/api/telegram') ? jsonGrande : jsonPadrao)(req, res, next));
 
 // Worker de enriquecimento assíncrono de risco por IA.
 const enrichment = new EnrichmentService();
 // Serviço de revalidação de odds (§6 do kickoff).
 const revalidation = new RevalidationService();
+// Listener do grupo de sinais no Telegram (GramJS) — no-op sem envs TELEGRAM_*.
+const telegramIngest = new TelegramIngestService();
 
 // Initialize AI providers
 const geminiProvider = new GeminiProvider();
@@ -118,6 +128,51 @@ app.post('/api/ai/chat', requireApiToken, async (req, res) => {
     console.error('[ai/chat] erro:', error?.message || error);
     res.status(500).json({ error: 'Erro no chat de IA' });
   }
+});
+
+// Telegram: valida a extração de um sinal (print em base64) SEM depender do
+// listener — é o loop de calibração do prompt/template. Default: dry-run
+// (extração + construção + gates, sem tocar banco/WhatsApp); com
+// executarPipeline:true roda o fluxo completo (insert + revalidação + alerta).
+app.post('/api/telegram/test-extract', requireApiToken, async (req, res) => {
+  const { imageBase64, mimeType, executarPipeline } = req.body || {};
+  if (typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+    return res.status(400).json({ error: 'Envie { imageBase64 } (base64, com ou sem prefixo data-URI).' });
+  }
+  try {
+    const b64 = imageBase64.replace(/^data:[^;]+;base64,/, '');
+    const extracao = await extrairSinalDeImagem(b64, mimeType || 'image/jpeg');
+    if (!extracao.sinal) {
+      return res.json({ extracao });
+    }
+
+    const pipeline = new SignalPipeline(revalidation);
+    const oportunidade = pipeline.construirOportunidade(extracao.sinal);
+    const gates = oportunidade
+      ? {
+          regra: regraPermiteOportunidade({
+            esporte: oportunidade.esporte,
+            mercado: oportunidade.mercado,
+            casaA: oportunidade.casaA,
+            casaB: oportunidade.casaB,
+          }),
+        }
+      : undefined;
+
+    if (executarPipeline === true) {
+      const resultado = await pipeline.processarSinal(extracao.sinal);
+      return res.json({ extracao, oportunidade, gates, pipeline: resultado });
+    }
+    res.json({ dryRun: true, extracao, oportunidade, gates });
+  } catch (error: any) {
+    console.error('[telegram/test-extract] erro:', error?.message || error);
+    res.status(500).json({ error: 'Erro na extração do sinal' });
+  }
+});
+
+// Telegram: status do listener do grupo (conexão, contadores de triagem).
+app.get('/api/telegram/status', requireApiToken, (_req, res) => {
+  res.json(telegramIngest.getStatus());
 });
 
 // WhatsApp: lista os grupos (subject + JID "…@g.us") para descobrir o EVOLUTION_RECIPIENT.
@@ -458,6 +513,10 @@ app.listen(port, () => {
   // Scan agendado do SureRadar a cada 10 min (alinhado ao ciclo de atualização do próprio SureRadar)
   const scheduler = new SchedulerService();
   scheduler.start(5); // pré-match sempre fresco: varredura + reconciliação a cada 5 min
+
+  // Fonte Telegram: escuta o grupo de sinais e injeta oportunidades extraídas
+  // por IA de visão no pipeline (gates + revalidação + WhatsApp).
+  telegramIngest.start().catch((e) => console.error('❌ [Telegram] Falha ao iniciar ingest:', e?.message || e));
 
   // Enriquecimento de IA é MANUAL (botão "Analisar IA") para poupar tokens/cota das APIs.
   // O worker automático fica desligado de propósito; a análise roda sob demanda via

@@ -74,6 +74,7 @@ interface OpportunityItem {
   esporte?: string;
   salva?: boolean; // salva pelo usuário: o rescan nunca a remove (migration 009)
   url?: string;
+  fonte?: string;  // origem explícita (migration 010): 'telegram' | null (demais fontes inferem por url)
   // Enriquecimento de risco por IA (async)
   ia_status?: 'pendente' | 'processando' | 'concluido' | 'erro';
   ia_risco?: 'ok' | 'atencao' | 'critico';
@@ -159,8 +160,10 @@ function isVipOpportunity(opp: { analise_ia?: string }): boolean {
   return /surebet vip/i.test(opp.analise_ia || '');
 }
 
-/** Origem da oportunidade: 'sureradar' (agregador) ou 'prematch' (motor próprio, cruzamento entre casas). */
-function fonteOportunidade(opp: { url?: string; analise_ia?: string }): 'sureradar' | 'prematch' {
+/** Origem da oportunidade: 'telegram' (sinal do grupo, coluna fonte da migration 010),
+ *  'sureradar' (agregador, inferida por url) ou 'prematch' (motor próprio). */
+function fonteOportunidade(opp: { url?: string; analise_ia?: string; fonte?: string }): 'telegram' | 'sureradar' | 'prematch' {
+  if (opp.fonte === 'telegram') return 'telegram';
   const s = `${opp.url || ''} ${opp.analise_ia || ''}`.toLowerCase();
   return s.includes('sureradar') ? 'sureradar' : 'prematch';
 }
@@ -281,7 +284,8 @@ export default function App() {
   const [selectedBookmakers, setSelectedBookmakers] = useState<string[]>([]);
   const [selectedSports, setSelectedSports] = useState<string[]>([]);
   const [vipOnly, setVipOnly] = useState<boolean>(false);
-  const [fonteFiltro, setFonteFiltro] = useState<'todas' | 'sureradar' | 'prematch'>('todas');
+  const [fonteFiltro, setFonteFiltro] = useState<'todas' | 'sureradar' | 'prematch' | 'telegram'>('todas');
+  const [soSalvas, setSoSalvas] = useState(false); // filtra só oportunidades salvas (⭐)
 
   const mockOpportunities: OpportunityItem[] = [
     {
@@ -548,8 +552,11 @@ export default function App() {
     // Filtro "só VIP" (oportunidades ocultas no painel do SureRadar, capturadas via API)
     if (vipOnly && !isVipOpportunity(opp)) return false;
 
-    // Filtro por fonte (SureRadar vs pré-match/motor próprio)
+    // Filtro por fonte (SureRadar vs pré-match/motor próprio vs Telegram)
     if (fonteFiltro !== 'todas' && fonteOportunidade(opp) !== fonteFiltro) return false;
+
+    // Filtro "só salvas" (⭐ — imunes à limpeza automática, migration 009)
+    if (soSalvas && !opp.salva) return false;
 
     // Filter by event date
     if (filterDate) {
@@ -1531,11 +1538,13 @@ export default function App() {
                               </button>
                             </>
                           )}
-                          {/* Filtro por FONTE: SureRadar (agregador) vs Pré-match (motor próprio) */}
+                          {/* Filtro por FONTE: SureRadar (agregador) vs Pré-match (motor próprio) vs Telegram (sinais) + só salvas */}
                           {(() => {
                             const nSR = opportunitiesToShow.filter((o) => fonteOportunidade(o) === 'sureradar').length;
                             const nPM = opportunitiesToShow.filter((o) => fonteOportunidade(o) === 'prematch').length;
-                            const toggle = (f: 'sureradar' | 'prematch') => setFonteFiltro((cur) => (cur === f ? 'todas' : f));
+                            const nTG = opportunitiesToShow.filter((o) => fonteOportunidade(o) === 'telegram').length;
+                            const nSalvas = opportunitiesToShow.filter((o) => o.salva).length;
+                            const toggle = (f: 'sureradar' | 'prematch' | 'telegram') => setFonteFiltro((cur) => (cur === f ? 'todas' : f));
                             const chipFonte = (ativo: boolean, cor: string) =>
                               ativo
                                 ? { ...chip(true), background: cor, border: `1px solid ${cor}`, color: '#0b0b0b' }
@@ -1548,6 +1557,12 @@ export default function App() {
                                 </button>
                                 <button title="Só oportunidades da análise pré-match (cruzamento entre casas)" onClick={() => toggle('prematch')} style={chipFonte(fonteFiltro === 'prematch', '#34d399')}>
                                   🎯 Pré-match{nPM ? ` (${nPM})` : ''}
+                                </button>
+                                <button title="Só sinais do grupo do Telegram (extraídos por IA de visão)" onClick={() => toggle('telegram')} style={chipFonte(fonteFiltro === 'telegram', '#c084fc')}>
+                                  📲 Telegram{nTG ? ` (${nTG})` : ''}
+                                </button>
+                                <button title="Só oportunidades salvas por você (imunes à limpeza automática)" onClick={() => setSoSalvas((v) => !v)} style={chipFonte(soSalvas, '#fbbf24')}>
+                                  ⭐ Salvas{nSalvas ? ` (${nSalvas})` : ''}
                                 </button>
                               </>
                             );
@@ -1680,14 +1695,22 @@ export default function App() {
                               ) : null}
                               {/* Origem da oportunidade */}
                               <span
-                                title={fonte === 'sureradar' ? 'Fonte: SureRadar (agregador de surebets)' : 'Fonte: análise pré-match do JotinhaBet (cruzamento entre casas)'}
+                                title={
+                                  fonte === 'sureradar'
+                                    ? 'Fonte: SureRadar (agregador de surebets)'
+                                    : fonte === 'telegram'
+                                      ? 'Fonte: sinal do grupo do Telegram, extraído por IA de visão — revalide as odds antes de apostar'
+                                      : 'Fonte: análise pré-match do JotinhaBet (cruzamento entre casas)'
+                                }
                                 style={
                                   fonte === 'sureradar'
                                     ? { background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.45)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }
-                                    : { background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.45)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }
+                                    : fonte === 'telegram'
+                                      ? { background: 'rgba(192, 132, 252, 0.15)', color: '#c084fc', border: '1px solid rgba(192, 132, 252, 0.45)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }
+                                      : { background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.45)', padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold', whiteSpace: 'nowrap' }
                                 }
                               >
-                                {fonte === 'sureradar' ? '📡 SureRadar' : '🎯 Pré-match'}
+                                {fonte === 'sureradar' ? '📡 SureRadar' : fonte === 'telegram' ? '📲 Telegram (IA)' : '🎯 Pré-match'}
                               </span>
                               {isVip && (
                                 <span

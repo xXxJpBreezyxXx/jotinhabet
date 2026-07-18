@@ -15,44 +15,8 @@ import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
+import { alertAlreadySent, markAlertAsSent } from '../notify/alertCache';
 import { RevalidationService } from './revalidationService';
-import * as fs from 'fs';
-import * as path from 'path';
-
-// Cache helpers to prevent duplicate WhatsApp alerts
-function alertAlreadySent(key: string): boolean {
-  const cachePath = path.resolve(__dirname, '../../logs/sent_alerts.json');
-  try {
-    if (!fs.existsSync(path.dirname(cachePath))) {
-      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    }
-    if (!fs.existsSync(cachePath)) {
-      fs.writeFileSync(cachePath, JSON.stringify([]));
-      return false;
-    }
-    const content = fs.readFileSync(cachePath, 'utf8');
-    const sentList: string[] = JSON.parse(content);
-    return sentList.includes(key);
-  } catch (err) {
-    console.error('⚠️ [Tracker] Erro ao ler cache de alertas enviados:', err);
-    return false;
-  }
-}
-
-function markAlertAsSent(key: string) {
-  const cachePath = path.resolve(__dirname, '../../logs/sent_alerts.json');
-  try {
-    const content = fs.readFileSync(cachePath, 'utf8');
-    const sentList: string[] = JSON.parse(content);
-    sentList.push(key);
-    if (sentList.length > 1000) {
-      sentList.shift(); // Evita crescimento infinito
-    }
-    fs.writeFileSync(cachePath, JSON.stringify(sentList, null, 2));
-  } catch (err) {
-    console.error('⚠️ [Tracker] Erro ao salvar cache de alertas enviados:', err);
-  }
-}
 
 // Timestamp (ms) do início da partida: usa dataHora (ISO/UTC) e cai para a data no
 // texto do evento "(DD/MM/AAAA HH:MM)" interpretada como horário de Brasília (UTC-3).
@@ -65,13 +29,13 @@ function kickoffMs(opp: { dataHora?: string; evento: string }): number | null {
 }
 
 // True se a partida ainda NÃO começou (pré-jogo). Se o horário for desconhecido, não bloqueia.
-function ehPreJogo(opp: { dataHora?: string; evento: string }): boolean {
+export function ehPreJogo(opp: { dataHora?: string; evento: string }): boolean {
   const k = kickoffMs(opp);
   return k === null ? true : k > Date.now();
 }
 
 // Verifica se o evento ocorre hoje ou amanhã
-function isTodayOrTomorrow(eventoStr: string): boolean {
+export function isTodayOrTomorrow(eventoStr: string): boolean {
   const lower = eventoStr.toLowerCase();
   
   // Se contiver explicitamente "(Hoje" ou "(Amanhã"
@@ -569,13 +533,18 @@ export class ArbitrageScannerV2 {
     try {
       const { data: rows, error } = await supabase
         .from('oportunidades')
-        .select('id, evento, casa_a_nome, casa_b_nome, mercado, url')
+        .select('id, evento, casa_a_nome, casa_b_nome, mercado, url, fonte')
         .eq('status', 'detectada')
         .eq('salva', false) // salvas pelo usuário nunca são reconciliadas p/ fora
         .or('url.is.null,url.not.ilike.*sureradar*');
       if (error || !rows || rows.length === 0) return;
 
-      const idsRemover = rows
+      // Sinais do Telegram são push one-shot (url nula): o motor nunca os
+      // re-encontra na varredura, então não podem ser reconciliados p/ fora —
+      // quem os expira é a limpeza por horário do evento e a de 24h.
+      const doMotor = rows.filter((r: any) => r.fonte !== 'telegram');
+
+      const idsRemover = doMotor
         .filter((r) => !validos.has(this.assinaturaSurebet(r.evento, r.casa_a_nome, r.casa_b_nome, r.mercado)))
         .map((r) => r.id);
 

@@ -1,7 +1,7 @@
 import { supabase } from '../db/client';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { ArbitrageOpportunity } from '../arbitrage/engine';
-import { areEventsSame, areTeamsSame, jaroWinkler } from '../arbitrage/matcher';
+import { areEventsSame, areTeamsSame, jaroWinkler, parseKickoff } from '../arbitrage/matcher';
 import { mesmaOferta, ehLinhaQuarter } from '../arbitrage/markets';
 import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
@@ -24,6 +24,11 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   vbet: () => new VbetScraper(),
 };
 
+/** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento). */
+export function casaTemScraper(casa: string): boolean {
+  return !!SCRAPER_FACTORY[(casa || '').toString().trim().toLowerCase()];
+}
+
 /** Resultado da checagem ao vivo das duas pernas (gate pré-alerta). */
 export interface PernasFrescas {
   ok: boolean;            // surebet segue de pé (ROI > 0) com odds atuais
@@ -31,6 +36,9 @@ export interface PernasFrescas {
   oddB: number | null;
   roiAtual: number | null;
   motivo: string;
+  /** Sinal externo (telegram) com casa sem scraper: não dá pra confirmar —
+   *  o chamador decide alertar com tag ⚠️ em vez de suprimir. */
+  naoRevalidavel?: boolean;
 }
 
 export type RevalStatus =
@@ -124,6 +132,25 @@ export class RevalidationService {
     // higiene: não deixa o memo crescer sem limite entre varreduras
     if (this.memoOdds.size > 200) this.memoOdds.clear();
     return odds;
+  }
+
+  /**
+   * Data/hora (ISO) do início do evento, buscada no feed da PRIMEIRA casa com
+   * scraper que conhecer o evento. Usada pelos sinais do Telegram: o print da
+   * calculadora não traz horário, mas se qualquer perna tem scraper, o feed da
+   * casa é a fonte mais confiável (melhor que abrir link).
+   */
+  async dataHoraDoEvento(casas: string[], evento: string, esporte?: string): Promise<string | null> {
+    for (const casa of casas) {
+      if (!casaTemScraper(casa)) continue;
+      try {
+        const odds = await this.oddsDoEventoMemo(casa, evento, esporte);
+        for (const o of odds) {
+          if (o.dataHora && parseKickoff(o.dataHora) !== null) return o.dataHora;
+        }
+      } catch { /* tenta a próxima casa */ }
+    }
+    return null;
   }
 
   /** True se o par de casas do card fresco é o mesmo da oportunidade salva. */
@@ -268,6 +295,7 @@ export class RevalidationService {
     opcaoA: string;
     opcaoB: string;
     url?: string;
+    fonte?: string;
   }): Promise<PernasFrescas> {
     // --- Fonte SureRadar: reconsulta a lista (casas de lá não têm scraper próprio) ---
     if (this.norm(opp.url).includes('sureradar')) {
@@ -299,9 +327,18 @@ export class RevalidationService {
     }
 
     // --- Motor próprio: re-busca cada perna na casa de origem ---
+    // (Sinais fonte='telegram' com par revalidável caem aqui de propósito.)
     const fabA = SCRAPER_FACTORY[this.norm(opp.casaA)];
     const fabB = SCRAPER_FACTORY[this.norm(opp.casaB)];
     if (!fabA || !fabB) {
+      // Rede de segurança p/ sinal externo: sem scraper não é "arb morreu", é
+      // "inconfirmável" — o pipeline do Telegram alerta com tag ⚠️ NÃO REVALIDADO.
+      if (this.norm(opp.fonte) === 'telegram') {
+        return {
+          ok: false, naoRevalidavel: true, oddA: null, oddB: null, roiAtual: null,
+          motivo: `casa sem scraper próprio (${!fabA ? opp.casaA : opp.casaB}) — sinal externo, alertar sem revalidar`,
+        };
+      }
       return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `casa sem scraper próprio (${!fabA ? opp.casaA : opp.casaB})` };
     }
     try {

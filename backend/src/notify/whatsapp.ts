@@ -19,6 +19,8 @@ export interface WhatsAppAlert {
   esporte?: string;     // ex.: "Futebol", "Tênis"
   dataPartida?: string; // ex.: "15/07/2026 10:00"
   fonte?: string;       // origem da oportunidade: "SureRadar" | "Pré-match (motor próprio)"
+  link1?: string;       // link DIRETO da aposta na casa 1 (ex.: vindo do grupo do Telegram)
+  link2?: string;       // link DIRETO da aposta na casa 2 — sem eles, cai no link genérico da casa
 }
 
 export class WhatsAppNotifier {
@@ -218,8 +220,8 @@ export class WhatsAppNotifier {
   private formatarMensagem(a: WhatsAppAlert): string {
     const casaA = a.casa1 || 'Casa 1';
     const casaB = a.casa2 || 'Casa 2';
-    const linkA = this.obterLinkCasa(casaA);
-    const linkB = this.obterLinkCasa(casaB);
+    const linkA = a.link1 || this.obterLinkCasa(casaA);
+    const linkB = a.link2 || this.obterLinkCasa(casaB);
 
     const linhaEsporte = [a.esporte, a.dataPartida].filter(Boolean).join(' • ');
 

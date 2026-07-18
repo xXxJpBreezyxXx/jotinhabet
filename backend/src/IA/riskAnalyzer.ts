@@ -1,5 +1,7 @@
 import { generateWithFallback } from './aiProvider';
+import { extrairJsonDeLLM } from './jsonUtils';
 import { REGRAS_CASAS, PoliticaVoid } from './regrasCasas';
+import { DOUTRINA_MERCADOS } from './doutrinaMercados';
 
 /**
  * RiskAnalyzer — auditor de risco de surebets.
@@ -96,19 +98,8 @@ export function checarConflitoRegras(esporte: string | undefined, casaA: string,
  * Retorna null se não for possível parsear um JSON válido.
  */
 export function parseVerdict(raw: string): RiskVerdict | null {
-  if (!raw) return null;
-  // Remove cercas de markdown e tenta isolar o primeiro objeto JSON.
-  const semFence = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-  const inicio = semFence.indexOf('{');
-  const fim = semFence.lastIndexOf('}');
-  if (inicio === -1 || fim === -1 || fim <= inicio) return null;
-
-  let obj: any;
-  try {
-    obj = JSON.parse(semFence.slice(inicio, fim + 1));
-  } catch {
-    return null;
-  }
+  const obj = extrairJsonDeLLM(raw);
+  if (obj === null) return null;
 
   const niveis: NivelRisco[] = ['ok', 'atencao', 'critico'];
   const tipos: TipoRisco[] = ['conflito_regras', 'erro_palpavel', 'ok'];
@@ -184,12 +175,14 @@ export class RiskAnalyzer {
     // 4. Sem sinal determinístico: pede veredito estruturado ao LLM.
     try {
       const sys =
-        'Você é um auditor de risco de arbitragem esportiva (surebets). ' +
+        'Você é um auditor de risco de arbitragem esportiva (surebets) e julga conforme as DIRETRIZES DA OPERAÇÃO fornecidas. ' +
         'Responda ESTRITAMENTE em JSON válido, sem markdown, no formato exato: ' +
         '{"nivel_risco":"ok|atencao|critico","tipo":"conflito_regras|erro_palpavel|ok","motivo":"<ate 2 frases em pt-BR>","confianca":<0-100>}.';
       const prompt =
-        `Avalie riscos que possam QUEBRAR esta surebet (regras de anulação/void divergentes por esporte — ` +
-        `ex.: desistência no tênis, prorrogação no basquete — e indícios de erro de cotação).\n` +
+        `${DOUTRINA_MERCADOS}\n\n` +
+        `Avalie riscos que possam QUEBRAR esta surebet à luz das diretrizes acima (mercado em blacklist do esporte, ` +
+        `regras de anulação/void divergentes — ex.: desistência no tênis, prorrogação no basquete — e indícios de erro de cotação). ` +
+        `Se o mercado estiver na blacklist do esporte, o veredito é no mínimo "atencao" citando a diretriz.\n` +
         `- Evento: ${evento}\n- Mercado: ${mercado}\n- Esporte: ${esporte || 'n/d'}\n` +
         `- Casa A: ${casaA} @ ${oddA}\n- Casa B: ${casaB} @ ${oddB}\n- Lucro garantido: ${lucroGarantidoPerc}%`;
       const { text, provider } = await generateWithFallback(prompt, sys);

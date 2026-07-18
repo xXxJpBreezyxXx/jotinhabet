@@ -1,5 +1,8 @@
 import { GeminiProvider } from './Provedores/Gemini';
 import { OpenAIProvider } from './Provedores/OpenAI';
+import { ImagemEntrada } from './Provedores/types';
+
+export { ImagemEntrada };
 
 /**
  * Camada única de acesso à IA para o pipeline.
@@ -50,6 +53,31 @@ export async function generateWithFallback(
       return { text, provider: 'openai' };
     } catch (errOpenAI: any) {
       console.error(`❌ [AI] Ambos os provedores falharam. OpenAI: ${errOpenAI?.message || errOpenAI}`);
+      throw errOpenAI;
+    }
+  }
+}
+
+/**
+ * Gera texto a partir de uma IMAGEM (visão) usando Gemini e, em caso de falha,
+ * cai para OpenAI. Lança erro somente se AMBOS os provedores falharem.
+ * Em mock-mode (chaves ausentes) retorna string '[Mock ...' sem lançar.
+ */
+export async function generateFromImageWithFallback(
+  prompt: string,
+  imagem: ImagemEntrada,
+  systemInstruction?: string
+): Promise<AIResult> {
+  try {
+    const text = await getGemini().generateFromImage(prompt, imagem, systemInstruction);
+    return { text, provider: 'gemini' };
+  } catch (errGemini: any) {
+    console.warn(`⚠️ [AI] Gemini (visão) falhou (${errGemini?.message || errGemini}). Tentando OpenAI...`);
+    try {
+      const text = await getOpenAI().generateFromImage(prompt, imagem, systemInstruction);
+      return { text, provider: 'openai' };
+    } catch (errOpenAI: any) {
+      console.error(`❌ [AI] Ambos os provedores (visão) falharam. OpenAI: ${errOpenAI?.message || errOpenAI}`);
       throw errOpenAI;
     }
   }
