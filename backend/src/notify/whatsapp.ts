@@ -128,6 +128,7 @@ export class WhatsAppNotifier {
     if (c.includes('betnacional')) return 'https://betnacional.bet.br';
     if (c.includes('seubet') || c.includes('seu.bet')) return 'https://www.seu.bet.br';
     if (c.includes('betboom')) return 'https://betboom.bet.br';
+    if (c.includes('esportesdasorte')) return 'https://esportesdasorte.bet.br';
     if (c.includes('betwarrior')) return 'https://apostas.betwarrior.bet.br';
     if (c.includes('aposta1')) return 'https://www.aposta1.bet.br';
     if (c.includes('pinnacle')) return 'https://www.pinnacle.com';

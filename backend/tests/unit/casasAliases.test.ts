@@ -25,7 +25,7 @@ describe('canonizarCasa', () => {
   it('mapeia casas sem scraper para o nome de exibição', () => {
     expect(canonizarCasa('BETANO')).toBe('Betano');
     expect(canonizarCasa('bet 365')).toBe('Bet365');
-    expect(canonizarCasa('Esportes da Sorte')).toBe('Esportes da Sorte');
+    expect(canonizarCasa('Esportes da Sorte')).toBe('EsportesDaSorte');
   });
 
   it('remove o sufixo "(BR)" do template da calculadora', () => {

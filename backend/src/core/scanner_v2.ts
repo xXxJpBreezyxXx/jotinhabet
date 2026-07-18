@@ -12,6 +12,7 @@ import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { Aposta1Scraper } from '../scraping/casa_altenar';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
+import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -119,6 +120,7 @@ export class ArbitrageScannerV2 {
     new BetBoomScraper(),
     new SeuBetScraper(),
     new VbetScraper(),
+    new EsportesDaSorteScraper(),
     new BlazeScraper(),
     new OneXBetScraper()
   ];

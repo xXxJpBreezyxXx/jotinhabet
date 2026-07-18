@@ -11,6 +11,7 @@ import { Aposta1Scraper } from '../scraping/casa_altenar';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
+import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
 
 /** Casas com scraper próprio que sabem re-buscar UM evento (oddsDoEvento). */
 const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> }> = {
@@ -22,6 +23,7 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   betboom: () => new BetBoomScraper(),
   seubet: () => new SeuBetScraper(),
   vbet: () => new VbetScraper(),
+  esportesdasorte: () => new EsportesDaSorteScraper(),
 };
 
 /** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento). */
