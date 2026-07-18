@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { fetch as undiciFetch } from 'undici';
 import { IAProvider, ImagemEntrada } from '../types';
 import dotenv from 'dotenv';
 
@@ -14,7 +15,10 @@ export class OpenAIProvider implements IAProvider {
     if (!apiKey || apiKey.includes('your-openai-api-key')) {
       console.warn('⚠️ OpenAI API key is missing. OpenAI provider will run in mock mode.');
     } else {
-      this.openai = new OpenAI({ apiKey });
+      // fetch do undici no lugar do node-fetch embutido do SDK: o node-fetch
+      // derruba POSTs grandes (imagem base64) com "Premature close" nesta VPS;
+      // com curl e com undici (scrapers) a mesma chamada funciona.
+      this.openai = new OpenAI({ apiKey, fetch: undiciFetch as any });
     }
   }
 

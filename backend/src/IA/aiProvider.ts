@@ -35,6 +35,39 @@ function getOpenAI(): OpenAIProvider {
   return openaiInstance;
 }
 
+/** Espera sugerida (ms) quando o erro é rate-limit (429/RESOURCE_EXHAUSTED);
+ *  null para qualquer outro erro. Honra o retryDelay que a API do Gemini
+ *  devolve ("Please retry in 9.7s" / "retryDelay":"9s"), com teto de 60s. */
+function delayDe429(err: any): number | null {
+  const msg = `${err?.message || err}`;
+  if (!/429|RESOURCE_EXHAUSTED|rate limit/i.test(msg)) return null;
+  const m = msg.match(/retry in (\d+(?:\.\d+)?)s/i) || msg.match(/"retryDelay":"(\d+(?:\.\d+)?)s"/);
+  const s = m ? parseFloat(m[1]) : 15;
+  return Math.min(60, Math.ceil(s) + 1) * 1000;
+}
+
+/**
+ * Executa a chamada com até `tentativas` re-tentativas SÓ para rate-limit,
+ * esperando o retryDelay da API entre elas. A fila do Telegram é serializada,
+ * então segurar ~10s aqui não gera concorrência — só atrasa a rajada, que é
+ * exatamente o que a cota (15 RPM no free tier) pede.
+ */
+async function comRetry429<T>(rotulo: string, fn: () => Promise<T>, tentativas = 3): Promise<T> {
+  let ultimoErro: any;
+  for (let i = 1; i <= tentativas; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      ultimoErro = err;
+      const espera = delayDe429(err);
+      if (espera === null || i === tentativas) throw err;
+      console.warn(`⏳ [AI] ${rotulo}: rate-limit (tentativa ${i}/${tentativas}) — aguardando ${Math.round(espera / 1000)}s.`);
+      await new Promise((r) => setTimeout(r, espera));
+    }
+  }
+  throw ultimoErro;
+}
+
 /**
  * Gera texto usando Gemini e, em caso de falha, cai para OpenAI.
  * Lança erro somente se AMBOS os provedores falharem.
@@ -44,7 +77,7 @@ export async function generateWithFallback(
   systemInstruction?: string
 ): Promise<AIResult> {
   try {
-    const text = await getGemini().generateText(prompt, systemInstruction);
+    const text = await comRetry429('Gemini', () => getGemini().generateText(prompt, systemInstruction));
     return { text, provider: 'gemini' };
   } catch (errGemini: any) {
     console.warn(`⚠️ [AI] Gemini falhou (${errGemini?.message || errGemini}). Tentando OpenAI...`);
@@ -69,7 +102,7 @@ export async function generateFromImageWithFallback(
   systemInstruction?: string
 ): Promise<AIResult> {
   try {
-    const text = await getGemini().generateFromImage(prompt, imagem, systemInstruction);
+    const text = await comRetry429('Gemini (visão)', () => getGemini().generateFromImage(prompt, imagem, systemInstruction));
     return { text, provider: 'gemini' };
   } catch (errGemini: any) {
     console.warn(`⚠️ [AI] Gemini (visão) falhou (${errGemini?.message || errGemini}). Tentando OpenAI...`);
