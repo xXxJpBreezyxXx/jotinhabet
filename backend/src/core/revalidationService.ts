@@ -2,7 +2,9 @@ import { supabase } from '../db/client';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { ArbitrageOpportunity } from '../arbitrage/engine';
 import { areEventsSame, areTeamsSame, jaroWinkler, parseKickoff } from '../arbitrage/matcher';
-import { mesmaOferta, ehLinhaQuarter } from '../arbitrage/markets';
+import { mesmaOferta, ehLinhaQuarter, normalizarMercado, rotuloOver, rotuloUnder } from '../arbitrage/markets';
+import { canonizarCasa } from '../signals/casasAliases';
+import { normalizarCasa } from '../IA/riskAnalyzer';
 import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
@@ -28,9 +30,10 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   betnacional: () => new BetnacionalScraper(),
 };
 
-/** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento). */
+/** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento).
+ *  Aceita nome canônico do motor OU label da SureRadar ("Betnacional (BR)"). */
 export function casaTemScraper(casa: string): boolean {
-  return !!SCRAPER_FACTORY[(casa || '').toString().trim().toLowerCase()];
+  return !!SCRAPER_FACTORY[normalizarCasa(canonizarCasa(casa || ''))];
 }
 
 /** Resultado da checagem ao vivo das duas pernas (gate pré-alerta). */
@@ -123,13 +126,23 @@ export class RevalidationService {
     }
   }
 
+  /**
+   * Chave do SCRAPER_FACTORY para um nome de casa QUALQUER (canônico do motor OU label
+   * da SureRadar com sufixo "(BR)"/variação). canonizarCasa trata o "(BR)" e os aliases
+   * ("SuperBet (BR)" → "Superbet"), depois normalizarCasa reduz à chave lowercase.
+   */
+  private chaveCasa(casa: string): string {
+    return normalizarCasa(canonizarCasa(casa || ''));
+  }
+
   /** Memo por varredura das odds re-buscadas (casa|evento|esporte → odds, TTL 60s). */
   private memoOdds = new Map<string, { at: number; odds: ScrapedOdd[] }>();
   private async oddsDoEventoMemo(casa: string, evento: string, esporte?: string): Promise<ScrapedOdd[]> {
-    const key = `${this.norm(casa)}|${this.norm(evento)}|${this.norm(esporte)}`;
+    const chave = this.chaveCasa(casa);
+    const key = `${chave}|${this.norm(evento)}|${this.norm(esporte)}`;
     const hit = this.memoOdds.get(key);
     if (hit && Date.now() - hit.at < 60_000) return hit.odds;
-    const fab = SCRAPER_FACTORY[this.norm(casa)];
+    const fab = SCRAPER_FACTORY[chave];
     if (!fab) return [];
     const odds = await fab().oddsDoEvento(evento, esporte);
     this.memoOdds.set(key, { at: Date.now(), odds });
@@ -301,8 +314,23 @@ export class RevalidationService {
     url?: string;
     fonte?: string;
   }): Promise<PernasFrescas> {
-    // --- Fonte SureRadar: reconsulta a lista (casas de lá não têm scraper próprio) ---
+    // --- Fonte SureRadar ---
     if (this.norm(opp.url).includes('sureradar')) {
+      // Revalidação PRIMÁRIA pelas CASAS reais: se ambas as casas da oportunidade têm
+      // scraper próprio e o mercado é reconhecido, as odds ATUAIS das casas (a fonte)
+      // valem mais que a lista agregada da SureRadar (atualizada só a cada ~10 min). Só
+      // usa se achar as DUAS pernas; senão cai no fallback da lista abaixo (sem regressão).
+      const podePorCasas =
+        !!SCRAPER_FACTORY[this.chaveCasa(opp.casaA)] &&
+        !!SCRAPER_FACTORY[this.chaveCasa(opp.casaB)] &&
+        normalizarMercado(opp.mercado) !== 'DESCONHECIDO';
+      if (podePorCasas) {
+        const viaCasas = await this.revalidarPelasCasas(opp, true);
+        if (viaCasas.oddA !== null && viaCasas.oddB !== null) {
+          return { ...viaCasas, motivo: `[casas reais] ${viaCasas.motivo}` };
+        }
+        // pernas não encontradas nas casas (rótulo/cobertura/casa fora) → fallback na lista
+      }
       try {
         const fresh = await this.getSureRadarFresh();
         if ((!fresh || fresh.length === 0) && this.ultimaFonteFresh !== 'api') {
@@ -332,8 +360,24 @@ export class RevalidationService {
 
     // --- Motor próprio: re-busca cada perna na casa de origem ---
     // (Sinais fonte='telegram' com par revalidável caem aqui de propósito.)
-    const fabA = SCRAPER_FACTORY[this.norm(opp.casaA)];
-    const fabB = SCRAPER_FACTORY[this.norm(opp.casaB)];
+    return this.revalidarPelasCasas(opp, false);
+  }
+
+  /**
+   * Revalidação pelas CASAS de origem: re-busca cada perna (oddsDoEvento) e recalcula o
+   * ROI com as odds ATUAIS. Usada pelo motor próprio e como fonte PRIMÁRIA das
+   * oportunidades da SureRadar cujas duas casas têm scraper. Com sureradar=true, os
+   * rótulos de opção da SureRadar são traduzidos p/ o vocabulário canônico dos scrapers.
+   */
+  private async revalidarPelasCasas(
+    opp: {
+      evento: string; mercado: string; linha?: number | null; esporte?: string;
+      casaA: string; casaB: string; opcaoA: string; opcaoB: string; fonte?: string;
+    },
+    sureradar: boolean
+  ): Promise<PernasFrescas> {
+    const fabA = SCRAPER_FACTORY[this.chaveCasa(opp.casaA)];
+    const fabB = SCRAPER_FACTORY[this.chaveCasa(opp.casaB)];
     if (!fabA || !fabB) {
       // Rede de segurança p/ sinal externo: sem scraper não é "arb morreu", é
       // "inconfirmável" — o pipeline do Telegram alerta com tag ⚠️ NÃO REVALIDADO.
@@ -350,8 +394,12 @@ export class RevalidationService {
         this.oddsDoEventoMemo(opp.casaA, opp.evento, opp.esporte),
         this.oddsDoEventoMemo(opp.casaB, opp.evento, opp.esporte),
       ]);
-      const oddA = this.acharPerna(oddsA, opp.mercado, opp.linha, opp.opcaoA);
-      const oddB = this.acharPerna(oddsB, opp.mercado, opp.linha, opp.opcaoB);
+      // SureRadar nomeia as opções em vocabulário próprio ("Ambos marcam - Não") — traduz
+      // p/ o canônico dos scrapers antes de casar. Opps do motor já vêm canônicas.
+      const opcaoA = sureradar ? this.traduzirOpcaoSureRadar(opp.mercado, opp.opcaoA, opp.linha) : opp.opcaoA;
+      const opcaoB = sureradar ? this.traduzirOpcaoSureRadar(opp.mercado, opp.opcaoB, opp.linha) : opp.opcaoB;
+      const oddA = this.acharPerna(oddsA, opp.mercado, opp.linha, opcaoA);
+      const oddB = this.acharPerna(oddsB, opp.mercado, opp.linha, opcaoB);
       if (oddA === null || oddB === null) {
         const faltou = [oddA === null ? opp.casaA : null, oddB === null ? opp.casaB : null].filter(Boolean).join(' e ');
         return { ok: false, oddA, oddB, roiAtual: null, motivo: `perna não encontrada agora em ${faltou} (linha removida/movida?)` };
@@ -369,6 +417,26 @@ export class RevalidationService {
     } catch (e: any) {
       return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `falha ao re-buscar pernas: ${e?.message || e}` };
     }
+  }
+
+  /**
+   * Traduz o rótulo de opção da SureRadar para o vocabulário canônico dos scrapers, nos
+   * mercados 2-vias determinísticos (BTTS Sim/Não, Total over/under). Times
+   * (DNB/Resultado/Handicap) passam direto — acharPerna casa por nome (areTeamsSame).
+   * Ex.: "Ambos marcam - Não - gols" → "Não"; "Over 2.5"/"Acima de 2,5" → "Mais de 2.5".
+   */
+  private traduzirOpcaoSureRadar(mercado: string, opcao: string, linha?: number | null): string {
+    const canon = normalizarMercado(mercado);
+    const s = (opcao || '').toLowerCase();
+    if (canon.startsWith('AMBAS_MARCAM')) return /\bn[ãa]o\b/.test(s) ? 'Não' : 'Sim';
+    if (canon.startsWith('TOTAIS')) {
+      const l = linha ?? this.linhaDaOpcao(opcao);
+      if (l != null) {
+        if (/\b(menos|under|abaixo)\b/.test(s)) return rotuloUnder(Math.abs(l));
+        if (/\b(mais|over|acima)\b/.test(s)) return rotuloOver(Math.abs(l));
+      }
+    }
+    return opcao;
   }
 
   async revalidar(id: string): Promise<RevalidacaoResultado> {
@@ -398,9 +466,16 @@ export class RevalidationService {
       movimento: null,
     };
 
-    // Motor próprio: re-busca as pernas nas casas de origem (KTO/BetWarrior/Superbet/
-    // Aposta1/Pinnacle). Casas fora do registry seguem 'nao_suportado'.
-    if (!this.norm(opp.url).includes('sureradar')) {
+    // Revalidação pelas CASAS de origem: motor próprio SEMPRE; SureRadar quando AMBAS as
+    // casas têm scraper e o mercado é reconhecido — aí checarPernasAoVivo consulta as casas
+    // reais (e cai na lista da SureRadar se não achar as pernas). SureRadar com casa sem
+    // scraper / mercado exótico segue no fluxo da lista abaixo. Fora do registry: 'nao_suportado'.
+    const ehSureRadar = this.norm(opp.url).includes('sureradar');
+    const revalidavelPelasCasas =
+      casaTemScraper(String(opp.casa_a_nome || '')) &&
+      casaTemScraper(String(opp.casa_b_nome || '')) &&
+      normalizarMercado(String(opp.mercado || '')) !== 'DESCONHECIDO';
+    if (!ehSureRadar || revalidavelPelasCasas) {
       const vivo = await this.checarPernasAoVivo({
         evento: String(opp.evento || ''),
         mercado: String(opp.mercado || ''),
@@ -415,6 +490,8 @@ export class RevalidationService {
       let status: RevalStatus;
       if (/casa sem scraper/.test(vivo.motivo)) status = 'nao_suportado';
       else if (/falha ao/.test(vivo.motivo)) status = 'erro';
+      // Fonte SureRadar degradada/indisponível (fallback da lista) ≠ 'expirada'.
+      else if (/indispon[íi]vel|degradad/i.test(vivo.motivo)) status = 'erro';
       else if (vivo.oddA === null || vivo.oddB === null) status = 'expirada';
       else if (!vivo.ok || (vivo.roiAtual ?? 0) <= 0) status = 'expirada';
       else if ((vivo.roiAtual ?? 0) < roiAnterior - 0.1) status = 'reduzida';
