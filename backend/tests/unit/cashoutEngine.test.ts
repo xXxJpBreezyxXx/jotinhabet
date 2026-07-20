@@ -110,28 +110,36 @@ describe('detectOpportunity', () => {
     oddDirection: 'dropping',
   };
 
-  it('gap positivo acima do mínimo → oportunidade; gapPct = EV', () => {
+  it('gap positivo acima do mínimo → oportunidade; gapPct = EV; trending com odd caindo', () => {
     // alvo paga odd 2.0 → implied 0.50; fair 0.60 → gap = (0.60-0.50)/0.50 = 0.20
     const r = detectOpportunity([dropping], 0.5);
     expect(r.isOpportunity).toBe(true);
     expect(r.gapPct).toBeCloseTo(0.2, 6);
     expect(r.confirmingSources).toEqual(['Pinnacle']);
     expect(r.consensusFairProbability).toBeCloseTo(0.6, 6);
+    expect(r.trending).toBe(true);
   });
 
-  it('gap abaixo do mínimo → não é oportunidade', () => {
-    // alvo já quase ajustado: implied 0.59, fair 0.60 → gap ~1.7% < 3%
-    expect(detectOpportunity([dropping], 0.59).isOpportunity).toBe(false);
+  it('gap abaixo do mínimo (5%) → não é oportunidade', () => {
+    // alvo quase ajustado: implied 0.58, fair 0.60 → gap ~3.4% < 5%
+    expect(detectOpportunity([dropping], 0.58).isOpportunity).toBe(false);
   });
 
-  it('nenhuma bússola caindo → não é oportunidade', () => {
+  it('bússola PLANA (não caindo) mas gap grande → oportunidade, trending=false (modelo de valor)', () => {
     const flat: CompassTrend = { ...dropping, oddDirection: 'flat' };
     const r = detectOpportunity([flat], 0.5);
-    expect(r.isOpportunity).toBe(false);
-    expect(r.confirmingSources).toEqual([]);
+    expect(r.isOpportunity).toBe(true); // gap 20% dispara mesmo sem tendência
+    expect(r.trending).toBe(false);
+    expect(r.confirmingSources).toEqual(['Pinnacle']);
   });
 
-  it('exige minConfirmingSources', () => {
+  it('poucos pontos (< minSampleSize) → estimativa não conta', () => {
+    const rasa: CompassTrend = { ...dropping, sampleSize: 2 };
+    expect(detectOpportunity([rasa], 0.5).isOpportunity).toBe(false);
+    expect(detectOpportunity([rasa], 0.5).confirmingSources).toEqual([]);
+  });
+
+  it('exige minConfirmingSources (bússolas com estimativa válida)', () => {
     const cfg = { ...CASHOUT_CONFIG, minConfirmingSources: 2 };
     expect(detectOpportunity([dropping], 0.5, cfg).isOpportunity).toBe(false);
     const b: CompassTrend = { ...dropping, bookmakerName: 'Betfair' };

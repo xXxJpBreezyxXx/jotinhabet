@@ -17,21 +17,25 @@ export type CashoutSelection = 'home' | 'away' | 'draw' | 'over' | 'under';
 
 export interface CashoutConfig {
   windowMinutes: number;     // janela da regressão
-  rSquaredMin: number;       // R² mínimo p/ a tendência não ser ruído
+  rSquaredMin: number;       // R² mínimo p/ ROTULAR a tendência como "caindo" (selo bônus)
   minSlopeAbs: number;       // |slope| mínimo (sensibilidade) — em prob/segundo
-  minConfirmingSources: number; // nº de bússolas que precisam confirmar a queda
-  minGapPct: number;         // gap/EV mínimo p/ virar oportunidade (0.03 = 3%)
+  minSampleSize: number;     // pontos mínimos p/ a estimativa da bússola ser confiável
+  minConfirmingSources: number; // nº de bússolas (com estimativa válida) exigidas
+  minGapPct: number;         // gap/EV mínimo p/ virar oportunidade (0.05 = 5%)
 }
 
-// Defaults calibráveis via cashout_outcomes (ver checklist da spec). minConfirmingSources=1
-// no 1º corte porque a única bússola confiável hoje é a Pinnacle (ver memória
-// pinnacle-asn-bloqueio); subir p/ 2 quando houver Betfair/Matchbook.
+// MODELO DE VALOR: a oportunidade dispara pelo GAP ESTÁTICO entre a prob justa das
+// bússolas e a odd do alvo (o alvo pagando mais do que a linha afiada diz ser justo).
+// A TENDÊNCIA (odd caindo) é só um SELO BÔNUS — no pré-jogo a linha afiada fica estável,
+// então exigir tendência (R²≥0.7) zerava as oportunidades. minConfirmingSources=1 porque
+// a única bússola hoje é a Pinnacle (ver pinnacle-asn-bloqueio). Calibrável via env.
 export const CASHOUT_CONFIG: CashoutConfig = {
   windowMinutes: 15,
   rSquaredMin: 0.7,
   minSlopeAbs: 0.00005,
+  minSampleSize: 3,
   minConfirmingSources: 1,
-  minGapPct: 0.03,
+  minGapPct: 0.05,
 };
 
 /** Um ponto da série temporal: prob justa (de-vigged) de UMA seleção num instante. */
@@ -124,37 +128,41 @@ export function evaluateCompassTrend(
 export interface OpportunityDetection {
   isOpportunity: boolean;
   gapPct: number;                 // = EV da aposta no alvo
-  confirmingSources: string[];    // bússolas cuja odd está caindo
+  confirmingSources: string[];    // bússolas com estimativa válida usadas no consenso
   consensusFairProbability: number;
+  trending: boolean;              // selo bônus: alguma bússola com a odd realmente caindo
 }
 
 /**
- * Confirma o consenso entre bússolas (odd caindo) e calcula o gap contra o alvo.
- * targetImpliedProb = 1/oddAlvo (CRUA, com a margem do alvo) — é o que o alvo paga.
+ * MODELO DE VALOR: consenso das bússolas com estimativa ESTÁVEL (sampleSize suficiente)
+ * e gap contra o alvo. targetImpliedProb = 1/oddAlvo (CRUA, com a margem do alvo) — é o
+ * que o alvo paga. Dispara quando gap >= minGapPct (não exige tendência). `trending`
+ * sinaliza, à parte, se a odd da linha afiada também está caindo.
  */
 export function detectOpportunity(
   compassTrends: CompassTrend[],
   targetImpliedProb: number,
   cfg: CashoutConfig = CASHOUT_CONFIG
 ): OpportunityDetection {
-  const caindo = compassTrends.filter((c) => c.oddDirection === 'dropping');
+  const validos = compassTrends.filter((c) => c.sampleSize >= cfg.minSampleSize);
   const vazio: OpportunityDetection = {
-    isOpportunity: false, gapPct: 0, confirmingSources: [], consensusFairProbability: 0,
+    isOpportunity: false, gapPct: 0, confirmingSources: [], consensusFairProbability: 0, trending: false,
   };
-  if (caindo.length < cfg.minConfirmingSources) return vazio;
+  if (validos.length < cfg.minConfirmingSources) return vazio;
   if (!Number.isFinite(targetImpliedProb) || targetImpliedProb <= 0) return vazio;
 
-  // consenso = média das probs justas das bússolas que confirmaram a queda
+  // consenso = média das probs justas das bússolas com estimativa estável
   const consensusFairProbability =
-    caindo.reduce((s, c) => s + c.fairProbability, 0) / caindo.length;
+    validos.reduce((s, c) => s + c.fairProbability, 0) / validos.length;
 
   const gapPct = (consensusFairProbability - targetImpliedProb) / targetImpliedProb;
 
   return {
     isOpportunity: gapPct >= cfg.minGapPct,
     gapPct,
-    confirmingSources: caindo.map((c) => c.bookmakerName),
+    confirmingSources: validos.map((c) => c.bookmakerName),
     consensusFairProbability,
+    trending: validos.some((c) => c.oddDirection === 'dropping'),
   };
 }
 

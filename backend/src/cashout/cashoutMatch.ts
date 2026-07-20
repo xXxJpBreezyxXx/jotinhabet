@@ -25,6 +25,17 @@ export function marketKind(mercado: string): MarketKind {
 }
 
 /**
+ * Mercado elegível p/ cruzamento no cashout: exclui os AMBÍGUOS, onde o "assunto"
+ * (unidade) não foi determinado (`_GERAL_`) — ex.: handicap de tênis, que numa casa é
+ * de GAMES e noutra de SETS mas ambos normalizam pra HANDICAP_GERAL, gerando gaps
+ * falsos de 40%+. Também exclui DESCONHECIDO. RESULTADO_FINAL (sem assunto) passa.
+ */
+export function mercadoElegivel(mercado: string): boolean {
+  const c = normalizarMercado(mercado);
+  return c !== 'DESCONHECIDO' && !c.includes('GERAL');
+}
+
+/**
  * Chave natural de uma "instância de mercado" (partida + mercado + linha), estável
  * independente da orientação home/away — os nomes dos times entram ordenados. Usada
  * pra deduplicar o evento no banco e chavear o histórico em memória.
