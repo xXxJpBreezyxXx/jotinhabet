@@ -892,3 +892,13 @@ h1, h2, h3, h4 {
   from { transform: translateY(12px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
+
+/* Spinner de "carregando" (botão de scan/revalidação/salvar saldos). */
+.spin-anim {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

@@ -13,9 +13,16 @@ describe('Revalidação SureRadar pelas casas — resolução de casa', () => {
     expect(casaTemScraper('VBet (BR)')).toBe(true);
     expect(casaTemScraper('SeuBet (BR)')).toBe(true);
     expect(casaTemScraper('BetBoom (BR)')).toBe(true);
-    // casas sem scraper
+    // casas adicionadas em 2026-07-19 (browser + Altenar + Stake)
+    expect(casaTemScraper('Betano (BR)')).toBe(true);
+    expect(casaTemScraper('Blaze')).toBe(true);
+    expect(casaTemScraper('1xBet')).toBe(true);
+    expect(casaTemScraper('BetPix365 (BR)')).toBe(true);
+    expect(casaTemScraper('EstrelaBet')).toBe(true);
+    expect(casaTemScraper('MC Games')).toBe(true);
+    expect(casaTemScraper('Stake (BR)')).toBe(true);
+    // casas sem scraper (inviáveis headless — ver memória)
     expect(casaTemScraper('Bet365')).toBe(false);
-    expect(casaTemScraper('Stake (BR)')).toBe(false);
     expect(casaTemScraper('Novibet (BR)')).toBe(false);
   });
 });

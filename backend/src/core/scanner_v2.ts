@@ -36,41 +36,48 @@ export function ehPreJogo(opp: { dataHora?: string; evento: string }): boolean {
   return k === null ? true : k > Date.now();
 }
 
-// Verifica se o evento ocorre hoje ou amanhã
-export function isTodayOrTomorrow(eventoStr: string): boolean {
-  const lower = eventoStr.toLowerCase();
-  
-  // Se contiver explicitamente "(Hoje" ou "(Amanhã"
-  if (lower.includes('(hoje') || lower.includes('(amanha')) {
-    return true;
-  }
+// Hora de Brasília (0-23) a partir da qual o alerta passa a incluir TAMBÉM as
+// partidas de AMANHÃ. Antes disso, só o dia atual entra no WhatsApp.
+const HORA_LIBERA_AMANHA_BR = 20;
 
-  // Tenta extrair a data no formato (DD/MM/AAAA HH:MM) ou (DD/MM HH:MM)
+// Data/hora ATUAL decomposta no fuso de Brasília. Brasil sem horário de verão
+// desde 2019 → America/Sao_Paulo é UTC-3 constante (mesma premissa de kickoffMs
+// e do greenMonitorService), então basta deslocar o instante em -3h e ler em UTC.
+function agoraBrasilia(): { ano: number; mes: number; dia: number; hora: number } {
+  const d = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  return { ano: d.getUTCFullYear(), mes: d.getUTCMonth() + 1, dia: d.getUTCDate(), hora: d.getUTCHours() };
+}
+
+// Janela de envio do alerta no WhatsApp, em horário de Brasília:
+//  - partidas de HOJE: sempre;
+//  - partidas de AMANHÃ: só a partir das HORA_LIBERA_AMANHA_BR (20h).
+// A data do evento vem SEMPRE em Brasília no texto "(DD/MM/AAAA HH:MM)".
+export function dentroDaJanelaDeAlerta(eventoStr: string): boolean {
+  const agora = agoraBrasilia();
+  const hojeChave = Date.UTC(agora.ano, agora.mes - 1, agora.dia);       // meia-noite BR de hoje
+  const amanhaChave = hojeChave + 24 * 60 * 60 * 1000;                    // meia-noite BR de amanhã
+  const liberouAmanha = agora.hora >= HORA_LIBERA_AMANHA_BR;
+
+  const lower = eventoStr.toLowerCase();
+  // Rótulos textuais sem data numérica ("(Hoje …" / "(Amanhã …").
+  if (lower.includes('(hoje')) return true;
+  if (lower.includes('(amanh')) return liberouAmanha; // pega "amanha" e "amanhã"
+
+  // "(DD/MM/AAAA HH:MM)" ou "(DD/MM HH:MM)" no fim do evento.
   const match = eventoStr.match(/\((\d{2})\/(\d{2})(?:\/(\d{4}))?\s+(\d{2}):(\d{2})\)$/);
   if (!match) {
-    // Se não tiver data formatada de forma clara, por segurança retornamos true
+    // Sem data clara: não bloqueia — melhor mostrar do que perder um alerta inclassificável.
     return true;
   }
 
-  const day = parseInt(match[1]);
-  const month = parseInt(match[2]) - 1; // 0-indexed month
-  const currentYear = new Date().getFullYear();
-  const year = match[3] ? parseInt(match[3]) : currentYear;
+  const dia = parseInt(match[1]);
+  const mes = parseInt(match[2]) - 1; // 0-indexed
+  const ano = match[3] ? parseInt(match[3]) : agora.ano;
+  const eventoChave = Date.UTC(ano, mes, dia);
 
-  const eventDate = new Date(year, month, day);
-  
-  // Zera as horas para comparar apenas os dias
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const tomorrow = new Date(today);
-  tomorrow.setDate(today.getDate() + 1);
-
-  const eventTime = eventDate.getTime();
-  const todayTime = today.getTime();
-  const tomorrowTime = tomorrow.getTime();
-
-  return eventTime === todayTime || eventTime === tomorrowTime;
+  if (eventoChave === hojeChave) return true;
+  if (eventoChave === amanhaChave) return liberouAmanha;
+  return false;
 }
 
 // Converte a string de data/hora do evento em um objeto Date do JavaScript
@@ -415,7 +422,7 @@ export class ArbitrageScannerV2 {
                 : (opp.confianca ?? 0) >= 0.95);
 
             // Só PRÉ-JOGO: nunca alerta partida que já começou (não fazemos ao vivo).
-            if (!alreadyEntered && ehPreJogo(opp) && isTodayOrTomorrow(opp.evento) && (alertarSureRadar || alertarMotor)) {
+            if (!alreadyEntered && ehPreJogo(opp) && dentroDaJanelaDeAlerta(opp.evento) && (alertarSureRadar || alertarMotor)) {
              const fonte = ehSureRadar ? 'SureRadar' : 'Motor';
              const alertKey = `${fonte}_${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${roi.toFixed(1)}`;
              if (!alertAlreadySent(alertKey)) {

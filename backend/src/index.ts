@@ -14,6 +14,7 @@ import { RevalidationService } from './core/revalidationService';
 import { requireApiToken } from './auth/apiToken';
 import { generateWithFallback } from './IA/aiProvider';
 import { WhatsAppNotifier } from './notify/whatsapp';
+import { avisarDeployWhatsApp } from './notify/deployNotice';
 import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
 import { SignalPipeline } from './signals/signalPipeline';
 import { TelegramIngestService } from './signals/telegramIngestService';
@@ -488,6 +489,60 @@ app.post('/api/banca', async (req, res) => {
   }
 });
 
+// GET - Saldos disponíveis por casa (app_config['saldos_casas'] como JSON). [] se nunca salvo.
+app.get('/api/saldos', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('app_config')
+      .select('valor, atualizado_em')
+      .eq('chave', 'saldos_casas')
+      .maybeSingle();
+    if (error) throw error;
+    let saldos: Array<{ casa: string; valor: number }> = [];
+    if (data?.valor) {
+      try {
+        const parsed = JSON.parse(data.valor);
+        if (Array.isArray(parsed)) saldos = parsed;
+      } catch {
+        /* valor corrompido → trata como vazio */
+      }
+    }
+    res.json({ saldos, atualizado_em: data?.atualizado_em ?? null });
+  } catch (error: any) {
+    if (isMissingTable(error)) {
+      console.warn('⚠️ [saldos] Tabela app_config ausente (aplique a migration 008). Tratando como "nunca salvo".');
+      return res.json({ saldos: [], atualizado_em: null });
+    }
+    res.status(500).json({ error: error.message || 'Erro ao obter saldos por casa' });
+  }
+});
+
+// POST - Salvar os saldos por casa (upsert em app_config). Sanitiza nome/valor
+// no servidor para nunca persistir lixo (linha sem casa ou valor não numérico).
+app.post('/api/saldos', async (req, res) => {
+  const entrada = req.body?.saldos;
+  if (!Array.isArray(entrada)) {
+    return res.status(400).json({ error: 'Payload inválido: "saldos" deve ser uma lista.' });
+  }
+  const saldos = entrada
+    .map((s: any) => ({ casa: String(s?.casa ?? '').trim(), valor: Number(s?.valor) }))
+    .filter((s) => s.casa.length > 0 && Number.isFinite(s.valor) && s.valor >= 0)
+    .map((s) => ({ casa: s.casa, valor: Number(s.valor.toFixed(2)) }));
+  try {
+    const { error } = await supabase
+      .from('app_config')
+      .upsert({ chave: 'saldos_casas', valor: JSON.stringify(saldos), atualizado_em: new Date().toISOString() });
+    if (error) throw error;
+    const total = Number(saldos.reduce((acc, s) => acc + s.valor, 0).toFixed(2));
+    res.json({ success: true, saldos, total });
+  } catch (error: any) {
+    if (isMissingTable(error)) {
+      return res.status(500).json({ error: 'Tabela app_config ausente no banco — aplique a migration 008.' });
+    }
+    res.status(500).json({ error: error.message || 'Erro ao salvar saldos por casa' });
+  }
+});
+
 // GET last 150 lines of logs/scanner.log
 app.get('/api/logs', (req, res) => {
   try {
@@ -510,6 +565,10 @@ app.get('/api/logs', (req, res) => {
 app.listen(port, () => {
   console.log(`🚀 JotinhaBet Backend running on http://localhost:${port}`);
   console.log(`👉 Health check: http://localhost:${port}/api/health`);
+
+  // Aviso automático de "deploy concluído" (o boot equivale ao fim do service update
+  // no Swarm). Espera ~5s a rede/Evolution assentar antes da 1ª tentativa; fire-and-forget.
+  setTimeout(() => { void avisarDeployWhatsApp(); }, 5_000);
 
   // Scan agendado do SureRadar a cada 10 min (alinhado ao ciclo de atualização do próprio SureRadar)
   const scheduler = new SchedulerService();

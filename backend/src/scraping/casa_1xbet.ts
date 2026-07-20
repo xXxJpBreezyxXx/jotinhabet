@@ -1,6 +1,15 @@
 import { ScraperBase, ScrapedOdd } from './scraper_base';
 import { chromium } from 'playwright';
+import { areEventsSame } from '../arbitrage/matcher';
 import * as path from 'path';
+
+// Esporte interno → rota do 1xBet. Compartilhado pela varredura e pela busca dirigida
+// da revalidação. Esporte fora do mapa → pula (não cai em football rotulado errado).
+const ROTAS_1XBET: Record<string, string> = {
+  Futebol: 'line/football',
+  Basquete: 'line/basketball',
+  Tenis: 'line/tennis',
+};
 
 export class OneXBetScraper extends ScraperBase {
   private urlBase = 'https://1xbet.bet.br/pt/';
@@ -11,16 +20,22 @@ export class OneXBetScraper extends ScraperBase {
 
   protected async inicializarNavegador(headless: boolean): Promise<void> {
     const userDir = path.resolve(__dirname, '../../tests/chrome-profile-1xbet');
-    this.context = await chromium.launchPersistentContext(userDir, {
+    const opts: any = {
       headless,
-      channel: 'chrome',
-      args: ['--disable-blink-features=AutomationControlled'],
+      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 },
       permissions: ['geolocation'],
       geolocation: { latitude: -23.55052, longitude: -46.633308 },
       locale: 'pt-BR'
-    });
+    };
+    // Prod (container) só tem o chromium bundled (sem Google Chrome/channel) — tenta o
+    // channel e cai no bundled; sem isso o launch lança e a casa fica inerte.
+    try {
+      this.context = await chromium.launchPersistentContext(userDir, { ...opts, channel: 'chrome' });
+    } catch {
+      this.context = await chromium.launchPersistentContext(userDir, opts);
+    }
 
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -30,16 +45,10 @@ export class OneXBetScraper extends ScraperBase {
   protected async extrairLinksDaLista(esporte: string, datas: string[]): Promise<string[]> {
     if (!this.context) throw new Error("Contexto não inicializado.");
     const page = this.context.pages()[0] || await this.context.newPage();
-    
-    const rotas: Record<string, string> = {
-      'Futebol': 'line/football',
-      'Basquete': 'line/basketball',
-      'Tenis': 'line/tennis'
-    };
-    
+
     // Esporte sem rota mapeada → pula. O fallback antigo caía em football e emitia
     // odds de futebol ROTULADAS com o esporte errado (ex.: 'Volei').
-    const rota = rotas[esporte];
+    const rota = ROTAS_1XBET[esporte];
     if (!rota) return [];
     const targetUrl = `${this.urlBase}${rota}`;
     
@@ -171,7 +180,78 @@ export class OneXBetScraper extends ScraperBase {
     } finally {
       await page.close();
     }
-    
+
     return odds;
+  }
+
+  /**
+   * Busca DIRIGIDA (revalidação pré-alerta): re-abre o browser, lista os jogos do(s)
+   * esporte(s), pré-filtra candidatos pelo slug do link (`.../{id}-time-a-time-b`) e abre
+   * só esses, confirmando o confronto com areEventsSame. Mesmo contrato de falha da
+   * Betnacional: throw quando NENHUMA lista carrega (infra → gate remove a linha e
+   * re-gateia) vs [] quando o evento está genuinamente ausente.
+   */
+  async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    const esportes = esporte && ROTAS_1XBET[esporte] ? [esporte] : Object.keys(ROTAS_1XBET);
+    try {
+      await this.inicializarNavegador(true);
+      if (!this.context) throw new Error('1xBet: contexto não inicializado na revalidação');
+      const page = this.context.pages()[0] || await this.context.newPage();
+      let listaCarregou = false;
+      for (const esp of esportes) {
+        const rota = ROTAS_1XBET[esp];
+        if (!rota) continue;
+        let links: string[] = [];
+        try {
+          await page.goto(`${this.urlBase}${rota}`, { waitUntil: 'domcontentloaded', timeout: 35000 });
+          await page.waitForTimeout(8000);
+          try {
+            const cookieBtn = page.locator('text=Aceitar todos, text=ACEITAR TODOS').first();
+            if (await cookieBtn.isVisible()) await cookieBtn.click();
+          } catch (_) {}
+          const all = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('a')).map((a) => (a as HTMLAnchorElement).href)
+          );
+          const seg = rota.split('/')[1] || 'football';
+          links = [...new Set(all)].filter((l) => {
+            const parts = l.split('/');
+            return parts.length === 8 && l.includes(`/line/${seg}/`) && /^\d+-/.test(parts[7]);
+          });
+        } catch {
+          continue; // falha só neste esporte; se todos falharem, cai no throw de infra
+        }
+        if (links.length) listaCarregou = true;
+        const candidatos = links.filter((u) => this.urlCasaComEvento(u, evento)).slice(0, 3);
+        for (const url of candidatos) {
+          const odds = await this.extrairMercadosDoEvento(url, esp);
+          const confirmados = odds.filter((o) => areEventsSame(o.evento, evento));
+          if (confirmados.length) return confirmados;
+        }
+      }
+      if (!listaCarregou) throw new Error('1xBet indisponível na revalidação (nenhuma lista carregou)');
+      return []; // lista carregou; evento genuinamente ausente
+    } finally {
+      await this.fecharNavegador();
+    }
+  }
+
+  /**
+   * Pré-filtro de candidato: os tokens dos dois times aparecem no slug do link
+   * (`.../{id}-time-a-time-b`)? Comparação por CONJUNTO de tokens (≥3 chars, sem acento) —
+   * independe da ordem; a confirmação final é do areEventsSame sobre o nome REAL extraído
+   * da página do evento.
+   */
+  private urlCasaComEvento(url: string, evento: string): boolean {
+    const seg = (url.split('/')[7] || '').replace(/^\d+-/, '');
+    const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const slugTokens = new Set(norm(seg).split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
+    const times = evento.split(/\s+vs\.?\s+/i);
+    if (times.length !== 2) return false;
+    const cobre = (time: string) => {
+      const toks = norm(time).split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
+      if (!toks.length) return false;
+      return toks.filter((t) => slugTokens.has(t)).length >= Math.ceil(toks.length / 2);
+    };
+    return cobre(times[0]) && cobre(times[1]);
   }
 }

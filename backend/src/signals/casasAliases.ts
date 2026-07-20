@@ -4,7 +4,8 @@ import { normalizarCasa } from '../IA/riskAnalyzer';
  * Alias (como o grupo do Telegram escreve o nome da casa) → nome canônico de
  * EXIBIÇÃO. O canônico precisa ser compatível com:
  *  - SCRAPER_FACTORY (revalidationService): lowercase(canônico) ∈ {kto,
- *    betwarrior, superbet, aposta1, pinnacle, betboom, seubet, vbet};
+ *    betwarrior, superbet, aposta1, pinnacle, betboom, seubet, vbet,
+ *    esportesdasorte, betnacional, betano, blaze, 1xbet};
  *  - obterLinkCasa (whatsapp.ts): matching por substring lowercase;
  *  - grupos de W.O. do tênis (regras.ts) e REGRAS_CASAS (normalizarCasa).
  * Chaves do mapa já normalizadas via normalizarCasa (lowercase, sem acento,
@@ -27,22 +28,22 @@ const ALIAS_PARA_CANONICO: Record<string, string> = {
   esportesdasorte: 'EsportesDaSorte',
   esportedasorte: 'EsportesDaSorte',
   betnacional: 'Betnacional',
+  betano: 'Betano', // scraper de browser (só Resultado Final)
+  blaze: 'Blaze',   // scraper de browser (só Resultado Final)
+  '1xbet': '1xbet', // scraper de browser (só Resultado Final)
+  betpix365: 'BetPix365', // Altenar (revalidação; não é fonte do scanner)
+  estrelabet: 'EstrelaBet', // Altenar (revalidação; não é fonte do scanner)
+  mcgames: 'MC Games',      // Altenar "mcgames2" (revalidação; não é fonte do scanner)
+  stake: 'Stake',           // browser-intercept (Futebol 1X2)
   // Casas sem scraper (alertadas com tag ⚠️ NÃO REVALIDADO)
-  betano: 'Betano',
   betsson: 'Betsson',
   bet365: 'Bet365',
   pixbet: 'Pixbet',
-  betpix365: 'BetPix365',
-  blaze: 'Blaze',
-  '1xbet': '1xbet',
   sportingbet: 'Sportingbet',
-  stake: 'Stake',
   novibet: 'Novibet',
   bolsadeaposta: 'Bolsa de Aposta',
   pitaco: 'Pitaco',
   betfair: 'Betfair',
-  estrelabet: 'EstrelaBet',
-  mcgames: 'MC Games',
 };
 
 /** Nome canônico de exibição da casa; desconhecida → nome original trimado

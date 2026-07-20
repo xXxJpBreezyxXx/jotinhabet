@@ -19,7 +19,10 @@ import {
   Moon,
   Save,
   Bookmark,
-  BookmarkCheck
+  BookmarkCheck,
+  Wallet,
+  Plus,
+  Radar
 } from 'lucide-react';
 
 interface HealthStatus {
@@ -168,8 +171,21 @@ function fonteOportunidade(opp: { url?: string; analise_ia?: string; fonte?: str
   return s.includes('sureradar') ? 'sureradar' : 'prematch';
 }
 
+/** Uma casa e o valor que o usuário tem disponível nela (valor como string p/ o input). */
+interface SaldoCasa {
+  casa: string;
+  valor: string;
+}
+
+/** Casas pré-carregadas na aba "Saldo nas Casas" no primeiro uso — o usuário pode
+ *  adicionar/remover livremente; a lista salva passa a ser a fonte da verdade. */
+const CASAS_PADRAO = [
+  'Betano', 'Superbet', 'KTO', 'Blaze', '1xBet', 'Bet365', 'Betnacional', 'BetBoom',
+  'BetWarrior', 'Aposta1', 'Novibet', 'Sportingbet', 'SeuBet', 'Vbet', 'Pinnacle',
+];
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'calculadora' | 'juros-compostos' | 'ai-test'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
   
   // Real-time Calculator State
@@ -266,6 +282,75 @@ export default function App() {
   const [projMaxStakePct, setProjMaxStakePct] = useState('50'); // 50%
   const [projRoiMedioPct, setProjRoiMedioPct] = useState('4'); // 4%
   const [projTurnosPorDia, setProjTurnosPorDia] = useState('3'); // 3 turns
+
+  // Saldo disponível por casa (aba "Saldo nas Casas"). localStorage = cache local
+  // instantâneo; o banco (app_config['saldos_casas']) é sincronizado no botão Salvar.
+  const [saldosCasas, setSaldosCasas] = useState<SaldoCasa[]>(() => {
+    const cache = localStorage.getItem('jotinhabet_saldos_casas');
+    if (cache) {
+      try {
+        const arr = JSON.parse(cache);
+        if (Array.isArray(arr) && arr.length) return arr.map((s: any) => ({ casa: String(s.casa ?? ''), valor: String(s.valor ?? '') }));
+      } catch { /* cache corrompido → cai no default */ }
+    }
+    return CASAS_PADRAO.map((casa) => ({ casa, valor: '' }));
+  });
+  const [saldosSaveState, setSaldosSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [novaCasa, setNovaCasa] = useState('');
+  const saldosSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saldosTocadoRef = useRef(false); // usuário já editou nesta sessão? GET tardio não sobrescreve.
+
+  // Escrita canônica dos saldos: state + cache local (instantâneo, sobrevive ao reload).
+  const aplicarSaldos = (next: SaldoCasa[]) => {
+    saldosTocadoRef.current = true;
+    setSaldosCasas(next);
+    localStorage.setItem('jotinhabet_saldos_casas', JSON.stringify(next));
+  };
+  const atualizarSaldoCasa = (i: number, valor: string) =>
+    aplicarSaldos(saldosCasas.map((s, idx) => (idx === i ? { ...s, valor } : s)));
+  const removerCasa = (i: number) => aplicarSaldos(saldosCasas.filter((_, idx) => idx !== i));
+  const adicionarCasa = () => {
+    const nome = novaCasa.trim();
+    if (!nome) return;
+    if (saldosCasas.some((s) => s.casa.toLowerCase() === nome.toLowerCase())) {
+      alert(`A casa "${nome}" já está na lista.`);
+      return;
+    }
+    aplicarSaldos([...saldosCasas, { casa: nome, valor: '' }]);
+    setNovaCasa('');
+  };
+
+  const agendarResetBotaoSaldos = () => {
+    if (saldosSaveTimerRef.current) clearTimeout(saldosSaveTimerRef.current);
+    saldosSaveTimerRef.current = setTimeout(() => setSaldosSaveState('idle'), 2500);
+  };
+
+  // Persiste os saldos no banco (upsert em app_config). Só envia linhas com casa
+  // preenchida; valor vazio vira 0. Feedback no botão via saldosSaveState.
+  const salvarSaldosNoBanco = () => {
+    const payload = saldosCasas
+      .map((s) => ({ casa: s.casa.trim(), valor: parseFloat(s.valor) }))
+      .filter((s) => s.casa.length > 0)
+      .map((s) => ({ casa: s.casa, valor: Number.isFinite(s.valor) && s.valor > 0 ? s.valor : 0 }));
+    if (saldosSaveTimerRef.current) clearTimeout(saldosSaveTimerRef.current);
+    setSaldosSaveState('saving');
+    fetch('/api/saldos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ saldos: payload }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        setSaldosSaveState(d.success ? 'saved' : 'error');
+        if (!d.success) console.warn('Falha ao salvar saldos no banco:', d.error);
+        agendarResetBotaoSaldos();
+      })
+      .catch((err) => {
+        console.error('Erro ao salvar saldos no banco:', err);
+        setSaldosSaveState('error');
+        agendarResetBotaoSaldos();
+      });
+  };
 
 
   // AI Test Form State
@@ -443,6 +528,25 @@ export default function App() {
 
     const interval = setInterval(fetchOpportunities, 8000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Carrega os saldos por casa salvos no banco (fonte da verdade), a menos que o
+  // usuário já tenha editado nesta sessão (não sobrescreve edição por GET tardio).
+  useEffect(() => {
+    fetch('/api/saldos')
+      .then((r) => r.json())
+      .then((d) => {
+        if (saldosTocadoRef.current) return;
+        if (d && Array.isArray(d.saldos) && d.saldos.length) {
+          const arr: SaldoCasa[] = d.saldos.map((s: any) => ({
+            casa: String(s.casa ?? ''),
+            valor: Number.isFinite(Number(s.valor)) && Number(s.valor) > 0 ? Number(s.valor).toFixed(2) : '',
+          }));
+          setSaldosCasas(arr);
+          localStorage.setItem('jotinhabet_saldos_casas', JSON.stringify(arr));
+        }
+      })
+      .catch(() => console.warn('Não foi possível carregar os saldos por casa (usando localStorage).'));
   }, []);
 
   // Fetch operations from backend
@@ -1057,6 +1161,10 @@ export default function App() {
   const modalCalc = getModalCalculations();
   const totalLucroReal = operationsHistory.reduce((sum, op) => sum + (op.lucro_real || 0), 0);
 
+  // Saldos por casa (derivados p/ os cards da aba "Saldo nas Casas").
+  const totalSaldos = saldosCasas.reduce((acc, s) => acc + (parseFloat(s.valor) || 0), 0);
+  const casasComSaldo = saldosCasas.filter((s) => (parseFloat(s.valor) || 0) > 0).length;
+
   return (
     <div className="app-container">
       {/* Sidebar */}
@@ -1068,28 +1176,42 @@ export default function App() {
           </div>
 
           <nav className="nav-list">
-            <a 
+            <a
               className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
               onClick={() => setActiveTab('dashboard')}
             >
               <Layers size={18} />
               Radar Surebets
             </a>
-            <a 
+            <a
+              className={`nav-item ${activeTab === 'radar-cashout' ? 'active' : ''}`}
+              onClick={() => setActiveTab('radar-cashout')}
+            >
+              <Radar size={18} />
+              Radar Cashout
+            </a>
+            <a
               className={`nav-item ${activeTab === 'calculadora' ? 'active' : ''}`}
               onClick={() => setActiveTab('calculadora')}
             >
               <Calculator size={18} />
               Calculadora
             </a>
-            <a 
+            <a
               className={`nav-item ${activeTab === 'juros-compostos' ? 'active' : ''}`}
               onClick={() => setActiveTab('juros-compostos')}
             >
               <Percent size={18} />
               Juros Compostos
             </a>
-            <a 
+            <a
+              className={`nav-item ${activeTab === 'saldos' ? 'active' : ''}`}
+              onClick={() => setActiveTab('saldos')}
+            >
+              <Wallet size={18} />
+              Saldo nas Casas
+            </a>
+            <a
               className={`nav-item ${activeTab === 'ai-test' ? 'active' : ''}`}
               onClick={() => setActiveTab('ai-test')}
             >
@@ -1135,14 +1257,18 @@ export default function App() {
           <div className="header-title">
             <h1>
               {activeTab === 'dashboard' && 'Radar de Surebets'}
+              {activeTab === 'radar-cashout' && 'Radar Cashout'}
               {activeTab === 'calculadora' && 'Calculadora de Arbitragem'}
               {activeTab === 'juros-compostos' && 'Evolução Diária e Juros Compostos'}
+              {activeTab === 'saldos' && 'Saldo Disponível nas Casas'}
               {activeTab === 'ai-test' && 'Laboratório de IA'}
             </h1>
             <p>
               {activeTab === 'dashboard' && 'Monitore oportunidades de lucro garantido em tempo real'}
+              {activeTab === 'radar-cashout' && 'Monitore oportunidades de cashout em tempo real'}
               {activeTab === 'calculadora' && 'Calcule as stakes ideais e ROI para operações de arbitragem'}
               {activeTab === 'juros-compostos' && 'Simulação e projeção baseadas na planilha de Arbitragem'}
+              {activeTab === 'saldos' && 'Registre quanto você tem disponível em cada casa de apostas'}
               {activeTab === 'ai-test' && 'Configure e teste os provedores de modelos de linguagem'}
             </p>
           </div>
@@ -1964,6 +2090,36 @@ export default function App() {
           </>
         )}
 
+        {activeTab === 'radar-cashout' && (
+          <div className="glass-panel" style={{
+            padding: '48px 24px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '16px',
+            textAlign: 'center',
+            minHeight: '320px'
+          }}>
+            <div style={{
+              width: '64px',
+              height: '64px',
+              borderRadius: '16px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'rgba(52, 211, 153, 0.12)',
+              color: 'var(--color-primary)'
+            }}>
+              <Radar size={32} />
+            </div>
+            <h2 style={{ margin: 0, fontSize: '20px', color: 'var(--text-primary)' }}>Radar Cashout</h2>
+            <p style={{ margin: 0, maxWidth: '420px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+              Em construção. Em breve esta seção vai monitorar oportunidades de cashout em tempo real.
+            </p>
+          </div>
+        )}
+
         {activeTab === 'calculadora' && (
           <div style={{ maxWidth: '700px', margin: '0 auto', width: '100%' }}>
             <div className="glass-panel" style={{ padding: '32px' }}>
@@ -2145,6 +2301,104 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'saldos' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            {/* Cards de resumo */}
+            <div className="stats-grid" style={{ marginBottom: 0 }}>
+              <div className="glass-panel stat-card">
+                <div className="stat-header">
+                  <span>Total Disponível</span>
+                  <Wallet size={16} className="stat-icon" style={{ color: 'var(--color-primary)' }} />
+                </div>
+                <div className="stat-value" style={{ color: 'var(--color-success)' }}>
+                  R$ {totalSaldos.toFixed(2)}
+                </div>
+              </div>
+              <div className="glass-panel stat-card">
+                <div className="stat-header"><span>Casas com Saldo</span></div>
+                <div className="stat-value">{casasComSaldo}<span style={{ fontSize: '14px', color: 'var(--text-muted)' }}> / {saldosCasas.length}</span></div>
+              </div>
+            </div>
+
+            {/* Lista de casas + valores */}
+            <div className="glass-panel" style={{ padding: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}>
+                <h3 className="card-title" style={{ margin: 0 }}>
+                  <Wallet size={18} style={{ color: 'var(--color-primary)' }} />
+                  Valor Disponível por Casa
+                </h3>
+                <button
+                  className="btn btn-primary"
+                  onClick={salvarSaldosNoBanco}
+                  disabled={saldosSaveState === 'saving'}
+                  style={{ minWidth: '150px', justifyContent: 'center' }}
+                >
+                  {saldosSaveState === 'saving' && <><RefreshCw size={16} className="spin-anim" /> Salvando…</>}
+                  {saldosSaveState === 'saved' && <><CheckCircle size={16} /> Salvo!</>}
+                  {saldosSaveState === 'error' && <><AlertCircle size={16} /> Erro — repetir</>}
+                  {saldosSaveState === 'idle' && <><Save size={16} /> Salvar</>}
+                </button>
+              </div>
+
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: 0, marginBottom: '20px' }}>
+                Informe quanto você tem de saldo em cada casa. O valor fica salvo e serve de referência para dividir as stakes das surebets.
+              </p>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {saldosCasas.map((s, i) => (
+                  <div key={`${s.casa}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    <span style={{ flex: '1 1 140px', minWidth: '120px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {s.casa}
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: '1 1 180px' }}>
+                      <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>R$</span>
+                      <input
+                        className="form-control"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0,00"
+                        value={s.valor}
+                        onChange={(e) => atualizarSaldoCasa(i, e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                    </div>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => removerCasa(i)}
+                      title={`Remover ${s.casa}`}
+                      style={{ padding: '8px' }}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ))}
+                {saldosCasas.length === 0 && (
+                  <div style={{ fontSize: '13px', color: 'var(--text-muted)', textAlign: 'center', padding: '12px' }}>
+                    Nenhuma casa na lista. Adicione uma abaixo.
+                  </div>
+                )}
+              </div>
+
+              {/* Adicionar casa */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--panel-border)', flexWrap: 'wrap' }}>
+                <input
+                  className="form-control"
+                  type="text"
+                  placeholder="Adicionar outra casa (ex.: EstrelaBet)"
+                  value={novaCasa}
+                  onChange={(e) => setNovaCasa(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') adicionarCasa(); }}
+                  style={{ flex: '1 1 220px' }}
+                />
+                <button className="btn btn-secondary" onClick={adicionarCasa} style={{ justifyContent: 'center' }}>
+                  <Plus size={16} /> Adicionar
+                </button>
               </div>
             </div>
           </div>

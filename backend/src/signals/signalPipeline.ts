@@ -4,7 +4,7 @@ import { ehLinhaQuarter } from '../arbitrage/markets';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
 import { alertAlreadySent, markAlertAsSent } from '../notify/alertCache';
-import { ehPreJogo, isTodayOrTomorrow } from '../core/scanner_v2';
+import { ehPreJogo, dentroDaJanelaDeAlerta } from '../core/scanner_v2';
 import { RevalidationService, casaTemScraper } from '../core/revalidationService';
 import { SinalExtraido } from '../IA/extractors/telegramSignalExtractor';
 import { canonizarCasa } from './casasAliases';
@@ -64,7 +64,7 @@ export class SignalPipeline {
     const roi = Number(((1 / totalPerc - 1) * 100).toFixed(2));
 
     // Formato canônico "(DD/MM/AAAA HH:MM)" — o mesmo do SureRadar: liga de
-    // graça kickoffMs/ehPreJogo, isTodayOrTomorrow, expiração e dataPartida.
+    // graça kickoffMs/ehPreJogo, dentroDaJanelaDeAlerta, expiração e dataPartida.
     const quando = sinal.dataHora || 'Hoje';
 
     // dataHora ISO derivada do horário de Brasília (UTC-3) impresso no sinal.
@@ -263,8 +263,8 @@ export class SignalPipeline {
       console.error('⚠️ [Telegram] Erro ao checar se evento já possui aposta confirmada:', err);
     }
 
-    if (alreadyEntered || !ehPreJogo(opp) || !isTodayOrTomorrow(opp.evento) || roi < ROI_MIN_ALERTA) {
-      return { acao: 'inserida_sem_alerta', id: novaOpp.id, motivo: alreadyEntered ? 'evento já apostado' : 'fora do gate (pré-jogo/data/ROI)' };
+    if (alreadyEntered || !ehPreJogo(opp) || !dentroDaJanelaDeAlerta(opp.evento) || roi < ROI_MIN_ALERTA) {
+      return { acao: 'inserida_sem_alerta', id: novaOpp.id, motivo: alreadyEntered ? 'evento já apostado' : 'fora do gate (pré-jogo/janela do dia/ROI)' };
     }
 
     const alertKey = `Telegram_${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${roi.toFixed(1)}`;

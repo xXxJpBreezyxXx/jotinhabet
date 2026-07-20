@@ -6,6 +6,17 @@ import * as path from 'path';
 
 
 import { ScraperBase, ScrapedOdd } from './scraper_base';
+import { areEventsSame } from '../arbitrage/matcher';
+
+// Esporte interno → rota do Betano. Compartilhado pela varredura (extrairLinksDaLista)
+// e pela busca dirigida da revalidação (oddsDoEvento). Esporte fora do mapa (Vôlei/
+// Mesa/Beisebol, cobertos só pelos scrapers de API) → pula, sem cair na rota de futebol.
+const ROTAS_BETANO: Record<string, string> = {
+  Futebol: 'sport/futebol/jogos-de-hoje/',
+  Esports: 'sport/esports/',
+  Basquete: 'sport/basquete/',
+  Tenis: 'sport/tenis/',
+};
 
 export class BetanoScraper extends ScraperBase {
   private urlBase = 'https://www.betano.bet.br';
@@ -16,14 +27,21 @@ export class BetanoScraper extends ScraperBase {
 
   protected async inicializarNavegador(headless: boolean): Promise<void> {
     const userDir = path.resolve(__dirname, '../../tests/chrome-profile-betano-prod');
-    this.context = await chromium.launchPersistentContext(userDir, {
+    const opts: any = {
       headless,
-      channel: 'chrome',
-      args: ['--disable-blink-features=AutomationControlled'],
+      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 800 }
-    });
-    
+    };
+    // Prod (container) NÃO tem o Google Chrome (channel) — só o chromium bundled do
+    // Playwright. Tenta o channel e cai no bundled; sem isso o launch lança e a casa
+    // fica inerte (scan e revalidação).
+    try {
+      this.context = await chromium.launchPersistentContext(userDir, { ...opts, channel: 'chrome' });
+    } catch {
+      this.context = await chromium.launchPersistentContext(userDir, opts);
+    }
+
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
@@ -56,16 +74,10 @@ export class BetanoScraper extends ScraperBase {
     const page = this.context.pages()[0] || await this.context.newPage();
     
     console.log(`   [Betano] Acessando esportes na Betano...`);
-    const rotas: Record<string, string> = {
-      'Futebol': 'sport/futebol/jogos-de-hoje/',
-      'Esports': 'sport/esports/',
-      'Basquete': 'sport/basquete/',
-      'Tenis': 'sport/tenis/'
-    };
     // Esporte sem rota mapeada (ex.: Volei/TenisDeMesa/Beisebol, cobertos só pelos
     // scrapers de API) → pula. O fallback antigo caía na rota de FUTEBOL e re-varria
     // futebol rotulado com o esporte errado.
-    const rota = rotas[esporte];
+    const rota = ROTAS_BETANO[esporte];
     if (!rota) return [];
 
     await page.goto(`${this.urlBase}/${rota}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -230,8 +242,84 @@ export class BetanoScraper extends ScraperBase {
     } finally {
       await page.close();
     }
-    
+
     return odds;
+  }
+
+  /**
+   * Busca DIRIGIDA (revalidação pré-alerta): re-abre o browser, lista os jogos do(s)
+   * esporte(s), pré-filtra os candidatos pelo slug da URL (/odds/time-a-time-b/) e abre
+   * só esses para extrair os mercados, confirmando o confronto com areEventsSame. Custa
+   * uma abertura de browser; o memo de 60s do RevalidationService dedup a e o gate roda
+   * em Promise.all com a outra perna.
+   *
+   * CONTRATO DE FALHA (igual à Betnacional): distingue INFRA de AUSÊNCIA GENUÍNA. Se o
+   * browser não abre ou NENHUMA lista carrega (sempre há jogos prematch), LANÇA — o gate
+   * trata como "falha ao re-buscar pernas" (/falha ao/), remove a linha e re-gateia na
+   * próxima varredura, em vez de suprimir uma arb VÁLIDA para sempre. Só devolve [] quando
+   * a lista carregou mas o evento/mercado está genuinamente ausente.
+   */
+  async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    const esportes = esporte && ROTAS_BETANO[esporte] ? [esporte] : Object.keys(ROTAS_BETANO);
+    try {
+      await this.inicializarNavegador(true);
+      if (!this.context) throw new Error('Betano: contexto não inicializado na revalidação');
+      const page = this.context.pages()[0] || await this.context.newPage();
+      let listaCarregou = false;
+      for (const esp of esportes) {
+        const rota = ROTAS_BETANO[esp];
+        if (!rota) continue;
+        let links: string[];
+        try {
+          await page.goto(`${this.urlBase}/${rota}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(2000);
+          await this.resolverPopups(page);
+          links = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('a'))
+              .map((a) => (a as HTMLAnchorElement).href)
+              .filter((href) => href.includes('/odds/'))
+          );
+        } catch {
+          continue; // falha só neste esporte; se todos falharem, cai no throw de infra
+        }
+        const uniq = [...new Set(links)];
+        if (uniq.length) listaCarregou = true;
+        // Pré-filtro barato pelo slug e confirmação real via areEventsSame no nome extraído.
+        const candidatos = uniq.filter((u) => this.slugCasaComEvento(u, evento)).slice(0, 3);
+        for (const url of candidatos) {
+          const odds = await this.extrairMercadosDoEvento(url, esp);
+          const confirmados = odds.filter((o) => areEventsSame(o.evento, evento));
+          if (confirmados.length) return confirmados;
+        }
+      }
+      if (!listaCarregou) throw new Error('Betano indisponível na revalidação (nenhuma lista carregou — site/popup)');
+      return []; // lista carregou; evento genuinamente ausente
+    } finally {
+      await this.fecharNavegador();
+    }
+  }
+
+  /**
+   * Pré-filtro de candidato: os tokens dos dois times do evento aparecem no slug da URL
+   * (/odds/time-a-time-b/id/)? Comparação por CONJUNTO de tokens (≥3 chars, sem acento) —
+   * independe da ordem e do ponto de corte do slug (nomes com nº de palavras diferente
+   * quebravam o split-ao-meio). Exige metade dos tokens de CADA time no slug; a
+   * confirmação final é do areEventsSame sobre o nome REAL extraído da página do evento.
+   */
+  private slugCasaComEvento(url: string, evento: string): boolean {
+    const m = url.match(/\/odds\/([^/?#]+)/);
+    if (!m) return false;
+    const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const slugTokens = new Set(norm(m[1]).split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
+    const times = evento.split(/\s+vs\.?\s+/i);
+    if (times.length !== 2) return false;
+    const cobre = (time: string) => {
+      const toks = norm(time).split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
+      if (!toks.length) return false;
+      const hits = toks.filter((t) => slugTokens.has(t)).length;
+      return hits >= Math.ceil(toks.length / 2);
+    };
+    return cobre(times[0]) && cobre(times[1]);
   }
 }
 

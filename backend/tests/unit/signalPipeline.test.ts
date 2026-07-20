@@ -18,7 +18,7 @@ const h = vi.hoisted(() => {
     deleted: [] as any[],
     // gates de horário
     preJogo: true,
-    hojeOuAmanha: true,
+    dentroJanela: true,
     // revalidação
     reval: { ok: true, oddA: 2.05, oddB: 2.15, roiAtual: 4.5, motivo: 'odds atuais' } as any,
     revalCalls: 0,
@@ -90,7 +90,7 @@ vi.mock('../../src/notify/alertCache', () => ({
 
 vi.mock('../../src/core/scanner_v2', () => ({
   ehPreJogo: () => h.preJogo,
-  isTodayOrTomorrow: () => h.hojeOuAmanha,
+  dentroDaJanelaDeAlerta: () => h.dentroJanela,
 }));
 
 vi.mock('../../src/core/revalidationService', () => ({
@@ -133,7 +133,7 @@ beforeEach(() => {
   h.updated = [];
   h.deleted = [];
   h.preJogo = true;
-  h.hojeOuAmanha = true;
+  h.dentroJanela = true;
   h.reval = { ok: true, oddA: 2.05, oddB: 2.15, roiAtual: 4.5, motivo: 'odds atuais' };
   h.revalCalls = 0;
   h.revalArgs = [];

@@ -9,12 +9,16 @@ import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
-import { Aposta1Scraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper } from '../scraping/casa_altenar';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
 import { BetnacionalScraper } from '../scraping/casa_betnacional';
+import { BetanoScraper } from '../scraping/casa_a';
+import { BlazeScraper } from '../scraping/casa_blaze';
+import { OneXBetScraper } from '../scraping/casa_1xbet';
+import { StakeScraper } from '../scraping/casa_stake';
 
 /** Casas com scraper próprio que sabem re-buscar UM evento (oddsDoEvento). */
 const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> }> = {
@@ -28,6 +32,15 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   vbet: () => new VbetScraper(),
   esportesdasorte: () => new EsportesDaSorteScraper(),
   betnacional: () => new BetnacionalScraper(),
+  betpix365: () => new BetPix365Scraper(), // Altenar (só revalidação; não é fonte do scanner)
+  estrelabet: () => new EstrelaBetScraper(), // Altenar (só revalidação; não é fonte do scanner)
+  mcgames: () => new MCGamesScraper(), // Altenar "mcgames2" (só revalidação; não é fonte do scanner)
+  // Casas de BROWSER (Playwright) — só mercado principal (Resultado Final). oddsDoEvento
+  // sobe um chromium por revalidação (memo 60s dedup a; contrato de falha = throw p/ infra).
+  betano: () => new BetanoScraper(),
+  blaze: () => new BlazeScraper(),
+  '1xbet': () => new OneXBetScraper(),
+  stake: () => new StakeScraper(), // browser-intercept (API JSON só dentro do browser; só Futebol 1X2)
 };
 
 /** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento).

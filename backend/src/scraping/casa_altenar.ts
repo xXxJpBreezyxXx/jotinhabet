@@ -293,3 +293,36 @@ export class Aposta1Scraper extends AltenarWidgetScraper {
     super({ nome: 'Aposta1', integration: 'aposta1', referer: 'https://www.aposta1.bet.br/' });
   }
 }
+
+/**
+ * BetPix365 — Altenar widget, integration "betpix365" (confirmado no recon: GetClickableSportMenu
+ * responde com menu completo). Usada só para REVALIDAÇÃO (SCRAPER_FACTORY), NÃO como fonte do
+ * scanner — as odds são correlacionadas com Aposta1 (mesma plataforma), então cruzar traria
+ * pouco arb novo e muita redundância.
+ */
+export class BetPix365Scraper extends AltenarWidgetScraper {
+  constructor() {
+    super({ nome: 'BetPix365', integration: 'betpix365', referer: 'https://betpix365.bet.br/' });
+  }
+}
+
+/**
+ * EstrelaBet — Altenar widget, integration "estrelabet" (confirmado no recon: menu completo,
+ * 51KB). Operador distinto (preço próprio, ≠ Aposta1/BetPix365), então serve para revalidação
+ * por casa. Adicionada só ao SCRAPER_FACTORY (não é fonte do scanner nesta rodada).
+ */
+export class EstrelaBetScraper extends AltenarWidgetScraper {
+  constructor() {
+    super({ nome: 'EstrelaBet', integration: 'estrelabet', referer: 'https://www.estrelabet.bet.br/' });
+  }
+}
+
+/**
+ * MC Games — Altenar widget, integration "mcgames2" (extraído da config do WSDK na página;
+ * confirmado no biahosted). Adicionada só ao SCRAPER_FACTORY (revalidação; não é fonte do scanner).
+ */
+export class MCGamesScraper extends AltenarWidgetScraper {
+  constructor() {
+    super({ nome: 'MC Games', integration: 'mcgames2', referer: 'https://www.mcgames.bet.br/' });
+  }
+}
