@@ -270,12 +270,12 @@ export default function App() {
   // Resultado do "Verificar" por oportunidade (id → estado).
   const [cashoutVerif, setCashoutVerif] = useState<Record<string, CashoutVerificacao>>({});
 
-  const verificarCashout = (id: string) => {
+  const validarCashout = (id: string) => {
     setCashoutVerif((v) => ({ ...v, [id]: { loading: true } }));
-    fetch(`/api/cashout/opportunities/${id}/verificar`)
+    fetch(`/api/cashout/opportunities/${id}/validar`)
       .then((r) => r.json())
       .then((d) => setCashoutVerif((v) => ({ ...v, [id]: { ...d, loading: false } })))
-      .catch(() => setCashoutVerif((v) => ({ ...v, [id]: { loading: false, disponivel: false, mensagem: 'Falha ao verificar.' } })));
+      .catch(() => setCashoutVerif((v) => ({ ...v, [id]: { loading: false, disponivel: false, mensagem: 'Falha ao validar.' } })));
   };
 
   useEffect(() => {
@@ -2284,11 +2284,11 @@ export default function App() {
                     <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '10px' }}>
                       <button
                         className="btn btn-secondary"
-                        onClick={() => verificarCashout(opp.id)}
+                        onClick={() => validarCashout(opp.id)}
                         disabled={v?.loading}
                         style={{ width: '100%', justifyContent: 'center', fontSize: '13px' }}
                       >
-                        {v?.loading ? <><RefreshCw size={14} className="spin-anim" /> Verificando…</> : <><RefreshCw size={14} /> Verificar odd na casa</>}
+                        {v?.loading ? <><RefreshCw size={14} className="spin-anim" /> Consultando a casa ao vivo…</> : <><RefreshCw size={14} /> Validar odd na casa</>}
                       </button>
                       {v && !v.loading && (
                         <div style={{ marginTop: '8px', fontSize: '12px', textAlign: 'center' }}>
@@ -2297,7 +2297,8 @@ export default function App() {
                           ) : (
                             <div style={{ color: 'var(--text-secondary)' }}>
                               Agora: <strong style={{ color: '#fbbf24' }}>{v.oddAtual?.toFixed(2)}</strong>
-                              {' '}(era {v.oddOriginal?.toFixed(2)}{v.direcao === 'subiu' ? ' ↑' : v.direcao === 'caiu' ? ' ↓' : ' =' }) · há {v.ageSeconds}s
+                              {' '}(era {v.oddOriginal?.toFixed(2)}{v.direcao === 'subiu' ? ' ↑' : v.direcao === 'caiu' ? ' ↓' : ' =' })
+                              {' · '}{v.ageSeconds != null ? `há ${v.ageSeconds}s` : 'ao vivo'}
                               <div style={{ marginTop: '3px', fontWeight: 700, color: v.aindaVale ? 'var(--color-success)' : '#ef4444' }}>
                                 {v.aindaVale ? `✅ ainda vale (gap ${v.gapAtualPct}%)` : `❌ fechou (gap ${v.gapAtualPct}%)`}
                               </div>

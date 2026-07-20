@@ -170,7 +170,7 @@ export async function getActiveOpportunities(): Promise<any[]> {
  * Oportunidades RECENTES (ativas + as que expiraram há pouco), p/ o frontend não
  * ficar vazio quando uma oportunidade transitória some. `ativa` = ainda vale agora.
  */
-export async function getRecentOpportunities(janelaMin = 30): Promise<any[]> {
+export async function getRecentOpportunities(janelaMin = 1440): Promise<any[]> {
   const agora = Date.now();
   const nowIso = new Date(agora).toISOString();
   const cutoff = new Date(agora - janelaMin * 60_000).toISOString();
@@ -205,7 +205,7 @@ export async function getOpportunityById(id: string): Promise<any | null> {
     const { data, error } = await supabase
       .from('cashout_opportunities')
       .select('id, event_id, target_bookmaker_id, selection, line, target_odd_value, ' +
-        'fair_probability, event_label, selection_label, market_label, target_name')
+        'fair_probability, event_label, sport, selection_label, market_label, target_name')
       .eq('id', id)
       .maybeSingle();
     if (error) {

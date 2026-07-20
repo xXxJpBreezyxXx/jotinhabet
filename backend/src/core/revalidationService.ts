@@ -148,6 +148,12 @@ export class RevalidationService {
     return normalizarCasa(canonizarCasa(casa || ''));
   }
 
+  /** Público: odds AO VIVO de UM evento numa casa (busca dirigida + memo 60s). Usado
+   *  pelo "Validar" do Radar Cashout — reusa o mesmo caminho da revalidação de surebet. */
+  async oddsDaCasa(casa: string, evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    return this.oddsDoEventoMemo(casa, evento, esporte);
+  }
+
   /** Memo por varredura das odds re-buscadas (casa|evento|esporte → odds, TTL 60s). */
   private memoOdds = new Map<string, { at: number; odds: ScrapedOdd[] }>();
   private async oddsDoEventoMemo(casa: string, evento: string, esporte?: string): Promise<ScrapedOdd[]> {

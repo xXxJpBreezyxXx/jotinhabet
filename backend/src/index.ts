@@ -22,6 +22,9 @@ import { regraPermiteOportunidade } from './arbitrage/regras';
 import { cashoutCapture } from './cashout/cashoutCapture';
 import { getRecentOpportunities, getOpportunityById, getLatestTargetOdd } from './cashout/cashoutRepo';
 import { CASHOUT_CONFIG } from './cashout/cashoutEngine';
+import { alignOdd } from './cashout/cashoutMatch';
+import { areEventsSame, splitEvento } from './arbitrage/matcher';
+import { mesmaOferta } from './arbitrage/markets';
 
 dotenv.config();
 
@@ -614,6 +617,57 @@ app.get('/api/cashout/opportunities/:id/verificar', async (req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ disponivel: false, error: error.message || 'Erro ao verificar a oportunidade' });
+  }
+});
+
+// GET - "Validar": consulta a odd AO VIVO na casa desregulada (busca dirigida
+// oddsDoEvento, mesmo caminho do "revalidar" das surebets) e diz se ainda vale.
+app.get('/api/cashout/opportunities/:id/validar', async (req, res) => {
+  try {
+    const opp = await getOpportunityById(req.params.id);
+    if (!opp) return res.status(404).json({ disponivel: false, mensagem: 'Oportunidade não encontrada.' });
+
+    const split = splitEvento(opp.event_label);
+    if (!split) return res.json({ disponivel: false, casa: opp.target_name, mensagem: 'Evento inválido.' });
+    const [canonHome, canonAway] = split;
+
+    let liveOdds;
+    try {
+      liveOdds = await revalidation.oddsDaCasa(opp.target_name, opp.event_label, opp.sport);
+    } catch {
+      return res.json({ disponivel: false, aoVivo: true, casa: opp.target_name, mensagem: 'Casa indisponível agora (falha ao consultar ao vivo).' });
+    }
+    const match = (liveOdds || []).find(
+      (o) => areEventsSame(o.evento, opp.event_label) && mesmaOferta(o.mercado, o.linha, opp.market_label, opp.line)
+    );
+    if (!match) {
+      return res.json({ disponivel: false, aoVivo: true, casa: opp.target_name, mensagem: 'Evento/mercado não encontrado agora na casa (pode ter saído ou mudado a linha).' });
+    }
+    const legs = alignOdd(match, canonHome, canonAway);
+    const leg = legs?.find((l) => l.selection === opp.selection);
+    if (!leg) {
+      return res.json({ disponivel: false, aoVivo: true, casa: opp.target_name, mensagem: 'Seleção não encontrada agora na casa.' });
+    }
+
+    const oddAtual = Number(leg.odd);
+    const oddOriginal = Number(opp.target_odd_value);
+    const fair = Number(opp.fair_probability);
+    const gapAtual = fair > 0 && oddAtual > 0 ? (fair - 1 / oddAtual) / (1 / oddAtual) : 0;
+
+    res.json({
+      disponivel: true,
+      aoVivo: true,
+      casa: opp.target_name,
+      selecao: opp.selection_label,
+      oddOriginal,
+      oddAtual,
+      variou: Math.abs(oddAtual - oddOriginal) > 1e-9,
+      direcao: oddAtual > oddOriginal ? 'subiu' : oddAtual < oddOriginal ? 'caiu' : 'igual',
+      gapAtualPct: Number((gapAtual * 100).toFixed(1)),
+      aindaVale: gapAtual >= CASHOUT_CONFIG.minGapPct,
+    });
+  } catch (error: any) {
+    res.status(500).json({ disponivel: false, error: error.message || 'Erro ao validar a oportunidade' });
   }
 });
 
