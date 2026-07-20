@@ -165,3 +165,83 @@ export async function getActiveOpportunities(): Promise<any[]> {
     return [];
   }
 }
+
+/**
+ * Oportunidades RECENTES (ativas + as que expiraram há pouco), p/ o frontend não
+ * ficar vazio quando uma oportunidade transitória some. `ativa` = ainda vale agora.
+ */
+export async function getRecentOpportunities(janelaMin = 30): Promise<any[]> {
+  const agora = Date.now();
+  const nowIso = new Date(agora).toISOString();
+  const cutoff = new Date(agora - janelaMin * 60_000).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from('cashout_opportunities')
+      .select(
+        'id, event_label, sport, market_label, selection_label, target_name, ' +
+          'compass_fair_odd, target_odd_value, gap_pct, confirming_sources, ' +
+          'ttl_estimated_seconds, r_squared, status, detected_at, expires_at, starts_at'
+      )
+      .or(`detected_at.gt.${cutoff},and(status.eq.active,expires_at.gt.${nowIso})`)
+      .order('detected_at', { ascending: false })
+      .limit(80);
+    if (error) {
+      console.warn('[cashout] getRecentOpportunities:', error.message);
+      return [];
+    }
+    return (data || []).map((o: any) => ({
+      ...o,
+      ativa: o.status === 'active' && new Date(o.expires_at).getTime() > agora,
+    }));
+  } catch (err: any) {
+    console.error('[cashout] getRecentOpportunities falhou:', err.message);
+    return [];
+  }
+}
+
+/** Uma oportunidade pelo id (campos necessários p/ o "Verificar"). */
+export async function getOpportunityById(id: string): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .from('cashout_opportunities')
+      .select('id, event_id, target_bookmaker_id, selection, line, target_odd_value, ' +
+        'fair_probability, event_label, selection_label, market_label, target_name')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) {
+      console.warn('[cashout] getOpportunityById:', error.message);
+      return null;
+    }
+    return data ?? null;
+  } catch (err: any) {
+    console.error('[cashout] getOpportunityById falhou:', err.message);
+    return null;
+  }
+}
+
+/** Odd MAIS RECENTE capturada de uma casa p/ uma seleção (usado no "Verificar"). */
+export async function getLatestTargetOdd(
+  eventId: string,
+  bookmakerId: string,
+  selection: string,
+  line: number | null
+): Promise<{ odd_value: number; captured_at: string } | null> {
+  try {
+    let q = supabase
+      .from('cashout_odds_snapshots')
+      .select('odd_value, captured_at')
+      .eq('event_id', eventId)
+      .eq('bookmaker_id', bookmakerId)
+      .eq('selection', selection);
+    q = line === null || line === undefined ? q.is('line', null) : q.eq('line', line);
+    const { data, error } = await q.order('captured_at', { ascending: false }).limit(1).maybeSingle();
+    if (error) {
+      console.warn('[cashout] getLatestTargetOdd:', error.message);
+      return null;
+    }
+    return data ?? null;
+  } catch (err: any) {
+    console.error('[cashout] getLatestTargetOdd falhou:', err.message);
+    return null;
+  }
+}

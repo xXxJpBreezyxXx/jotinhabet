@@ -20,7 +20,8 @@ import { SignalPipeline } from './signals/signalPipeline';
 import { TelegramIngestService } from './signals/telegramIngestService';
 import { regraPermiteOportunidade } from './arbitrage/regras';
 import { cashoutCapture } from './cashout/cashoutCapture';
-import { getActiveOpportunities } from './cashout/cashoutRepo';
+import { getRecentOpportunities, getOpportunityById, getLatestTargetOdd } from './cashout/cashoutRepo';
+import { CASHOUT_CONFIG } from './cashout/cashoutEngine';
 
 dotenv.config();
 
@@ -567,13 +568,52 @@ app.get('/api/logs', (req, res) => {
 // Módulo isolado (schema cashout_*). Trading pré-live por Dropping Odds: a bússola
 // (Pinnacle) define a linha justa e o worker detecta odds atrasadas nas casas alvo.
 
-// GET - Oportunidades de cashout ativas (mais "gordas" primeiro). [] se nada ativo.
+// GET - Oportunidades de cashout RECENTES (ativas + expiradas há pouco). Cada uma traz
+// `ativa` (ainda vale agora). [] se nada recente.
 app.get('/api/cashout/opportunities', async (_req, res) => {
   try {
-    const oportunidades = await getActiveOpportunities();
+    const oportunidades = await getRecentOpportunities();
     res.json({ oportunidades });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erro ao obter oportunidades de cashout', oportunidades: [] });
+  }
+});
+
+// GET - "Verificar": rebusca a odd MAIS RECENTE da casa desregulada p/ esta oportunidade
+// (último snapshot do worker, ≤ ~1min) e diz se a odd mudou e se o valor ainda está de pé.
+app.get('/api/cashout/opportunities/:id/verificar', async (req, res) => {
+  try {
+    const opp = await getOpportunityById(req.params.id);
+    if (!opp) return res.status(404).json({ disponivel: false, mensagem: 'Oportunidade não encontrada.' });
+
+    const snap = await getLatestTargetOdd(opp.event_id, opp.target_bookmaker_id, opp.selection, opp.line);
+    if (!snap) {
+      return res.json({ disponivel: false, casa: opp.target_name, mensagem: 'Sem cotação recente da casa — confira direto no site.' });
+    }
+    const ageSeconds = Math.round((Date.now() - new Date(snap.captured_at).getTime()) / 1000);
+    if (ageSeconds > 180) {
+      return res.json({ disponivel: false, casa: opp.target_name, ageSeconds, mensagem: 'Evento saiu do radar (cotação defasada) — confira direto na casa.' });
+    }
+
+    const oddAtual = Number(snap.odd_value);
+    const oddOriginal = Number(opp.target_odd_value);
+    const fair = Number(opp.fair_probability);
+    const gapAtual = fair > 0 && oddAtual > 0 ? (fair - 1 / oddAtual) / (1 / oddAtual) : 0;
+
+    res.json({
+      disponivel: true,
+      casa: opp.target_name,
+      selecao: opp.selection_label,
+      oddOriginal,
+      oddAtual,
+      ageSeconds,
+      variou: Math.abs(oddAtual - oddOriginal) > 1e-9,
+      direcao: oddAtual > oddOriginal ? 'subiu' : oddAtual < oddOriginal ? 'caiu' : 'igual',
+      gapAtualPct: Number((gapAtual * 100).toFixed(1)),
+      aindaVale: gapAtual >= CASHOUT_CONFIG.minGapPct,
+    });
+  } catch (error: any) {
+    res.status(500).json({ disponivel: false, error: error.message || 'Erro ao verificar a oportunidade' });
   }
 });
 

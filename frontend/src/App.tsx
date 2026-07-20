@@ -200,6 +200,22 @@ interface CashoutOpportunity {
   r_squared: number | null;
   detected_at: string;
   starts_at?: string | null;
+  status?: string;
+  ativa?: boolean;
+}
+
+/** Resultado do "Verificar" (rebusca a odd atual da casa). */
+interface CashoutVerificacao {
+  loading?: boolean;
+  disponivel?: boolean;
+  mensagem?: string;
+  oddOriginal?: number;
+  oddAtual?: number;
+  ageSeconds?: number;
+  variou?: boolean;
+  direcao?: 'subiu' | 'caiu' | 'igual';
+  gapAtualPct?: number;
+  aindaVale?: boolean;
 }
 
 interface CashoutStatus {
@@ -251,6 +267,16 @@ export default function App() {
   const [cashoutOpps, setCashoutOpps] = useState<CashoutOpportunity[]>([]);
   const [cashoutStatus, setCashoutStatus] = useState<CashoutStatus | null>(null);
   const [cashoutLoading, setCashoutLoading] = useState(true);
+  // Resultado do "Verificar" por oportunidade (id → estado).
+  const [cashoutVerif, setCashoutVerif] = useState<Record<string, CashoutVerificacao>>({});
+
+  const verificarCashout = (id: string) => {
+    setCashoutVerif((v) => ({ ...v, [id]: { loading: true } }));
+    fetch(`/api/cashout/opportunities/${id}/verificar`)
+      .then((r) => r.json())
+      .then((d) => setCashoutVerif((v) => ({ ...v, [id]: { ...d, loading: false } })))
+      .catch(() => setCashoutVerif((v) => ({ ...v, [id]: { loading: false, disponivel: false, mensagem: 'Falha ao verificar.' } })));
+  };
 
   useEffect(() => {
     if (activeTab !== 'radar-cashout') return;
@@ -2213,8 +2239,12 @@ export default function App() {
               </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
-                {cashoutOpps.map((opp) => (
-                  <div key={opp.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                {[...cashoutOpps]
+                  .sort((a, b) => (Number(b.ativa) - Number(a.ativa)) || (b.gap_pct - a.gap_pct))
+                  .map((opp) => {
+                  const v = cashoutVerif[opp.id];
+                  return (
+                  <div key={opp.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px', opacity: opp.ativa ? 1 : 0.62 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' }}>
                       <div>
                         <p style={{ margin: 0, fontWeight: 700, color: 'var(--text-primary)', fontSize: '15px' }}>{opp.event_label}</p>
@@ -2222,7 +2252,12 @@ export default function App() {
                           {opp.sport} · {opp.market_label} · <strong style={{ color: 'var(--text-secondary)' }}>{opp.selection_label}</strong>
                         </p>
                       </div>
-                      <CashoutGapBadge gapPct={opp.gap_pct} />
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                        <CashoutGapBadge gapPct={opp.gap_pct} />
+                        <span style={{ fontSize: '10px', fontWeight: 700, color: opp.ativa ? 'var(--color-success)' : 'var(--text-muted)' }}>
+                          {opp.ativa ? '● AO VIVO' : '○ expirada'}
+                        </span>
+                      </div>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
@@ -2242,10 +2277,38 @@ export default function App() {
                         <TrendingUp size={14} style={{ color: 'var(--color-primary)' }} />
                         {opp.confirming_sources?.join(', ')}
                       </span>
-                      <CashoutTTL seconds={Math.max(opp.ttl_estimated_seconds ?? 0, 0)} />
+                      {opp.ativa && <CashoutTTL seconds={Math.max(opp.ttl_estimated_seconds ?? 0, 0)} />}
+                    </div>
+
+                    {/* Verificar: rebusca a odd atual da casa desregulada */}
+                    <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '10px' }}>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => verificarCashout(opp.id)}
+                        disabled={v?.loading}
+                        style={{ width: '100%', justifyContent: 'center', fontSize: '13px' }}
+                      >
+                        {v?.loading ? <><RefreshCw size={14} className="spin-anim" /> Verificando…</> : <><RefreshCw size={14} /> Verificar odd na casa</>}
+                      </button>
+                      {v && !v.loading && (
+                        <div style={{ marginTop: '8px', fontSize: '12px', textAlign: 'center' }}>
+                          {v.disponivel === false ? (
+                            <span style={{ color: 'var(--text-muted)' }}>{v.mensagem}</span>
+                          ) : (
+                            <div style={{ color: 'var(--text-secondary)' }}>
+                              Agora: <strong style={{ color: '#fbbf24' }}>{v.oddAtual?.toFixed(2)}</strong>
+                              {' '}(era {v.oddOriginal?.toFixed(2)}{v.direcao === 'subiu' ? ' ↑' : v.direcao === 'caiu' ? ' ↓' : ' =' }) · há {v.ageSeconds}s
+                              <div style={{ marginTop: '3px', fontWeight: 700, color: v.aindaVale ? 'var(--color-success)' : '#ef4444' }}>
+                                {v.aindaVale ? `✅ ainda vale (gap ${v.gapAtualPct}%)` : `❌ fechou (gap ${v.gapAtualPct}%)`}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
