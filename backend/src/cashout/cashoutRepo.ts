@@ -172,31 +172,59 @@ export async function getActiveOpportunities(): Promise<any[]> {
  * ficar vazio quando uma oportunidade transitória some. `ativa` = ainda vale agora.
  */
 export async function getRecentOpportunities(janelaMin = 1440): Promise<any[]> {
-  const agora = Date.now();
-  const nowIso = new Date(agora).toISOString();
-  const cutoff = new Date(agora - janelaMin * 60_000).toISOString();
+  const cutoff = new Date(Date.now() - janelaMin * 60_000).toISOString();
   try {
     const { data, error } = await supabase
       .from('cashout_opportunities')
       .select(
         'id, event_label, sport, market_label, selection_label, target_name, ' +
           'compass_fair_odd, target_odd_value, gap_pct, drop_pct, confirming_sources, ' +
-          'ttl_estimated_seconds, r_squared, status, detected_at, expires_at, starts_at'
+          'r_squared, status, detected_at, starts_at'
       )
-      .or(`detected_at.gt.${cutoff},and(status.eq.active,expires_at.gt.${nowIso})`)
+      .neq('status', 'deleted')
+      .gt('detected_at', cutoff)
       .order('detected_at', { ascending: false })
-      .limit(80);
+      .limit(200);
     if (error) {
       console.warn('[cashout] getRecentOpportunities:', error.message);
       return [];
     }
-    return (data || []).map((o: any) => ({
-      ...o,
-      ativa: o.status === 'active' && new Date(o.expires_at).getTime() > agora,
-    }));
+    // Dedupe visual: 1 card por (evento + mercado + seleção + casa), o mais recente.
+    const seen = new Set<string>();
+    const out: any[] = [];
+    for (const o of (data || []) as any[]) {
+      const k = `${o.event_label}|${o.market_label}|${o.selection_label}|${o.target_name}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(o);
+    }
+    return out;
   } catch (err: any) {
     console.error('[cashout] getRecentOpportunities falhou:', err.message);
     return [];
+  }
+}
+
+/** Exclui (soft-delete) uma oportunidade e suas repetições (mesmo evento/mercado/seleção/casa). */
+export async function deleteOpportunity(id: string): Promise<boolean> {
+  try {
+    const opp = await getOpportunityById(id);
+    let q = supabase.from('cashout_opportunities').update({ status: 'deleted' });
+    if (opp) {
+      q = q
+        .eq('event_label', opp.event_label)
+        .eq('market_label', opp.market_label)
+        .eq('selection_label', opp.selection_label)
+        .eq('target_name', opp.target_name);
+    } else {
+      q = q.eq('id', id);
+    }
+    const { error } = await q;
+    if (error) { console.warn('[cashout] deleteOpportunity:', error.message); return false; }
+    return true;
+  } catch (err: any) {
+    console.error('[cashout] deleteOpportunity falhou:', err.message);
+    return false;
   }
 }
 
@@ -245,4 +273,54 @@ export async function getLatestTargetOdd(
     console.error('[cashout] getLatestTargetOdd falhou:', err.message);
     return null;
   }
+}
+
+/** Snapshots recentes das bússolas (paginado) — p/ SEMEAR o histórico em memória no boot. */
+export async function getCompassSnapshotsForSeed(
+  bookmakerIds: string[],
+  sinceIso: string
+): Promise<Array<{ event_id: string; bookmaker_id: string; selection: string; odd_value: number; captured_at: string }>> {
+  if (!bookmakerIds.length) return [];
+  const out: any[] = [];
+  const page = 1000;
+  try {
+    for (let from = 0; from < 40000; from += page) {
+      const { data, error } = await supabase
+        .from('cashout_odds_snapshots')
+        .select('event_id, bookmaker_id, selection, odd_value, captured_at')
+        .in('bookmaker_id', bookmakerIds)
+        .gt('captured_at', sinceIso)
+        .order('captured_at', { ascending: true })
+        .range(from, from + page - 1);
+      if (error) { console.warn('[cashout] seed snapshots:', error.message); break; }
+      if (!data || !data.length) break;
+      out.push(...data);
+      if (data.length < page) break;
+    }
+  } catch (err: any) {
+    console.error('[cashout] getCompassSnapshotsForSeed falhou:', err.message);
+  }
+  return out;
+}
+
+/** Eventos por id (event_key + orientação) — p/ o seed reconstruir as chaves de histórico. */
+export async function getEventsByIds(
+  ids: string[]
+): Promise<Map<string, { event_key: string; home_team: string; away_team: string }>> {
+  const map = new Map<string, { event_key: string; home_team: string; away_team: string }>();
+  if (!ids.length) return map;
+  const page = 80; // .in() com muitos UUIDs estoura a URL do PostgREST ("URI too long")
+  try {
+    for (let i = 0; i < ids.length; i += page) {
+      const { data, error } = await supabase
+        .from('cashout_events')
+        .select('id, event_key, home_team, away_team')
+        .in('id', ids.slice(i, i + page));
+      if (error) { console.warn('[cashout] seed events:', error.message); break; }
+      for (const r of data || []) map.set(r.id, { event_key: r.event_key, home_team: r.home_team, away_team: r.away_team });
+    }
+  } catch (err: any) {
+    console.error('[cashout] getEventsByIds falhou:', err.message);
+  }
+  return map;
 }

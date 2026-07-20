@@ -20,7 +20,7 @@ import { SignalPipeline } from './signals/signalPipeline';
 import { TelegramIngestService } from './signals/telegramIngestService';
 import { regraPermiteOportunidade } from './arbitrage/regras';
 import { cashoutCapture } from './cashout/cashoutCapture';
-import { getRecentOpportunities, getOpportunityById, getLatestTargetOdd } from './cashout/cashoutRepo';
+import { getRecentOpportunities, getOpportunityById, getLatestTargetOdd, deleteOpportunity } from './cashout/cashoutRepo';
 import { CASHOUT_CONFIG, devig2Way } from './cashout/cashoutEngine';
 import { alignOdd } from './cashout/cashoutMatch';
 import { areEventsSame, splitEvento } from './arbitrage/matcher';
@@ -695,6 +695,21 @@ app.get('/api/cashout/opportunities/:id/validar', async (req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ disponivel: false, error: error.message || 'Erro ao validar a oportunidade' });
+  }
+});
+
+// DELETE - "lixeira": exclui a oportunidade (e suas repetições) e a SUPRIME no worker,
+// pra não reaparecer no próximo ciclo mesmo que ainda esteja sendo detectada.
+app.delete('/api/cashout/opportunities/:id', async (req, res) => {
+  try {
+    const opp = await getOpportunityById(req.params.id);
+    if (opp) {
+      cashoutCapture.suppress(`${opp.event_label}|${opp.market_label}|${opp.selection_label}|${opp.target_name}`);
+    }
+    const ok = await deleteOpportunity(req.params.id);
+    res.json({ ok });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao excluir a oportunidade' });
   }
 });
 

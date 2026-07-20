@@ -247,22 +247,6 @@ function CashoutGapBadge({ gapPct }: { gapPct: number }) {
   );
 }
 
-/** Countdown do TTL estimado — reinicia quando o valor de segundos muda (refresh). */
-function CashoutTTL({ seconds }: { seconds: number }) {
-  const [remaining, setRemaining] = useState(seconds);
-  useEffect(() => {
-    setRemaining(seconds);
-    const id = setInterval(() => setRemaining((r) => Math.max(r - 1, 0)), 1000);
-    return () => clearInterval(id);
-  }, [seconds]);
-  const urgente = remaining <= 15;
-  return (
-    <span style={{ color: urgente ? '#ef4444' : 'var(--text-muted)', fontWeight: 600, fontSize: '13px' }}>
-      ⏳ {remaining}s
-    </span>
-  );
-}
-
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
@@ -280,6 +264,11 @@ export default function App() {
       .then((r) => r.json())
       .then((d) => setCashoutVerif((v) => ({ ...v, [id]: { ...d, loading: false } })))
       .catch(() => setCashoutVerif((v) => ({ ...v, [id]: { loading: false, disponivel: false, mensagem: 'Falha ao validar.' } })));
+  };
+
+  const excluirCashout = (id: string) => {
+    setCashoutOpps((ops) => ops.filter((o) => o.id !== id)); // some da lista na hora
+    fetch(`/api/cashout/opportunities/${id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
   };
 
   useEffect(() => {
@@ -2244,11 +2233,11 @@ export default function App() {
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
                 {[...cashoutOpps]
-                  .sort((a, b) => (Number(b.ativa) - Number(a.ativa)) || (b.gap_pct - a.gap_pct))
+                  .sort((a, b) => b.gap_pct - a.gap_pct)
                   .map((opp) => {
                   const v = cashoutVerif[opp.id];
                   return (
-                  <div key={opp.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px', opacity: opp.ativa ? 1 : 0.62 }}>
+                  <div key={opp.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' }}>
                       <div>
                         <p style={{ margin: 0, fontWeight: 700, color: 'var(--text-primary)', fontSize: '15px' }}>{opp.event_label}</p>
@@ -2256,11 +2245,15 @@ export default function App() {
                           {opp.sport} · {opp.market_label} · <strong style={{ color: 'var(--text-secondary)' }}>{opp.selection_label}</strong>
                         </p>
                       </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <CashoutGapBadge gapPct={opp.gap_pct} />
-                        <span style={{ fontSize: '10px', fontWeight: 700, color: opp.ativa ? 'var(--color-success)' : 'var(--text-muted)' }}>
-                          {opp.ativa ? '● AO VIVO' : '○ expirada'}
-                        </span>
+                        <button
+                          onClick={() => excluirCashout(opp.id)}
+                          title="Excluir oportunidade"
+                          style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px', display: 'flex' }}
+                        >
+                          <Trash2 size={16} />
+                        </button>
                       </div>
                     </div>
 
@@ -2287,7 +2280,6 @@ export default function App() {
                         <TrendingUp size={14} style={{ color: 'var(--color-primary)' }} />
                         {opp.confirming_sources?.join(', ')}
                       </span>
-                      {opp.ativa && <CashoutTTL seconds={Math.max(opp.ttl_estimated_seconds ?? 0, 0)} />}
                     </div>
 
                     {/* Verificar: rebusca a odd atual da casa desregulada */}

@@ -37,7 +37,7 @@ export const CASHOUT_CONFIG: CashoutConfig = {
   minSlopeAbs: 0.00005,
   minSampleSize: 3,
   minConfirmingSources: 1,
-  minDropPct: 0.03,
+  minDropPct: 0.02,
   minGapPct: 0.03,
 };
 

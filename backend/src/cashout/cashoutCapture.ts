@@ -44,7 +44,8 @@ import {
   upsertEvent,
   insertSnapshots,
   upsertOpportunities,
-  expireOldOpportunities,
+  getCompassSnapshotsForSeed,
+  getEventsByIds,
   type BookmakerRow,
   type SnapshotRow,
   type OpportunityRow,
@@ -119,6 +120,19 @@ export class CashoutCaptureService {
   private trendConfirmedAt = new Map<string, number>();
   // event_key → { id, orientação canônica } (evita upsert a cada ciclo + alinha todas as casas).
   private eventCache = new Map<string, { id: string; home: string; away: string }>();
+  // Chaves de exibição excluídas pelo usuário (lixeira) — não reinsere enquanto o
+  // processo viver, mesmo que a oportunidade siga sendo detectada.
+  private suppressed = new Set<string>();
+
+  /** Chave de exibição (igual à do dedupe/exclusão da API). */
+  private displayKey(eventLabel: string, marketLabel: string, selectionLabel: string, targetName: string): string {
+    return `${eventLabel}|${marketLabel}|${selectionLabel}|${targetName}`;
+  }
+
+  /** Chamado pelo endpoint de exclusão: suprime a oportunidade (não reinsere). */
+  suppress(key: string): void {
+    this.suppressed.add(key);
+  }
 
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning = false;
@@ -184,8 +198,69 @@ export class CashoutCaptureService {
         `Alvos: ${this.targets.map((t) => t.getNome()).join(', ')} | Esportes: ${this.sports.join(', ')}`
     );
 
+    await this.seedHistory(); // reidrata a série de queda dos snapshots persistidos
+
     setTimeout(() => this.cycle(), 15_000); // respiro pós-boot
     this.intervalId = setInterval(() => this.cycle(), this.intervalSeconds * 1000);
+  }
+
+  /**
+   * Reidrata `this.history` a partir dos snapshots persistidos (últimos windowMinutes),
+   * pra a detecção de QUEDA funcionar imediatamente após um restart — senão a janela em
+   * memória zera a cada deploy e o modelo fica cego por ~15min. Reconstrói a prob justa
+   * de-vigando o par de seleções de cada (evento, bússola, instante).
+   */
+  private async seedHistory(): Promise<void> {
+    const idToName = new Map<string, string>();
+    const compassIds: string[] = [];
+    for (const { name } of this.compasses) {
+      const row = this.bookmakers.get(name);
+      if (row) { compassIds.push(row.id); idToName.set(row.id, name); }
+    }
+    if (!compassIds.length) return;
+
+    const sinceIso = new Date(Date.now() - CASHOUT_CONFIG.windowMinutes * 60_000).toISOString();
+    const snaps = await getCompassSnapshotsForSeed(compassIds, sinceIso);
+    if (!snaps.length) { console.log('🌱 [Cashout] seed: sem snapshots recentes no banco.'); return; }
+
+    const eventsMap = await getEventsByIds([...new Set(snaps.map((s) => s.event_id))]);
+
+    // agrupa por (evento, bússola, instante) → par de seleções → de-vig → prob justa
+    const grupos = new Map<string, typeof snaps>();
+    for (const s of snaps) {
+      const k = `${s.event_id}|${s.bookmaker_id}|${s.captured_at}`;
+      (grupos.get(k) || grupos.set(k, []).get(k)!).push(s);
+    }
+    let pontos = 0;
+    for (const linhas of grupos.values()) {
+      if (linhas.length < 2) continue;
+      const ev = eventsMap.get(linhas[0].event_id);
+      const name = idToName.get(linhas[0].bookmaker_id);
+      if (!ev || !name) continue;
+      const dv = devig2Way(Number(linhas[0].odd_value), Number(linhas[1].odd_value));
+      if (!dv) continue;
+      const fairBySel: Record<string, number> = {
+        [linhas[0].selection]: dv.probA,
+        [linhas[1].selection]: dv.probB,
+      };
+      const tSeconds = new Date(linhas[0].captured_at).getTime() / 1000;
+      for (const s of linhas) {
+        if (fairBySel[s.selection] === undefined) continue;
+        const hk = `${ev.event_key}|${name}|${s.selection}`;
+        const arr = this.history.get(hk) || [];
+        arr.push({ tSeconds, fairProb: fairBySel[s.selection] });
+        this.history.set(hk, arr);
+        pontos++;
+      }
+      if (!this.eventCache.has(ev.event_key)) {
+        this.eventCache.set(ev.event_key, { id: linhas[0].event_id, home: ev.home_team, away: ev.away_team });
+      }
+    }
+    for (const [k, arr] of this.history) {
+      arr.sort((a, b) => a.tSeconds - b.tSeconds);
+      this.history.set(k, arr);
+    }
+    console.log(`🌱 [Cashout] seed: ${this.history.size} séries, ${pontos} pontos do banco (janela ${CASHOUT_CONFIG.windowMinutes}min).`);
   }
 
   stop(): void {
@@ -358,6 +433,8 @@ export class CashoutCaptureService {
               this.trendConfirmedAt.delete(tk);
               continue;
             }
+            const selLabel = selectionLabel(legT.selection, ev.canonHome, ev.canonAway, match.linha ?? null);
+            if (this.suppressed.has(this.displayKey(ev.evento, ev.marketLabel, selLabel, name))) continue; // excluída pelo usuário
             if (!this.trendConfirmedAt.has(tk)) this.trendConfirmedAt.set(tk, nowMs);
             const secsSince = (nowMs - this.trendConfirmedAt.get(tk)!) / 1000;
             const ttl = estimateTTL(tRow.avg_update_latency_seconds, secsSince);
@@ -386,7 +463,7 @@ export class CashoutCaptureService {
               event_label: ev.evento,
               sport: ev.sport,
               market_label: ev.marketLabel,
-              selection_label: selectionLabel(legT.selection, ev.canonHome, ev.canonAway, match.linha ?? null),
+              selection_label: selLabel,
               target_name: name,
               compass_fair_odd: det.consensusFairProbability > 0 ? 1 / det.consensusFairProbability : 0,
               starts_at: ev.startsAtIso,
@@ -408,9 +485,8 @@ export class CashoutCaptureService {
           `maiorQueda=${pct(diag.maxDrop)}, maiorGap=${pct(diag.maxGap)}`
       );
 
-      // 5) Persiste.
+      // 5) Persiste. (Sem auto-expiração por tempo — o usuário exclui via lixeira.)
       await insertSnapshots(snapshots);
-      await expireOldOpportunities(nowIso);
       await upsertOpportunities(opps);
 
       // 6) Alerta no WhatsApp (grupo de cashout) — as mais "gordas" primeiro, com teto por

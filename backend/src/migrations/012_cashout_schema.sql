@@ -71,7 +71,7 @@ create table if not exists cashout_opportunities (
     confirming_sources   text[] not null,         -- ex: ['Pinnacle']
 
     ttl_estimated_seconds integer,
-    status                text default 'active' check (status in ('active','expired','converted','invalidated')),
+    status                text default 'active' check (status in ('active','expired','converted','invalidated','deleted')),
 
     detected_at           timestamptz default now(),
     expires_at            timestamptz,
