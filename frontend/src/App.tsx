@@ -216,6 +216,9 @@ interface CashoutVerificacao {
   direcao?: 'subiu' | 'caiu' | 'igual';
   gapAtualPct?: number;
   aindaVale?: boolean;
+  fairOddOriginal?: number;
+  fairOddAtual?: number | null;
+  fairDefasada?: boolean;
 }
 
 interface CashoutStatus {
@@ -2296,9 +2299,15 @@ export default function App() {
                             <span style={{ color: 'var(--text-muted)' }}>{v.mensagem}</span>
                           ) : (
                             <div style={{ color: 'var(--text-secondary)' }}>
-                              Agora: <strong style={{ color: '#fbbf24' }}>{v.oddAtual?.toFixed(2)}</strong>
-                              {' '}(era {v.oddOriginal?.toFixed(2)}{v.direcao === 'subiu' ? ' ↑' : v.direcao === 'caiu' ? ' ↓' : ' =' })
-                              {' · '}{v.ageSeconds != null ? `há ${v.ageSeconds}s` : 'ao vivo'}
+                              <div>
+                                Casa agora: <strong style={{ color: '#fbbf24' }}>{v.oddAtual?.toFixed(2)}</strong>
+                                {' '}(era {v.oddOriginal?.toFixed(2)}{v.direcao === 'subiu' ? ' ↑' : v.direcao === 'caiu' ? ' ↓' : ' =' })
+                                {' · '}{v.ageSeconds != null ? `há ${v.ageSeconds}s` : 'ao vivo'}
+                              </div>
+                              {v.fairOddAtual != null && (
+                                <div>Justa bússola agora: <strong>{v.fairOddAtual.toFixed(2)}</strong>{v.fairOddOriginal != null ? ` (era ${v.fairOddOriginal.toFixed(2)})` : ''}</div>
+                              )}
+                              {v.fairDefasada && <div style={{ color: '#f59e0b', fontSize: '11px' }}>⚠️ bússola indisponível — comparado com a justa da detecção</div>}
                               <div style={{ marginTop: '3px', fontWeight: 700, color: v.aindaVale ? 'var(--color-success)' : '#ef4444' }}>
                                 {v.aindaVale ? `✅ ainda vale (gap ${v.gapAtualPct}%)` : `❌ fechou (gap ${v.gapAtualPct}%)`}
                               </div>

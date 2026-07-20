@@ -205,7 +205,7 @@ export async function getOpportunityById(id: string): Promise<any | null> {
     const { data, error } = await supabase
       .from('cashout_opportunities')
       .select('id, event_id, target_bookmaker_id, selection, line, target_odd_value, ' +
-        'fair_probability, event_label, sport, selection_label, market_label, target_name')
+        'fair_probability, compass_fair_odd, event_label, sport, selection_label, market_label, target_name')
       .eq('id', id)
       .maybeSingle();
     if (error) {

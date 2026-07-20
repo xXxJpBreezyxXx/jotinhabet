@@ -21,7 +21,7 @@ import { TelegramIngestService } from './signals/telegramIngestService';
 import { regraPermiteOportunidade } from './arbitrage/regras';
 import { cashoutCapture } from './cashout/cashoutCapture';
 import { getRecentOpportunities, getOpportunityById, getLatestTargetOdd } from './cashout/cashoutRepo';
-import { CASHOUT_CONFIG } from './cashout/cashoutEngine';
+import { CASHOUT_CONFIG, devig2Way } from './cashout/cashoutEngine';
 import { alignOdd } from './cashout/cashoutMatch';
 import { areEventsSame, splitEvento } from './arbitrage/matcher';
 import { mesmaOferta } from './arbitrage/markets';
@@ -651,8 +651,32 @@ app.get('/api/cashout/opportunities/:id/validar', async (req, res) => {
 
     const oddAtual = Number(leg.odd);
     const oddOriginal = Number(opp.target_odd_value);
-    const fair = Number(opp.fair_probability);
-    const gapAtual = fair > 0 && oddAtual > 0 ? (fair - 1 / oddAtual) / (1 / oddAtual) : 0;
+
+    // Recalcula a JUSTA AO VIVO pela bússola (Pinnacle) — a justa congelada da detecção
+    // mente quando a linha afiada se move (foi o caso da Eva Lopez: 14.46 → 17.01).
+    let fairProb = Number(opp.fair_probability);
+    let fairDefasada = true;
+    let fairOddAtual: number | null = null;
+    try {
+      const compassOdds = await revalidation.oddsDaCasa('Pinnacle', opp.event_label, opp.sport);
+      const cMatch = (compassOdds || []).find(
+        (o) => areEventsSame(o.evento, opp.event_label) && mesmaOferta(o.mercado, o.linha, opp.market_label, opp.line)
+      );
+      if (cMatch) {
+        const cLegs = alignOdd(cMatch, canonHome, canonAway);
+        const dv = devig2Way(cMatch.oddA, cMatch.oddB);
+        const idx = cLegs?.findIndex((l) => l.selection === opp.selection) ?? -1;
+        if (dv && (idx === 0 || idx === 1)) {
+          fairProb = idx === 0 ? dv.probA : dv.probB;
+          fairOddAtual = Number((1 / fairProb).toFixed(2));
+          fairDefasada = false;
+        }
+      }
+    } catch {
+      /* bússola indisponível — usa a justa congelada e sinaliza defasada */
+    }
+
+    const gapAtual = fairProb > 0 && oddAtual > 0 ? (fairProb - 1 / oddAtual) / (1 / oddAtual) : 0;
 
     res.json({
       disponivel: true,
@@ -661,6 +685,9 @@ app.get('/api/cashout/opportunities/:id/validar', async (req, res) => {
       selecao: opp.selection_label,
       oddOriginal,
       oddAtual,
+      fairOddOriginal: Number(opp.compass_fair_odd),
+      fairOddAtual,
+      fairDefasada,
       variou: Math.abs(oddAtual - oddOriginal) > 1e-9,
       direcao: oddAtual > oddOriginal ? 'subiu' : oddAtual < oddOriginal ? 'caiu' : 'igual',
       gapAtualPct: Number((gapAtual * 100).toFixed(1)),
