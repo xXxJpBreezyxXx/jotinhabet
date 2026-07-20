@@ -65,72 +65,67 @@ describe('evaluateCompassTrend', () => {
     fairProb: 0.50 + i * 0.01, // +0.01 a cada 30s → slope ~0.00033 (> minSlopeAbs)
   }));
 
-  it('prob subindo consistente → oddDirection dropping', () => {
+  it('prob subindo consistente → odd CAIU (dropPct>0, dropping)', () => {
     const t = evaluateCompassTrend('Pinnacle', subindo);
     expect(t.oddDirection).toBe('dropping');
-    expect(t.slope).toBeGreaterThan(0);
+    expect(t.dropPct).toBeGreaterThan(0); // odd 2.0 → 1.82 = caiu ~9%
     expect(t.fairProbability).toBeCloseTo(0.55, 6);
     expect(t.sampleSize).toBe(6);
   });
 
-  it('prob caindo consistente → oddDirection lengthening', () => {
+  it('prob caindo consistente → odd ABRIU (dropPct<0, lengthening)', () => {
     const caindo = subindo.map((p, i) => ({ ...p, fairProb: 0.55 - i * 0.01 }));
-    expect(evaluateCompassTrend('Pinnacle', caindo).oddDirection).toBe('lengthening');
+    const t = evaluateCompassTrend('Pinnacle', caindo);
+    expect(t.oddDirection).toBe('lengthening');
+    expect(t.dropPct).toBeLessThan(0);
   });
 
-  it('estável/ruidoso → flat', () => {
+  it('estável/ruidoso → flat (dropPct ~0)', () => {
     const flat: OddPoint[] = Array.from({ length: 6 }, (_, i) => ({
       tSeconds: 1000 + i * 30,
       fairProb: 0.5 + (i % 2 === 0 ? 0.001 : -0.001),
     }));
-    expect(evaluateCompassTrend('Pinnacle', flat).oddDirection).toBe('flat');
-  });
-
-  it('slope real mas R² abaixo do mínimo → flat (filtra ruído com deriva)', () => {
-    // sobe no geral mas com muita variância → R² < 0.7
-    const ruidoso: OddPoint[] = [
-      { tSeconds: 0, fairProb: 0.50 },
-      { tSeconds: 30, fairProb: 0.58 },
-      { tSeconds: 60, fairProb: 0.49 },
-      { tSeconds: 90, fairProb: 0.60 },
-      { tSeconds: 120, fairProb: 0.52 },
-    ];
-    const t = evaluateCompassTrend('Pinnacle', ruidoso);
-    if (t.rSquared < CASHOUT_CONFIG.rSquaredMin) expect(t.oddDirection).toBe('flat');
+    const t = evaluateCompassTrend('Pinnacle', flat);
+    expect(t.oddDirection).toBe('flat');
+    expect(Math.abs(t.dropPct)).toBeLessThan(0.005);
   });
 });
 
 describe('detectOpportunity', () => {
+  // odd caiu 6% na janela (dropPct 0.06 >= minDropPct 0.03) e prob justa atual 60%.
   const dropping: CompassTrend = {
     bookmakerName: 'Pinnacle',
     slope: 0.0003,
     rSquared: 0.95,
     sampleSize: 6,
-    fairProbability: 0.60, // linha afiada diz: prob justa 60%
+    fairProbability: 0.60,
+    dropPct: 0.06,
     oddDirection: 'dropping',
   };
 
-  it('gap positivo acima do mínimo → oportunidade; gapPct = EV; trending com odd caindo', () => {
+  it('odd caiu + alvo atrasado → oportunidade; gapPct = lag; trending', () => {
     // alvo paga odd 2.0 → implied 0.50; fair 0.60 → gap = (0.60-0.50)/0.50 = 0.20
     const r = detectOpportunity([dropping], 0.5);
     expect(r.isOpportunity).toBe(true);
     expect(r.gapPct).toBeCloseTo(0.2, 6);
+    expect(r.dropPct).toBeCloseTo(0.06, 6);
     expect(r.confirmingSources).toEqual(['Pinnacle']);
-    expect(r.consensusFairProbability).toBeCloseTo(0.6, 6);
     expect(r.trending).toBe(true);
   });
 
-  it('gap abaixo do mínimo (5%) → não é oportunidade', () => {
-    // alvo quase ajustado: implied 0.58, fair 0.60 → gap ~3.4% < 5%
-    expect(detectOpportunity([dropping], 0.58).isOpportunity).toBe(false);
+  it('odd caiu mas gap abaixo do mínimo (3%) → não é oportunidade', () => {
+    // implied 0.59, fair 0.60 → gap ~1.7% < 3%
+    expect(detectOpportunity([dropping], 0.59).isOpportunity).toBe(false);
   });
 
-  it('bússola PLANA (não caindo) mas gap grande → oportunidade, trending=false (modelo de valor)', () => {
-    const flat: CompassTrend = { ...dropping, oddDirection: 'flat' };
-    const r = detectOpportunity([flat], 0.5);
-    expect(r.isOpportunity).toBe(true); // gap 20% dispara mesmo sem tendência
+  it('gap grande mas odd NÃO caiu → NÃO é oportunidade (exige direção do cashout)', () => {
+    // é o caso Eva Lopez: alvo paga muito mais, mas a odd afiada não está caindo (ou subiu)
+    const semQueda: CompassTrend = { ...dropping, dropPct: 0.0, oddDirection: 'flat' };
+    const r = detectOpportunity([semQueda], 0.5);
+    expect(r.isOpportunity).toBe(false);
     expect(r.trending).toBe(false);
-    expect(r.confirmingSources).toEqual(['Pinnacle']);
+    const subindo: CompassTrend = { ...dropping, dropPct: -0.08, oddDirection: 'lengthening' };
+    expect(detectOpportunity([subindo], 0.5).isOpportunity).toBe(false);
   });
 
   it('poucos pontos (< minSampleSize) → estimativa não conta', () => {

@@ -32,6 +32,7 @@ import {
   evaluateCompassTrend,
   detectOpportunity,
   estimateTTL,
+  type CashoutConfig,
   type CompassTrend,
   type OddPoint,
   type CashoutSelection,
@@ -75,6 +76,11 @@ function envList(name: string, fallback: string[]): string[] {
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+function envNum(name: string, fallback: number): number {
+  const v = parseFloat(process.env[name] || '');
+  return Number.isFinite(v) ? v : fallback;
+}
+
 function selectionLabel(sel: CashoutSelection, home: string, away: string, linha: number | null): string {
   if (sel === 'over') return linha != null ? `Mais de ${linha}` : 'Mais';
   if (sel === 'under') return linha != null ? `Menos de ${linha}` : 'Menos';
@@ -104,6 +110,7 @@ export class CashoutCaptureService {
   private intervalSeconds = 60;
   private heavyEveryN = 4;   // bússola pesada (Playwright) puxada a cada N ciclos
   private cycleCount = 0;
+  private cfg: CashoutConfig = CASHOUT_CONFIG; // thresholds (com override por env)
   private bookmakers = new Map<string, BookmakerRow>();
 
   // key = `${event_key}|${casa}|${selection}` → série temporal da prob JUSTA daquela bússola.
@@ -150,6 +157,11 @@ export class CashoutCaptureService {
 
     this.intervalSeconds = Math.max(10, parseInt(process.env.CASHOUT_INTERVAL_SECONDS || '60', 10) || 60);
     this.heavyEveryN = Math.max(1, parseInt(process.env.CASHOUT_HEAVY_EVERY_N || '4', 10) || 4);
+    this.cfg = {
+      ...CASHOUT_CONFIG,
+      minGapPct: envNum('CASHOUT_MIN_GAP_PCT', CASHOUT_CONFIG.minGapPct),
+      minDropPct: envNum('CASHOUT_MIN_DROP_PCT', CASHOUT_CONFIG.minDropPct),
+    };
     this.sports = envList('CASHOUT_SPORTS', ['Futebol', 'Basquete', 'Tenis']);
 
     const compassNames = envList('CASHOUT_COMPASS', ['Pinnacle']).filter((n) => COMPASS_FACTORY[n]);
@@ -299,7 +311,7 @@ export class CashoutCaptureService {
       // Diagnóstico do funil de detecção (por que dá 0 oportunidades): quantas
       // seleções foram avaliadas, quantas têm histórico suficiente p/ regressão,
       // quantas têm bússola "caindo", melhor R² e MAIOR gap visto (mesmo sem passar).
-      const diag = { avaliadas: 0, comHist3: 0, comQueda: 0, acima: 0, maxR2: 0, maxGap: -Infinity, maxGapCaindo: -Infinity };
+      const diag = { avaliadas: 0, comHist3: 0, comQueda: 0, acima: 0, maxR2: 0, maxGap: -Infinity, maxDrop: -Infinity };
       for (const ev of eventsThisCycle.values()) {
         for (const [name, byOffer] of targetIndex) {
           const tRow = this.bookmakers.get(name);
@@ -323,32 +335,23 @@ export class CashoutCaptureService {
             const trends: CompassTrend[] = [];
             for (const cn of compassNames) {
               const hist = this.history.get(`${ev.ek}|${cn}|${legT.selection}`);
-              if (hist && hist.length) trends.push(evaluateCompassTrend(cn, hist));
+              if (hist && hist.length) trends.push(evaluateCompassTrend(cn, hist, this.cfg));
             }
             if (!trends.length) continue;
 
             const targetImplied = 1 / legT.odd;
+            const det = detectOpportunity(trends, targetImplied, this.cfg);
 
-            // --- funil (independe do resultado) ---
+            // --- funil: queda (direção) × gap (lag) — mostra por que dá N oportunidades ---
             diag.avaliadas++;
-            if (trends.some((t) => t.sampleSize >= 3)) diag.comHist3++;
-            const r2 = Math.max(...trends.map((t) => t.rSquared));
+            if (trends.some((t) => t.sampleSize >= this.cfg.minSampleSize)) diag.comHist3++;
+            const r2 = Math.max(0, ...trends.map((t) => t.rSquared));
             if (r2 > diag.maxR2) diag.maxR2 = r2;
-            const caindo = trends.filter((t) => t.oddDirection === 'dropping');
-            if (caindo.length) diag.comQueda++;
-            const validos = trends.filter((t) => t.sampleSize >= CASHOUT_CONFIG.minSampleSize);
-            const meanFair = (validos.length ? validos : trends).reduce((s, t) => s + t.fairProbability, 0) / (validos.length || trends.length);
-            const rawGap = (meanFair - targetImplied) / targetImplied;
-            if (rawGap > diag.maxGap) diag.maxGap = rawGap;
-            if (validos.length && rawGap >= CASHOUT_CONFIG.minGapPct) diag.acima++;
-            if (caindo.length) {
-              const mfc = caindo.reduce((s, t) => s + t.fairProbability, 0) / caindo.length;
-              const gc = (mfc - targetImplied) / targetImplied;
-              if (gc > diag.maxGapCaindo) diag.maxGapCaindo = gc;
-            }
-            // --------------------------------------
-
-            const det = detectOpportunity(trends, targetImplied);
+            if (det.trending) diag.comQueda++;      // odd afiada caiu >= minDropPct
+            if (det.isOpportunity) diag.acima++;    // queda E gap (= oportunidade)
+            if (det.dropPct > diag.maxDrop) diag.maxDrop = det.dropPct;
+            if (det.gapPct > diag.maxGap) diag.maxGap = det.gapPct;
+            // ------------------------------------------------------------------------------
 
             const tk = `${ev.ek}|${legT.selection}|${name}`;
             if (!det.isOpportunity) {
@@ -374,6 +377,7 @@ export class CashoutCaptureService {
               target_odd_value: legT.odd,
               target_implied_prob: targetImplied,
               gap_pct: det.gapPct,
+              drop_pct: det.dropPct,
               slope: melhor?.slope ?? null,
               r_squared: melhor?.rSquared ?? null,
               confirming_sources: det.confirmingSources,
@@ -391,17 +395,17 @@ export class CashoutCaptureService {
         }
       }
 
-      // Funil: por que N oportunidades? (calibração dos thresholds)
+      // Funil: por que N oportunidades? (queda × gap). Cashout exige AMBOS.
       const pct = (x: number) => (x === -Infinity ? 'n/a' : `${(x * 100).toFixed(1)}%`);
       this.lastFunnel = {
-        avaliadas: diag.avaliadas, comHist3: diag.comHist3, acimaThreshold: diag.acima, comQueda: diag.comQueda,
-        melhorR2: Number(diag.maxR2.toFixed(3)),
+        avaliadas: diag.avaliadas, comHist3: diag.comHist3, comQueda: diag.comQueda, oportunidades: diag.acima,
+        maiorQuedaPct: diag.maxDrop === -Infinity ? null : Number((diag.maxDrop * 100).toFixed(2)),
         maiorGapPct: diag.maxGap === -Infinity ? null : Number((diag.maxGap * 100).toFixed(2)),
       };
       console.log(
         `🔎 [Cashout] funil: avaliadas=${diag.avaliadas}, comHist≥3=${diag.comHist3}, ` +
-          `acima${(CASHOUT_CONFIG.minGapPct * 100).toFixed(0)}%=${diag.acima}, comQueda(selo)=${diag.comQueda}, ` +
-          `maiorGap=${pct(diag.maxGap)}, melhorR²=${diag.maxR2.toFixed(2)}`
+          `comQueda(≥${(this.cfg.minDropPct * 100).toFixed(0)}%)=${diag.comQueda}, oportunidades=${diag.acima}, ` +
+          `maiorQueda=${pct(diag.maxDrop)}, maiorGap=${pct(diag.maxGap)}`
       );
 
       // 5) Persiste.

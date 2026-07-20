@@ -91,6 +91,7 @@ alter table cashout_opportunities add column if not exists selection_label text;
 alter table cashout_opportunities add column if not exists target_name     text;
 alter table cashout_opportunities add column if not exists compass_fair_odd numeric(8,3);
 alter table cashout_opportunities add column if not exists starts_at       timestamptz;
+alter table cashout_opportunities add column if not exists drop_pct        numeric(8,4);
 
 -- Backtest / resultado realizado — base da calibração
 create table if not exists cashout_outcomes (

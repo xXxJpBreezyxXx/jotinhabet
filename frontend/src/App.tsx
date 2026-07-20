@@ -195,6 +195,7 @@ interface CashoutOpportunity {
   compass_fair_odd: number;
   target_odd_value: number;
   gap_pct: number;             // 0.05 = 5%
+  drop_pct?: number;           // queda da odd afiada na janela (0.04 = caiu 4%)
   confirming_sources: string[];
   ttl_estimated_seconds: number | null;
   r_squared: number | null;
@@ -2274,6 +2275,12 @@ export default function App() {
                         <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'rgba(245,158,11,0.9)' }}>{opp.target_name}</p>
                       </div>
                     </div>
+
+                    {opp.drop_pct != null && (
+                      <div style={{ fontSize: '12px', color: 'var(--color-primary)' }}>
+                        📉 Odd afiada caiu <strong>{(opp.drop_pct * 100).toFixed(1)}%</strong> na janela
+                      </div>
+                    )}
 
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
                       <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>

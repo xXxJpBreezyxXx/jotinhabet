@@ -41,6 +41,7 @@ export interface OpportunityRow {
   target_odd_value: number;
   target_implied_prob: number;
   gap_pct: number;
+  drop_pct: number;
   slope: number | null;
   r_squared: number | null;
   confirming_sources: string[];
@@ -179,7 +180,7 @@ export async function getRecentOpportunities(janelaMin = 1440): Promise<any[]> {
       .from('cashout_opportunities')
       .select(
         'id, event_label, sport, market_label, selection_label, target_name, ' +
-          'compass_fair_odd, target_odd_value, gap_pct, confirming_sources, ' +
+          'compass_fair_odd, target_odd_value, gap_pct, drop_pct, confirming_sources, ' +
           'ttl_estimated_seconds, r_squared, status, detected_at, expires_at, starts_at'
       )
       .or(`detected_at.gt.${cutoff},and(status.eq.active,expires_at.gt.${nowIso})`)

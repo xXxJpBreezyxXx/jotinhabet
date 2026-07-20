@@ -15,6 +15,7 @@ export interface CashoutAlertData {
   compass_fair_odd: number;
   target_odd_value: number;
   gap_pct: number;
+  drop_pct?: number;
   confirming_sources: string[];
   ttl_estimated_seconds: number | null;
   starts_at?: string | null;
@@ -50,10 +51,11 @@ export function formatarCashoutAlert(a: CashoutAlertData): string {
 
 🟠 *Odd desregulada:* ${a.target_odd_value.toFixed(2)} (${a.target_name})
 🧭 *Linha justa (bússola):* ${a.compass_fair_odd.toFixed(2)} — ${fontes}
+${a.drop_pct != null ? `📉 *Odd afiada caiu ${(a.drop_pct * 100).toFixed(1)}%* na janela` : ''}
 
-📈 Valor estimado: *+${gap}%* | ⏳ Janela: ${ttl}
+📈 Lag do alvo: *+${gap}%* | ⏳ Janela: ${ttl}
 
-⚡ _Cotação atrasada em relação à linha afiada. A casa tende a ajustar rápido — confira e aposte já se ainda estiver de pé._`;
+⚡ _A odd está CAINDO na linha afiada e o alvo ainda paga a antiga — tende a cair no alvo também. Confira/valide e aposte já se ainda estiver de pé._`;
 }
 
 export class CashoutNotifier {
