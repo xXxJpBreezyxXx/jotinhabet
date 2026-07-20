@@ -29,11 +29,17 @@ export class WhatsAppNotifier {
   private instanceName: string;
   private recipient: string;
 
-  constructor() {
+  /**
+   * @param recipientOverride destino alternativo (grupo/contato/número). Quando
+   * informado e não-vazio, substitui EVOLUTION_RECIPIENT — permite mandar alertas de
+   * módulos diferentes (ex.: Radar Cashout) para grupos distintos. Sem ele, mantém o
+   * comportamento antigo (EVOLUTION_RECIPIENT).
+   */
+  constructor(recipientOverride?: string) {
     this.apiUrl = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, ''); // Remove barra no final
     this.apiKey = process.env.EVOLUTION_API_KEY || '';
     this.instanceName = process.env.EVOLUTION_INSTANCE || '';
-    this.recipient = process.env.EVOLUTION_RECIPIENT || '';
+    this.recipient = (recipientOverride && recipientOverride.trim()) || process.env.EVOLUTION_RECIPIENT || '';
   }
 
   /**

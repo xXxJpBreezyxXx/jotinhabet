@@ -184,9 +184,92 @@ const CASAS_PADRAO = [
   'BetWarrior', 'Aposta1', 'Novibet', 'Sportingbet', 'SeuBet', 'Vbet', 'Pinnacle',
 ];
 
+/** Oportunidade do Radar Cashout, como devolvida por GET /api/cashout/opportunities. */
+interface CashoutOpportunity {
+  id: string;
+  event_label: string;
+  sport: string;
+  market_label: string;
+  selection_label: string;
+  target_name: string;
+  compass_fair_odd: number;
+  target_odd_value: number;
+  gap_pct: number;             // 0.05 = 5%
+  confirming_sources: string[];
+  ttl_estimated_seconds: number | null;
+  r_squared: number | null;
+  detected_at: string;
+  starts_at?: string | null;
+}
+
+interface CashoutStatus {
+  enabled: boolean;
+  running: boolean;
+  intervalSeconds: number;
+  sports: string[];
+  targets: string[];
+  compass: string;
+  minConfirmingSources: number;
+  trackedSeries: number;
+  lastCycle: { at: number; snapshots: number; opportunities: number; compassOdds: number };
+}
+
+/** Badge do gap/EV — verde forte >=8%, âmbar >=5%, cinza abaixo. */
+function CashoutGapBadge({ gapPct }: { gapPct: number }) {
+  const bg = gapPct >= 0.08 ? '#10b981' : gapPct >= 0.05 ? '#f59e0b' : '#64748b';
+  return (
+    <span style={{
+      background: bg, color: '#fff', fontSize: '12px', fontWeight: 700,
+      padding: '3px 10px', borderRadius: '999px', whiteSpace: 'nowrap',
+    }}>
+      +{(gapPct * 100).toFixed(1)}%
+    </span>
+  );
+}
+
+/** Countdown do TTL estimado — reinicia quando o valor de segundos muda (refresh). */
+function CashoutTTL({ seconds }: { seconds: number }) {
+  const [remaining, setRemaining] = useState(seconds);
+  useEffect(() => {
+    setRemaining(seconds);
+    const id = setInterval(() => setRemaining((r) => Math.max(r - 1, 0)), 1000);
+    return () => clearInterval(id);
+  }, [seconds]);
+  const urgente = remaining <= 15;
+  return (
+    <span style={{ color: urgente ? '#ef4444' : 'var(--text-muted)', fontWeight: 600, fontSize: '13px' }}>
+      ⏳ {remaining}s
+    </span>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
+
+  // Radar Cashout: oportunidades ativas + status do worker (polling só quando a aba está aberta).
+  const [cashoutOpps, setCashoutOpps] = useState<CashoutOpportunity[]>([]);
+  const [cashoutStatus, setCashoutStatus] = useState<CashoutStatus | null>(null);
+  const [cashoutLoading, setCashoutLoading] = useState(true);
+
+  useEffect(() => {
+    if (activeTab !== 'radar-cashout') return;
+    let vivo = true;
+    const puxar = () => {
+      fetch('/api/cashout/opportunities')
+        .then((r) => r.json())
+        .then((d) => { if (vivo) setCashoutOpps(Array.isArray(d.oportunidades) ? d.oportunidades : []); })
+        .catch(() => { /* mantém o último estado */ })
+        .finally(() => { if (vivo) setCashoutLoading(false); });
+      fetch('/api/cashout/status')
+        .then((r) => r.json())
+        .then((d) => { if (vivo) setCashoutStatus(d); })
+        .catch(() => { /* status é opcional */ });
+    };
+    puxar();
+    const id = setInterval(puxar, 5000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [activeTab]);
   
   // Real-time Calculator State
   const [calcOdd1, setCalcOdd1] = useState('2.00');
@@ -2091,32 +2174,80 @@ export default function App() {
         )}
 
         {activeTab === 'radar-cashout' && (
-          <div className="glass-panel" style={{
-            padding: '48px 24px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '16px',
-            textAlign: 'center',
-            minHeight: '320px'
-          }}>
-            <div style={{
-              width: '64px',
-              height: '64px',
-              borderRadius: '16px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'rgba(52, 211, 153, 0.12)',
-              color: 'var(--color-primary)'
-            }}>
-              <Radar size={32} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {/* Barra de status do worker */}
+            <div className="glass-panel" style={{ padding: '14px 18px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '18px', fontSize: '13px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                <span className={`indicator ${cashoutStatus?.running ? 'indicator-active' : 'indicator-error'}`}></span>
+                Captura {cashoutStatus?.running ? 'ativa' : (cashoutStatus?.enabled === false ? 'desligada' : 'iniciando…')}
+              </div>
+              {cashoutStatus && (
+                <>
+                  <span style={{ color: 'var(--text-muted)' }}>Bússola: <strong style={{ color: 'var(--text-secondary)' }}>{cashoutStatus.compass}</strong></span>
+                  <span style={{ color: 'var(--text-muted)' }}>Alvos: <strong style={{ color: 'var(--text-secondary)' }}>{cashoutStatus.targets.join(', ')}</strong></span>
+                  <span style={{ color: 'var(--text-muted)' }}>Ciclo: <strong style={{ color: 'var(--text-secondary)' }}>{cashoutStatus.intervalSeconds}s</strong></span>
+                  <span style={{ color: 'var(--text-muted)' }}>Séries: <strong style={{ color: 'var(--text-secondary)' }}>{cashoutStatus.trackedSeries}</strong></span>
+                  {cashoutStatus.lastCycle?.compassOdds === 0 && (
+                    <span style={{ color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <AlertCircle size={13} /> bússola sem odds (túnel?)
+                    </span>
+                  )}
+                </>
+              )}
             </div>
-            <h2 style={{ margin: 0, fontSize: '20px', color: 'var(--text-primary)' }}>Radar Cashout</h2>
-            <p style={{ margin: 0, maxWidth: '420px', color: 'var(--text-secondary)', fontSize: '14px' }}>
-              Em construção. Em breve esta seção vai monitorar oportunidades de cashout em tempo real.
-            </p>
+
+            {/* Grade de oportunidades / estados vazios */}
+            {cashoutLoading ? (
+              <div className="glass-panel" style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                <RefreshCw size={20} className="spin-anim" /> Carregando oportunidades…
+              </div>
+            ) : cashoutOpps.length === 0 ? (
+              <div className="glass-panel" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', textAlign: 'center', minHeight: '260px', justifyContent: 'center' }}>
+                <div style={{ width: '64px', height: '64px', borderRadius: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(52, 211, 153, 0.12)', color: 'var(--color-primary)' }}>
+                  <Radar size={32} />
+                </div>
+                <h2 style={{ margin: 0, fontSize: '18px', color: 'var(--text-primary)' }}>Nenhuma oportunidade ativa</h2>
+                <p style={{ margin: 0, maxWidth: '440px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+                  O radar segue monitorando a linha das bússolas. Oportunidades aparecem quando uma casa alvo demora a ajustar uma odd que já caiu na linha afiada.
+                </p>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+                {cashoutOpps.map((opp) => (
+                  <div key={opp.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' }}>
+                      <div>
+                        <p style={{ margin: 0, fontWeight: 700, color: 'var(--text-primary)', fontSize: '15px' }}>{opp.event_label}</p>
+                        <p style={{ margin: '2px 0 0', color: 'var(--text-muted)', fontSize: '12px' }}>
+                          {opp.sport} · {opp.market_label} · <strong style={{ color: 'var(--text-secondary)' }}>{opp.selection_label}</strong>
+                        </p>
+                      </div>
+                      <CashoutGapBadge gapPct={opp.gap_pct} />
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                      <div style={{ background: 'rgba(148,163,184,0.08)', borderRadius: '10px', padding: '10px 12px' }}>
+                        <p style={{ margin: 0, fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-muted)' }}>Odd Bússola (justa)</p>
+                        <p style={{ margin: '2px 0 0', fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)' }}>{opp.compass_fair_odd?.toFixed(2)}</p>
+                      </div>
+                      <div style={{ background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: '10px', padding: '10px 12px' }}>
+                        <p style={{ margin: 0, fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.04em', color: '#f59e0b' }}>Odd Desregulada</p>
+                        <p style={{ margin: '2px 0 0', fontSize: '20px', fontWeight: 700, color: '#fbbf24' }}>{opp.target_odd_value?.toFixed(2)}</p>
+                        <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'rgba(245,158,11,0.9)' }}>{opp.target_name}</p>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                        <TrendingUp size={14} style={{ color: 'var(--color-primary)' }} />
+                        {opp.confirming_sources?.join(', ')}
+                      </span>
+                      <CashoutTTL seconds={Math.max(opp.ttl_estimated_seconds ?? 0, 0)} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

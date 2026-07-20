@@ -19,6 +19,8 @@ import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
 import { SignalPipeline } from './signals/signalPipeline';
 import { TelegramIngestService } from './signals/telegramIngestService';
 import { regraPermiteOportunidade } from './arbitrage/regras';
+import { cashoutCapture } from './cashout/cashoutCapture';
+import { getActiveOpportunities } from './cashout/cashoutRepo';
 
 dotenv.config();
 
@@ -561,6 +563,25 @@ app.get('/api/logs', (req, res) => {
   }
 });
 
+// ============================ RADAR CASHOUT ============================
+// Módulo isolado (schema cashout_*). Trading pré-live por Dropping Odds: a bússola
+// (Pinnacle) define a linha justa e o worker detecta odds atrasadas nas casas alvo.
+
+// GET - Oportunidades de cashout ativas (mais "gordas" primeiro). [] se nada ativo.
+app.get('/api/cashout/opportunities', async (_req, res) => {
+  try {
+    const oportunidades = await getActiveOpportunities();
+    res.json({ oportunidades });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao obter oportunidades de cashout', oportunidades: [] });
+  }
+});
+
+// GET - Status do worker de captura (habilitado, intervalo, fontes, último ciclo).
+app.get('/api/cashout/status', (_req, res) => {
+  res.json(cashoutCapture.status());
+});
+
 // Start Server
 app.listen(port, () => {
   console.log(`🚀 JotinhaBet Backend running on http://localhost:${port}`);
@@ -581,6 +602,10 @@ app.listen(port, () => {
   // Monitor pós-partida: quando a partida de uma entrada termina, manda o WhatsApp
   // de GREEN (parabéns + lucro + banca). Ciclo de 15 min (timing não é crítico).
   new GreenMonitorService().start(900);
+
+  // Radar Cashout: worker de captura da série temporal de odds (bússola × alvos) e
+  // detecção de Dropping Odds. Guardado por CASHOUT_CAPTURE_ENABLED (default on).
+  cashoutCapture.start().catch((e) => console.error('❌ [Cashout] Falha ao iniciar captura:', e?.message || e));
 
   // Enriquecimento de IA é MANUAL (botão "Analisar IA") para poupar tokens/cota das APIs.
   // O worker automático fica desligado de propósito; a análise roda sob demanda via
