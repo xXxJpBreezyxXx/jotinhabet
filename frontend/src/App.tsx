@@ -965,6 +965,33 @@ export default function App() {
     }
   };
 
+  // Revalidação POR CARD (direto na lista do radar, sem abrir o modal) — reconsulta as
+  // odds ao vivo e mostra o ROI atual + status inline. Atualiza as odds/idade do card.
+  const [revalPorCard, setRevalPorCard] = useState<Record<string, any>>({});
+  const revalidarCard = async (id: string) => {
+    if (!id || id.includes('mock-')) return;
+    setRevalPorCard((m) => ({ ...m, [id]: { loading: true } }));
+    try {
+      const r = await fetch(`/api/opportunities/${id}/revalidate`, { method: 'POST' });
+      const data = await r.json();
+      const rv = data?.revalidacao;
+      if (data.success && rv) {
+        setRevalPorCard((m) => ({ ...m, [id]: { ...rv, loading: false } }));
+        setOpportunities((prev) => prev.map((o) => (o.id === id ? {
+          ...o,
+          odd_casa_1: typeof rv.odd_a === 'number' && rv.odd_a > 1 ? rv.odd_a : o.odd_casa_1,
+          odd_casa_2: typeof rv.odd_b === 'number' && rv.odd_b > 1 ? rv.odd_b : o.odd_casa_2,
+          roi_pct: typeof rv.roi_atual === 'number' ? rv.roi_atual : o.roi_pct,
+          revalidado_em: rv.checado_em,
+        } : o)));
+      } else {
+        setRevalPorCard((m) => ({ ...m, [id]: { loading: false, status: 'erro', movimento: { tipo: 'erro', explicacao: data.error || 'Falha ao revalidar' } } }));
+      }
+    } catch (e: any) {
+      setRevalPorCard((m) => ({ ...m, [id]: { loading: false, status: 'erro', movimento: { tipo: 'erro', explicacao: e.message || 'Falha de conexão' } } }));
+    }
+  };
+
   // Record bet operation (Lançar na banca)
   const handleRecordOperation = () => {
     if (!selectedOpp || !modalCalc) return;
@@ -2044,15 +2071,50 @@ export default function App() {
                                 </div>
                               </div>
                               
-                              <button 
-                                className="btn" 
-                                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--panel-border)', color: 'var(--text-primary)', alignSelf: 'flex-start' }}
-                                onClick={() => setSelectedOpp(opp)}
-                              >
-                                CALCULAR <ChevronRight size={14} />
-                              </button>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignSelf: 'flex-start' }}>
+                                <button
+                                  className="btn"
+                                  style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--panel-border)', color: 'var(--text-primary)' }}
+                                  onClick={() => setSelectedOpp(opp)}
+                                >
+                                  CALCULAR <ChevronRight size={14} />
+                                </button>
+                                {!opp.id.includes('mock-') && (
+                                  <button
+                                    className="btn"
+                                    disabled={revalPorCard[opp.id]?.loading}
+                                    onClick={() => revalidarCard(opp.id)}
+                                    style={{ background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.35)', color: '#34d399', fontSize: '12px', justifyContent: 'center' }}
+                                    title="Reconsultar as odds ao vivo nas casas (evita apostar em odd defasada)"
+                                  >
+                                    {revalPorCard[opp.id]?.loading ? <><RefreshCw size={13} className="spin-anim" /> Revalidando…</> : <><RefreshCw size={13} /> Revalidar</>}
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                            
+
+                            {(() => {
+                              const rv = revalPorCard[opp.id];
+                              if (!rv || rv.loading) return null;
+                              const mapa: Record<string, { t: string; c: string }> = {
+                                ok: { t: '✅ Ainda vale', c: '#10b981' },
+                                melhorou: { t: '📈 Melhorou', c: '#10b981' },
+                                reduzida: { t: '⚠️ Caiu', c: '#f59e0b' },
+                                expirada: { t: '❌ Expirou', c: '#ef4444' },
+                                nao_suportado: { t: 'ℹ️ Não revalidável nesta fonte', c: '#94a3b8' },
+                                erro: { t: '⚠️ Erro ao revalidar', c: '#f59e0b' },
+                              };
+                              const s = mapa[rv.status as string] || mapa.erro;
+                              const roi = typeof rv.roi_atual === 'number' ? ` · ROI ${rv.roi_atual.toFixed(2)}%` : '';
+                              const odds = typeof rv.odd_a === 'number' && typeof rv.odd_b === 'number' ? ` · ${rv.odd_a.toFixed(2)}/${rv.odd_b.toFixed(2)}` : '';
+                              const exp = (rv.status === 'erro' || rv.status === 'nao_suportado') && rv.movimento?.explicacao ? ` — ${rv.movimento.explicacao}` : '';
+                              return (
+                                <div style={{ fontSize: '12px', fontWeight: 700, color: s.c, padding: '6px 10px', background: 'rgba(148,163,184,0.06)', borderRadius: '8px' }}>
+                                  {s.t}{roi}{odds}{exp}
+                                </div>
+                              );
+                            })()}
+
                             {opp.analise_ia && (
                               <div style={{ marginTop: '8px', padding: '12px', background: 'rgba(148, 163, 184, 0.08)', border: '1px solid rgba(148, 163, 184, 0.18)', borderRadius: '10px', fontSize: '12px', color: '#cbd5e1' }}>
                                 <strong>🤖 Análise de Risco (IA):</strong><br/>
