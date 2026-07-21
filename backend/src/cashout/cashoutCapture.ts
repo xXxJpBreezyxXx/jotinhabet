@@ -17,6 +17,7 @@
 
 import { OddsScraper, ScrapedOdd } from '../scraping/scraper_base';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
+import { BetfairScraper } from '../scraping/casa_betfair';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { StakeScraper } from '../scraping/casa_stake';
 import { SuperbetScraper } from '../scraping/casa_superbet';
@@ -56,9 +57,9 @@ import {
 // Pinnacle é leve (API); 1xBet/Stake são pesadas (Chromium) — só habilitar com RAM livre.
 const COMPASS_FACTORY: Record<string, { heavy: boolean; make: () => OddsScraper }> = {
   Pinnacle: { heavy: false, make: () => new PinnacleScraper() },
+  Betfair: { heavy: false, make: () => new BetfairScraper() }, // exchange (API) — precisa conta .com + BETFAIR_PROXY
   '1xBet': { heavy: true, make: () => new OneXBetScraper() },
   Stake: { heavy: true, make: () => new StakeScraper() },
-  // Betfair: { heavy: false, make: () => new BetfairScraper() },
 };
 
 // Alvos leves por API disponíveis (todos sem Playwright). Configurável por CASHOUT_TARGETS.
