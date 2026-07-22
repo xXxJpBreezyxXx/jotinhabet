@@ -234,6 +234,70 @@ interface CashoutStatus {
   lastCycle: { at: number; snapshots: number; opportunities: number; compassOdds: number };
 }
 
+/** Aposta do usuário monitorada AO VIVO (GET /api/cashout/bets). */
+interface CashoutBet {
+  id: string;
+  casa: string;
+  sport: string;
+  event_label: string;
+  market_label: string;
+  selection: 'home' | 'away' | 'draw' | 'over' | 'under';
+  selection_label?: string | null;
+  line?: number | string | null;
+  odd_entrada: number | string;
+  stake?: number | string | null;
+  status: string;
+  last_fair_prob?: number | string | null;
+  last_fair_odd?: number | string | null;
+  last_house_odd?: number | string | null;
+  last_cashout_value?: number | string | null;
+  last_profit?: number | string | null;
+  last_drop_pct?: number | string | null;
+  last_signal?: boolean | null;
+  last_note?: string | null;
+  last_eval_at?: string | null;
+  starts_at?: string | null;
+  created_at?: string;
+}
+
+/** Nº seguro (PostgREST devolve numeric como string às vezes). */
+const num = (v: unknown): number | null => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+/** True quando o kickoff já passou (badge AO VIVO derivado do starts_at). */
+function ehAoVivo(startsAt?: string | null): boolean {
+  if (!startsAt) return false;
+  const t = Date.parse(startsAt);
+  return !isNaN(t) && t <= Date.now();
+}
+
+function AoVivoBadge() {
+  return (
+    <span style={{
+      background: '#ef4444', color: '#fff', fontSize: '10px', fontWeight: 800,
+      padding: '2px 7px', borderRadius: '999px', letterSpacing: '0.05em', whiteSpace: 'nowrap',
+    }}>● AO VIVO</span>
+  );
+}
+
+/** Data/horário do evento em pt-BR (America/Sao_Paulo), ex.: "21/07 20:00". null se ausente/inválido. */
+function fmtDataHora(iso?: string | null): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (isNaN(t)) return null;
+  try {
+    return new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(new Date(t)).replace(',', '');
+  } catch {
+    return null;
+  }
+}
+
 /** Badge do gap/EV — verde forte >=8%, âmbar >=5%, cinza abaixo. */
 function CashoutGapBadge({ gapPct }: { gapPct: number }) {
   const bg = gapPct >= 0.08 ? '#10b981' : gapPct >= 0.05 ? '#f59e0b' : '#64748b';
@@ -257,6 +321,114 @@ export default function App() {
   const [cashoutLoading, setCashoutLoading] = useState(true);
   // Resultado do "Verificar" por oportunidade (id → estado).
   const [cashoutVerif, setCashoutVerif] = useState<Record<string, CashoutVerificacao>>({});
+
+  // "Minhas Apostas": apostas cadastradas + casas com odd ao vivo + estado do formulário.
+  const [cashoutBets, setCashoutBets] = useState<CashoutBet[]>([]);
+  const [casasLive, setCasasLive] = useState<string[]>([]);
+  const [betMonitorLoading, setBetMonitorLoading] = useState<Record<string, boolean>>({});
+  const [betSubmitting, setBetSubmitting] = useState(false);
+  const [betError, setBetError] = useState<string | null>(null);
+  const [betForm, setBetForm] = useState({
+    casa: 'KTO', sport: 'Futebol', event_label: '',
+    mercado: 'Resultado Final', selection: 'home', line: '', odd_entrada: '', stake: '',
+  });
+  // Estado do botão "Monitorar ao vivo" por oportunidade (promoção → Minhas Apostas).
+  const [cashoutPromo, setCashoutPromo] = useState<Record<string, 'idle' | 'form' | 'loading' | 'done' | 'error'>>({});
+  // Inputs do mini-formulário de promoção (odd de entrada REAL do usuário + stake).
+  const [promoInputs, setPromoInputs] = useState<Record<string, { odd: string; stake: string }>>({});
+
+  const carregarBets = () => {
+    fetch('/api/cashout/bets')
+      .then((r) => r.json())
+      .then((d) => {
+        setCashoutBets(Array.isArray(d.apostas) ? d.apostas : []);
+        if (Array.isArray(d.casasComFonteLive)) setCasasLive(d.casasComFonteLive);
+      })
+      .catch(() => { /* mantém o último estado */ });
+  };
+
+  const criarBet = (e: React.FormEvent) => {
+    e.preventDefault();
+    setBetError(null);
+    const teams = betForm.event_label.split(/\s+vs\.?\s+/i);
+    const timeA = (teams[0] || '').trim();
+    const timeB = (teams[1] || '').trim();
+    if (!timeA || !timeB) { setBetError('Confronto deve estar no formato "Time A vs Time B".'); return; }
+    const odd = Number(betForm.odd_entrada);
+    if (!Number.isFinite(odd) || odd <= 1) { setBetError('Odd de entrada deve ser um decimal > 1 (ex.: 2.75).'); return; }
+
+    // Mercado normalizável na mesma família da bússola (Total por esporte).
+    let market_label = betForm.mercado;
+    if (betForm.mercado === 'Total') {
+      market_label = betForm.sport === 'Basquete' ? 'Total de Pontos'
+        : betForm.sport === 'Tenis' ? 'Total de Games'
+        : betForm.sport === 'Esports' ? 'Total de Mapas'
+        : 'Total de Gols';
+    }
+    let selection_label = '';
+    if (betForm.selection === 'home') selection_label = timeA;
+    else if (betForm.selection === 'away') selection_label = timeB;
+    else if (betForm.selection === 'draw') selection_label = 'Empate';
+    else if (betForm.selection === 'over') selection_label = `Mais de ${betForm.line}`;
+    else if (betForm.selection === 'under') selection_label = `Menos de ${betForm.line}`;
+
+    setBetSubmitting(true);
+    fetch('/api/cashout/bets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        casa: betForm.casa, sport: betForm.sport, event_label: `${timeA} vs ${timeB}`,
+        market_label, selection: betForm.selection, selection_label,
+        line: betForm.line || null, odd_entrada: odd, stake: betForm.stake || null,
+      }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d.ok) { setBetError(d.error || 'Falha ao salvar.'); return; }
+        setBetForm((f) => ({ ...f, event_label: '', line: '', odd_entrada: '', stake: '' }));
+        carregarBets();
+      })
+      .catch(() => setBetError('Falha de rede ao salvar a aposta.'))
+      .finally(() => setBetSubmitting(false));
+  };
+
+  const excluirBet = (id: string) => {
+    setCashoutBets((bs) => bs.filter((b) => b.id !== id));
+    fetch(`/api/cashout/bets/${id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
+  };
+
+  const monitorarBet = (id: string) => {
+    setBetMonitorLoading((m) => ({ ...m, [id]: true }));
+    fetch(`/api/cashout/bets/${id}/monitorar`)
+      .then((r) => r.json())
+      .then((d) => { if (d?.ok) setCashoutBets((bs) => bs.map((b) => (b.id === id ? { ...b, ...d.avaliacao } : b))); })
+      .catch(() => { /* mantém */ })
+      .finally(() => setBetMonitorLoading((m) => ({ ...m, [id]: false })));
+  };
+
+  // "Monitorar ao vivo": abre o mini-form pra o usuário confirmar a odd que ELE pegou
+  // (pré-preenchida com a odd do alvo) e o stake, antes de promover p/ Minhas Apostas.
+  const abrirPromo = (opp: CashoutOpportunity) => {
+    setPromoInputs((p) => ({ ...p, [opp.id]: { odd: opp.target_odd_value != null ? String(opp.target_odd_value) : '', stake: '' } }));
+    setCashoutPromo((p) => ({ ...p, [opp.id]: 'form' }));
+  };
+
+  // Confirma a promoção com a odd/stake informados (o worker passa a rastrear ao vivo e
+  // avisar no WhatsApp o movimento + a hora de sacar).
+  const confirmarPromo = (id: string) => {
+    const inp = promoInputs[id] || { odd: '', stake: '' };
+    setCashoutPromo((p) => ({ ...p, [id]: 'loading' }));
+    fetch(`/api/cashout/opportunities/${id}/monitorar`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ odd_entrada: inp.odd || undefined, stake: inp.stake || undefined }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        setCashoutPromo((p) => ({ ...p, [id]: d?.ok ? 'done' : 'error' }));
+        if (d?.ok) carregarBets(); // aparece na hora em Minhas Apostas
+      })
+      .catch(() => setCashoutPromo((p) => ({ ...p, [id]: 'error' })));
+  };
 
   const validarCashout = (id: string) => {
     setCashoutVerif((v) => ({ ...v, [id]: { loading: true } }));
@@ -284,6 +456,7 @@ export default function App() {
         .then((r) => r.json())
         .then((d) => { if (vivo) setCashoutStatus(d); })
         .catch(() => { /* status é opcional */ });
+      if (vivo) carregarBets();
     };
     puxar();
     const id = setInterval(puxar, 5000);
@@ -2277,6 +2450,159 @@ export default function App() {
               )}
             </div>
 
+            {/* ===================== MINHAS APOSTAS (cashout ao vivo) ===================== */}
+            <div className="glass-panel" style={{ padding: '18px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                <h3 style={{ margin: 0, fontSize: '16px', color: 'var(--text-primary)' }}>💰 Minhas Apostas</h3>
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>rastreio AO VIVO — quanto vale e quando sacar</span>
+              </div>
+
+              <form onSubmit={criarBet} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px', alignItems: 'end' }}>
+                <div className="form-group">
+                  <label>Casa</label>
+                  <select className="form-control" value={betForm.casa} onChange={(e) => setBetForm((f) => ({ ...f, casa: e.target.value }))}>
+                    {CASAS_PADRAO.map((c) => (
+                      <option key={c} value={c}>{c}{casasLive.includes(c) ? ' • ao vivo' : ''}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Esporte</label>
+                  <select className="form-control" value={betForm.sport} onChange={(e) => setBetForm((f) => ({ ...f, sport: e.target.value }))}>
+                    {['Futebol', 'Basquete', 'Tenis', 'Esports'].map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="form-group" style={{ gridColumn: 'span 2', minWidth: '220px' }}>
+                  <label>Confronto (Time A vs Time B)</label>
+                  <input className="form-control" placeholder="Ex.: Flamengo vs Palmeiras" value={betForm.event_label} onChange={(e) => setBetForm((f) => ({ ...f, event_label: e.target.value }))} />
+                </div>
+                <div className="form-group">
+                  <label>Mercado</label>
+                  <select className="form-control" value={betForm.mercado} onChange={(e) => { const m = e.target.value; setBetForm((f) => ({ ...f, mercado: m, selection: m === 'Total' ? 'over' : 'home' })); }}>
+                    <option value="Resultado Final">Resultado Final (2 vias)</option>
+                    <option value="Total">Total (Over/Under)</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Seleção</label>
+                  <select className="form-control" value={betForm.selection} onChange={(e) => setBetForm((f) => ({ ...f, selection: e.target.value }))}>
+                    {betForm.mercado === 'Total' ? (
+                      <>
+                        <option value="over">Mais (Over)</option>
+                        <option value="under">Menos (Under)</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="home">Time A (mandante)</option>
+                        <option value="away">Time B (visitante)</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+                {betForm.mercado === 'Total' && (
+                  <div className="form-group">
+                    <label>Linha</label>
+                    <input className="form-control" type="number" step="0.5" placeholder="2.5" value={betForm.line} onChange={(e) => setBetForm((f) => ({ ...f, line: e.target.value }))} />
+                  </div>
+                )}
+                <div className="form-group">
+                  <label>Odd de entrada</label>
+                  <input className="form-control" type="number" step="0.01" placeholder="2.75" value={betForm.odd_entrada} onChange={(e) => setBetForm((f) => ({ ...f, odd_entrada: e.target.value }))} />
+                </div>
+                <div className="form-group">
+                  <label>Stake R$ (opcional)</label>
+                  <input className="form-control" type="number" step="0.01" placeholder="100" value={betForm.stake} onChange={(e) => setBetForm((f) => ({ ...f, stake: e.target.value }))} />
+                </div>
+                <button type="submit" className="btn btn-primary" disabled={betSubmitting} style={{ justifyContent: 'center' }}>
+                  {betSubmitting ? <><RefreshCw size={14} className="spin-anim" /> Salvando…</> : '+ Adicionar aposta'}
+                </button>
+              </form>
+
+              {betError && <p style={{ color: '#ef4444', fontSize: '13px', margin: '10px 0 0' }}>{betError}</p>}
+              <p style={{ color: 'var(--text-muted)', fontSize: '11px', margin: '10px 0 0' }}>
+                O <strong>Valor (justo)</strong> é calculado pela linha AFIADA (Pinnacle), não pela odd da casa — é o valor real da sua posição. A odd/oferta da casa aparece como referência (e avisa quando a casa paga <em>abaixo do justo</em>).
+                Odd ao vivo da casa integrada: <strong>{casasLive.length ? casasLive.join(', ') : '—'}</strong> (nas demais só o valor justo).
+                Futebol 1X2 (3 vias) não tem cálculo — use 2 vias (tênis/basquete/e-sports) ou Total.
+              </p>
+
+              {/* Cards das apostas */}
+              {cashoutBets.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '14px', marginTop: '16px' }}>
+                  {cashoutBets.map((bet) => {
+                    const oddEnt = num(bet.odd_entrada);
+                    const stake = num(bet.stake);
+                    const fairOdd = num(bet.last_fair_odd);
+                    const drop = num(bet.last_drop_pct);
+                    const saque = num(bet.last_cashout_value);   // valor JUSTO (Pinnacle)
+                    const profit = num(bet.last_profit);
+                    const houseOdd = num(bet.last_house_odd);
+                    // Oferta estimada da própria casa (referência): stake × odd_entrada / odd_casa × (1 - margem 6%).
+                    const houseCash = houseOdd != null && oddEnt != null && stake != null ? (stake * oddEnt / houseOdd) * 0.94 : null;
+                    const sinal = bet.last_signal === true;
+                    const idade = bet.last_eval_at ? `${Math.max(0, Math.round((Date.now() - Date.parse(bet.last_eval_at)) / 1000))}s` : null;
+                    const loadingMon = betMonitorLoading[bet.id];
+                    return (
+                      <div key={bet.id} className="glass-panel" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px', border: sinal ? '1px solid var(--color-success)' : undefined }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                              <p style={{ margin: 0, fontWeight: 700, color: 'var(--text-primary)', fontSize: '14px' }}>{bet.event_label}</p>
+                              {ehAoVivo(bet.starts_at) && <AoVivoBadge />}
+                            </div>
+                            <p style={{ margin: '2px 0 0', color: 'var(--text-muted)', fontSize: '12px' }}>
+                              {bet.sport} · {bet.market_label} · <strong style={{ color: 'var(--text-secondary)' }}>{bet.selection_label || bet.selection}</strong> · {bet.casa}
+                            </p>
+                          </div>
+                          <button onClick={() => excluirBet(bet.id)} title="Excluir aposta" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '2px', display: 'flex' }}>
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                          <div style={{ background: 'rgba(148,163,184,0.08)', borderRadius: '8px', padding: '8px' }}>
+                            <p style={{ margin: 0, fontSize: '9px', textTransform: 'uppercase', color: 'var(--text-muted)' }}>Entrada</p>
+                            <p style={{ margin: '2px 0 0', fontSize: '17px', fontWeight: 700, color: 'var(--text-primary)' }}>{oddEnt?.toFixed(2) ?? '—'}</p>
+                            {stake != null && <p style={{ margin: 0, fontSize: '10px', color: 'var(--text-muted)' }}>R$ {stake.toFixed(2)}</p>}
+                          </div>
+                          <div style={{ background: 'rgba(52,211,153,0.10)', borderRadius: '8px', padding: '8px' }}>
+                            <p style={{ margin: 0, fontSize: '9px', textTransform: 'uppercase', color: 'var(--color-primary)' }}>Justa agora</p>
+                            <p style={{ margin: '2px 0 0', fontSize: '17px', fontWeight: 700, color: 'var(--text-primary)' }}>{fairOdd?.toFixed(2) ?? '—'}</p>
+                            {drop != null && <p style={{ margin: 0, fontSize: '10px', color: drop > 0 ? 'var(--color-success)' : '#ef4444' }}>{drop > 0 ? '↓' : '↑'} {(Math.abs(drop) * 100).toFixed(1)}%</p>}
+                          </div>
+                          <div style={{ background: 'rgba(245,158,11,0.10)', borderRadius: '8px', padding: '8px' }}>
+                            <p style={{ margin: 0, fontSize: '9px', textTransform: 'uppercase', color: '#f59e0b' }} title="Valor da posição pela linha JUSTA (Pinnacle)">Valor (justo)</p>
+                            <p style={{ margin: '2px 0 0', fontSize: '17px', fontWeight: 700, color: '#fbbf24' }}>{saque != null ? `R$ ${saque.toFixed(2)}` : '—'}</p>
+                            {profit != null && <p style={{ margin: 0, fontSize: '10px', color: profit >= 0 ? 'var(--color-success)' : '#ef4444' }}>{profit >= 0 ? '+' : ''}R$ {profit.toFixed(2)}</p>}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 700, color: sinal ? 'var(--color-success)' : 'var(--text-muted)' }}>
+                            {sinal ? '🟢 SACAR AGORA' : '⚪ segurar'}
+                          </span>
+                          {houseOdd != null && (
+                            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                              casa @ {houseOdd.toFixed(2)}{houseCash != null ? ` · saque ~R$ ${houseCash.toFixed(2)}` : ''}
+                              {houseCash != null && saque != null && houseCash < saque - 0.01 && (
+                                <span style={{ color: '#f59e0b' }}> ⚠️ abaixo do justo</span>
+                              )}
+                            </span>
+                          )}
+                          {idade && <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>há {idade}</span>}
+                        </div>
+
+                        {bet.last_note && <p style={{ margin: 0, fontSize: '11px', color: '#f59e0b' }}>{bet.last_note}</p>}
+
+                        <button className="btn btn-secondary" onClick={() => monitorarBet(bet.id)} disabled={loadingMon} style={{ width: '100%', justifyContent: 'center', fontSize: '12px' }}>
+                          {loadingMon ? <><RefreshCw size={13} className="spin-anim" /> Consultando ao vivo…</> : <><RefreshCw size={13} /> Monitorar agora</>}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {/* Grade de oportunidades / estados vazios */}
             {cashoutLoading ? (
               <div className="glass-panel" style={{ padding: '48px', textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -2302,9 +2628,16 @@ export default function App() {
                   <div key={opp.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' }}>
                       <div>
-                        <p style={{ margin: 0, fontWeight: 700, color: 'var(--text-primary)', fontSize: '15px' }}>{opp.event_label}</p>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <p style={{ margin: 0, fontWeight: 700, color: 'var(--text-primary)', fontSize: '15px' }}>{opp.event_label}</p>
+                          {ehAoVivo(opp.starts_at) && <AoVivoBadge />}
+                        </div>
                         <p style={{ margin: '2px 0 0', color: 'var(--text-muted)', fontSize: '12px' }}>
                           {opp.sport} · {opp.market_label} · <strong style={{ color: 'var(--text-secondary)' }}>{opp.selection_label}</strong>
+                        </p>
+                        <p style={{ margin: '3px 0 0', color: 'var(--text-muted)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          🕒 {fmtDataHora(opp.starts_at) ?? 'horário não informado'}
+                          {ehAoVivo(opp.starts_at) && <span style={{ color: '#ef4444', fontWeight: 700 }}>· em andamento</span>}
                         </p>
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -2344,8 +2677,45 @@ export default function App() {
                       </span>
                     </div>
 
-                    {/* Verificar: rebusca a odd atual da casa desregulada */}
-                    <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '10px' }}>
+                    {/* Ações: monitorar ao vivo (promove p/ Minhas Apostas) + validar odd */}
+                    <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {cashoutPromo[opp.id] === 'form' ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', background: 'rgba(52,211,153,0.06)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: '10px', padding: '10px' }}>
+                          <p style={{ margin: 0, fontSize: '11px', color: 'var(--text-muted)' }}>Confirme a odd que <strong>você pegou</strong> e o valor apostado:</p>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                              <label style={{ fontSize: '10px' }}>Odd de entrada</label>
+                              <input className="form-control" type="number" step="0.01" value={promoInputs[opp.id]?.odd ?? ''}
+                                onChange={(e) => setPromoInputs((p) => ({ ...p, [opp.id]: { odd: e.target.value, stake: p[opp.id]?.stake ?? '' } }))} />
+                            </div>
+                            <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                              <label style={{ fontSize: '10px' }}>Stake R$</label>
+                              <input className="form-control" type="number" step="0.01" placeholder="opcional" value={promoInputs[opp.id]?.stake ?? ''}
+                                onChange={(e) => setPromoInputs((p) => ({ ...p, [opp.id]: { odd: p[opp.id]?.odd ?? '', stake: e.target.value } }))} />
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <button className="btn btn-primary" onClick={() => confirmarPromo(opp.id)} style={{ flex: 1, justifyContent: 'center', fontSize: '12px' }}>Confirmar</button>
+                            <button className="btn btn-secondary" onClick={() => setCashoutPromo((p) => ({ ...p, [opp.id]: 'idle' }))} style={{ flex: 1, justifyContent: 'center', fontSize: '12px' }}>Cancelar</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          className="btn btn-primary"
+                          onClick={() => abrirPromo(opp)}
+                          disabled={cashoutPromo[opp.id] === 'loading' || cashoutPromo[opp.id] === 'done'}
+                          style={{ width: '100%', justifyContent: 'center', fontSize: '13px' }}
+                        >
+                          {cashoutPromo[opp.id] === 'loading'
+                            ? <><RefreshCw size={14} className="spin-anim" /> Adicionando…</>
+                            : cashoutPromo[opp.id] === 'done'
+                              ? <>✓ Monitorando em Minhas Apostas</>
+                              : <><Radar size={14} /> Monitorar ao vivo</>}
+                        </button>
+                      )}
+                      {cashoutPromo[opp.id] === 'error' && (
+                        <span style={{ fontSize: '11px', color: '#ef4444', textAlign: 'center' }}>Falha ao adicionar — tente de novo.</span>
+                      )}
                       <button
                         className="btn btn-secondary"
                         onClick={() => validarCashout(opp.id)}

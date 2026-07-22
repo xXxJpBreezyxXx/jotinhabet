@@ -20,9 +20,15 @@ const ROTAS_BETANO: Record<string, string> = {
 
 export class BetanoScraper extends ScraperBase {
   private urlBase = 'https://www.betano.bet.br';
+  // Radar Cashout: quando true, a busca dirigida também varre o HUB AO VIVO (/live/)
+  // para achar o link /odds/ de um confronto já em andamento. Só é usada pelo monitor
+  // por-aposta (1 evento por vez) — NUNCA no loop do cashoutCapture (Playwright é pesado
+  // na VPS 1-core). A revalidação de surebet constrói SEM a opção (segue só pré-jogo).
+  private incluirAoVivo: boolean;
 
-  constructor() {
+  constructor(opts?: { incluirAoVivo?: boolean }) {
     super('Betano');
+    this.incluirAoVivo = !!opts?.incluirAoVivo;
   }
 
   protected async inicializarNavegador(headless: boolean): Promise<void> {
@@ -261,18 +267,30 @@ export class BetanoScraper extends ScraperBase {
    */
   async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
     const esportes = esporte && ROTAS_BETANO[esporte] ? [esporte] : Object.keys(ROTAS_BETANO);
+
+    // Páginas onde procurar o link /odds/ do confronto. Pré-jogo: as listas por esporte.
+    // Ao vivo (cashout): tenta ANTES o hub /live/ (todos os esportes), depois cai nas
+    // listas de hoje — a página /odds/{id} mostra a odd AO VIVO independentemente.
+    const paginas: { url: string; esp: string }[] = [];
+    if (this.incluirAoVivo) {
+      paginas.push({ url: `${this.urlBase}/live/`, esp: esporte || esportes[0] || 'Futebol' });
+    }
+    for (const esp of esportes) {
+      const rota = ROTAS_BETANO[esp];
+      if (rota) paginas.push({ url: `${this.urlBase}/${rota}`, esp });
+    }
+
     try {
       await this.inicializarNavegador(true);
       if (!this.context) throw new Error('Betano: contexto não inicializado na revalidação');
       const page = this.context.pages()[0] || await this.context.newPage();
       let listaCarregou = false;
-      for (const esp of esportes) {
-        const rota = ROTAS_BETANO[esp];
-        if (!rota) continue;
+      for (const { url: pagina, esp } of paginas) {
         let links: string[];
         try {
-          await page.goto(`${this.urlBase}/${rota}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await page.waitForTimeout(2000);
+          await page.goto(pagina, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          // Hub ao vivo é SPA e carrega os cards por JS — dá mais tempo/rolagem.
+          await page.waitForTimeout(this.incluirAoVivo && /\/live\//.test(pagina) ? 3500 : 2000);
           await this.resolverPopups(page);
           links = await page.evaluate(() =>
             Array.from(document.querySelectorAll('a'))
@@ -280,7 +298,7 @@ export class BetanoScraper extends ScraperBase {
               .filter((href) => href.includes('/odds/'))
           );
         } catch {
-          continue; // falha só neste esporte; se todos falharem, cai no throw de infra
+          continue; // falha só nesta página; se todas falharem, cai no throw de infra
         }
         const uniq = [...new Set(links)];
         if (uniq.length) listaCarregou = true;

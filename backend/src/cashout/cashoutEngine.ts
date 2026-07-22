@@ -195,3 +195,114 @@ export function estimateTTL(
   const baseline = targetAvgUpdateLatencySeconds ?? 60;
   return Math.max(baseline - secondsSinceTrendConfirmed, 0);
 }
+
+// ============================================================================
+// CASHOUT DE UMA APOSTA JÁ FEITA (rastreio "Minha aposta")
+// ----------------------------------------------------------------------------
+// Diferente do scanner de oportunidades (bússola × alvo), aqui o usuário TEM uma
+// aposta travada (odd de entrada) e quer saber, AO VIVO, quanto ela vale e se é
+// hora de sacar. A referência de valor é a prob JUSTA ao vivo da bússola.
+//
+// ⚠️ A casa (KTO/Betano/bet365) calcula a oferta de cashout internamente e NÃO
+// dá pra ler o valor do botão pelos feeds; entregamos (a) o valor JUSTO da posição
+// (decisão) e (b) uma ESTIMATIVA da oferta da casa a partir da odd ao vivo da mesma
+// seleção. hedgeToLock é a alternativa sem depender do botão: bancar o lado oposto.
+// ============================================================================
+
+export interface CashoutPosition {
+  stake: number;                 // valor apostado (0 quando não informado — %s ainda valem)
+  oddEntrada: number;            // odd decimal travada na entrada
+  fairProbNow: number;           // prob JUSTA ao vivo (de-vigged da bússola), 0..1
+  oddCasaNow?: number | null;    // odd atual da MESMA seleção na casa (p/ estimar a oferta)
+  oddOpostoNow?: number | null;  // odd atual do lado OPOSTO (p/ hedge/greenup)
+}
+
+export interface CashoutEstimateConfig {
+  houseMargin: number;   // haircut aplicado à oferta estimada da casa (0.06 = -6%)
+  signalDropPct: number; // queda mínima da odd desde a entrada p/ sinalizar "sacar"
+}
+
+// Defaults calibráveis por env (o monitor passa os overrides).
+export const CASHOUT_ESTIMATE_CONFIG: CashoutEstimateConfig = {
+  houseMargin: 0.06,
+  signalDropPct: 0.05,
+};
+
+export interface HedgeSuggestion {
+  oddOposto: number;
+  stakeHedge: number;    // quanto bancar no lado oposto p/ igualar o retorno
+  lucroTravado: number;  // lucro garantido em QUALQUER resultado (mesma unidade do stake)
+}
+
+export interface CashoutEstimate {
+  valida: boolean;
+  fairProbNow: number;
+  fairOddNow: number;           // 1/fairProbNow (odd justa ao vivo)
+  dropPctSinceEntry: number;    // (oddEntrada - fairOddNow)/oddEntrada; >0 = odd CAIU (bom p/ back)
+  fairValue: number;            // stake * oddEntrada * fairProbNow (valor verdadeiro da posição)
+  fairProfit: number;           // fairValue - stake
+  houseCashout: number | null;  // estimativa da oferta da casa (null sem oddCasaNow)
+  houseProfit: number | null;   // houseCashout - stake
+  emLucro: boolean;             // a odd afiada caiu abaixo da de entrada (posição no lucro)
+  sacarAgora: boolean;          // sinal: a odd caiu o suficiente desde a entrada
+  hedge: HedgeSuggestion | null;
+}
+
+/**
+ * Hedge/greenup: bancar o lado OPOSTO na odd ao vivo p/ travar lucro sem depender do
+ * botão de cashout da casa. Iguala o retorno nos dois resultados:
+ *   stakeHedge = stake * oddEntrada / oddOposto   → retorno igual = stake*oddEntrada
+ *   lucroTravado = stake*oddEntrada - (stake + stakeHedge)   (retorno − total apostado)
+ * Nos preços JUSTOS do oposto (1/(1-p)) o lucro travado converge p/ o fairProfit.
+ */
+export function hedgeToLock(stake: number, oddEntrada: number, oddOpostoNow: number): HedgeSuggestion | null {
+  if (!Number.isFinite(stake) || stake <= 0) return null;
+  if (!Number.isFinite(oddEntrada) || oddEntrada <= 1) return null;
+  if (!Number.isFinite(oddOpostoNow) || oddOpostoNow <= 1) return null;
+  const retorno = stake * oddEntrada;
+  const stakeHedge = retorno / oddOpostoNow;
+  const lucroTravado = retorno - (stake + stakeHedge);
+  return { oddOposto: oddOpostoNow, stakeHedge, lucroTravado };
+}
+
+/**
+ * Avalia AO VIVO uma aposta já feita. Puro (sem I/O). A prob justa vem da bússola
+ * de-vigged ao vivo. `valida=false` para entradas impossíveis (não quebra o monitor).
+ */
+export function estimateCashout(
+  pos: CashoutPosition,
+  cfg: CashoutEstimateConfig = CASHOUT_ESTIMATE_CONFIG
+): CashoutEstimate {
+  const stake = Number.isFinite(pos.stake) && pos.stake > 0 ? pos.stake : 0;
+  const vazio: CashoutEstimate = {
+    valida: false, fairProbNow: 0, fairOddNow: 0, dropPctSinceEntry: 0,
+    fairValue: 0, fairProfit: 0, houseCashout: null, houseProfit: null,
+    emLucro: false, sacarAgora: false, hedge: null,
+  };
+  if (!Number.isFinite(pos.oddEntrada) || pos.oddEntrada <= 1) return vazio;
+  if (!Number.isFinite(pos.fairProbNow) || pos.fairProbNow <= 0 || pos.fairProbNow >= 1) return vazio;
+
+  const fairProbNow = pos.fairProbNow;
+  const fairOddNow = 1 / fairProbNow;
+  const dropPctSinceEntry = (pos.oddEntrada - fairOddNow) / pos.oddEntrada; // >0 = odd caiu
+  const fairValue = stake * pos.oddEntrada * fairProbNow;
+  const fairProfit = fairValue - stake;
+
+  let houseCashout: number | null = null;
+  let houseProfit: number | null = null;
+  if (Number.isFinite(pos.oddCasaNow as number) && (pos.oddCasaNow as number) > 1 && stake > 0) {
+    houseCashout = (stake * pos.oddEntrada) / (pos.oddCasaNow as number) * (1 - cfg.houseMargin);
+    houseProfit = houseCashout - stake;
+  }
+
+  const emLucro = pos.oddEntrada * fairProbNow > 1; // ⇔ fairOddNow < oddEntrada ⇔ dropPctSinceEntry > 0
+  const sacarAgora = dropPctSinceEntry >= cfg.signalDropPct;
+  const hedge = Number.isFinite(pos.oddOpostoNow as number) && stake > 0
+    ? hedgeToLock(stake, pos.oddEntrada, pos.oddOpostoNow as number)
+    : null;
+
+  return {
+    valida: true, fairProbNow, fairOddNow, dropPctSinceEntry,
+    fairValue, fairProfit, houseCashout, houseProfit, emLucro, sacarAgora, hedge,
+  };
+}

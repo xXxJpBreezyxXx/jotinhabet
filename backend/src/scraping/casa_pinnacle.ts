@@ -90,6 +90,14 @@ interface PinMatchup {
 
 export class PinnacleScraper implements OddsScraper {
   private maxEventosPorEsporte = 80;
+  // Radar Cashout: quando true, NÃO descarta partidas ao vivo/iniciadas (mantém a
+  // bússola visível após o kickoff). O scanner de surebets constrói SEM esta opção
+  // (segue só pré-jogo — não fazemos surebet ao vivo). Ver plano do cashout ao vivo.
+  private incluirAoVivo: boolean;
+
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    this.incluirAoVivo = !!opts?.incluirAoVivo;
+  }
 
   getNome(): string {
     return 'Pinnacle';
@@ -156,13 +164,16 @@ export class PinnacleScraper implements OddsScraper {
         const matchups: PinMatchup[] = JSON.parse(rMatch.body);
         const alvo = matchups
           .filter((m) => {
-            // Mesmos filtros da varredura: raiz, 2 participantes, NÃO ao vivo, pré-jogo.
-            if (m.parentId || (m.participants?.length || 0) < 2 || m.isLive) return false;
-            const t = Date.parse(m.startTime || '');
-            if (!isNaN(t) && t <= Date.now()) return false;
+            // Raiz + 2 participantes sempre. Pré-jogo/ao vivo conforme incluirAoVivo
+            // (cashout ao vivo mantém live; surebet segue só pré-jogo).
+            if (m.parentId || (m.participants?.length || 0) < 2) return false;
             const home = m.participants!.find((p) => p.alignment === 'home')?.name;
             const away = m.participants!.find((p) => p.alignment === 'away')?.name;
-            return !!home && !!away && areEventsSame(`${home} vs ${away}`, evento);
+            if (!home || !away || !areEventsSame(`${home} vs ${away}`, evento)) return false;
+            if (this.incluirAoVivo) return true;
+            if (m.isLive) return false;
+            const t = Date.parse(m.startTime || '');
+            return isNaN(t) || t > Date.now();
           })
           .slice(0, 2);
         const odds: ScrapedOdd[] = [];
@@ -192,7 +203,9 @@ export class PinnacleScraper implements OddsScraper {
     const agora = Date.now();
     const eventos = matchups
       .filter((m) => {
-        if (m.parentId || (m.participants?.length || 0) < 2 || m.isLive) return false;
+        if (m.parentId || (m.participants?.length || 0) < 2) return false;
+        if (this.incluirAoVivo) return true; // cashout ao vivo: mantém live + pré-jogo
+        if (m.isLive) return false;
         const t = Date.parse(m.startTime || '');
         return isNaN(t) || t > agora;
       })

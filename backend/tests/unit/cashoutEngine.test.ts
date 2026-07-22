@@ -5,6 +5,8 @@ import {
   evaluateCompassTrend,
   detectOpportunity,
   estimateTTL,
+  estimateCashout,
+  hedgeToLock,
   CASHOUT_CONFIG,
   type OddPoint,
   type CompassTrend,
@@ -156,5 +158,87 @@ describe('estimateTTL', () => {
   });
   it('fallback 60s quando não há latência histórica', () => {
     expect(estimateTTL(null, 10)).toBe(50);
+  });
+});
+
+describe('estimateCashout', () => {
+  // Apostou R$100 a 2.75. A odd JUSTA caiu para ~2.20 (fairProb ~0.4545): posição no lucro.
+  it('odd caiu desde a entrada → no lucro, saque > stake, sinal de sacar', () => {
+    const e = estimateCashout({ stake: 100, oddEntrada: 2.75, fairProbNow: 1 / 2.2 });
+    expect(e.valida).toBe(true);
+    expect(e.fairOddNow).toBeCloseTo(2.2, 6);
+    expect(e.dropPctSinceEntry).toBeGreaterThan(0); // (2.75-2.20)/2.75 = 20%
+    expect(e.dropPctSinceEntry).toBeCloseTo(0.2, 6);
+    expect(e.emLucro).toBe(true);
+    expect(e.sacarAgora).toBe(true);
+    // valor justo = 100*2.75*(1/2.2) = 125; lucro = 25
+    expect(e.fairValue).toBeCloseTo(125, 6);
+    expect(e.fairProfit).toBeCloseTo(25, 6);
+  });
+
+  it('odd subiu desde a entrada → sem lucro, saque < stake, não sinaliza', () => {
+    // fairOddNow 3.30 > entrada 2.75 → a seleção ficou MENOS provável
+    const e = estimateCashout({ stake: 100, oddEntrada: 2.75, fairProbNow: 1 / 3.3, oddCasaNow: 3.3 });
+    expect(e.valida).toBe(true);
+    expect(e.dropPctSinceEntry).toBeLessThan(0);
+    expect(e.emLucro).toBe(false);
+    expect(e.sacarAgora).toBe(false);
+    expect(e.houseCashout!).toBeLessThan(100);
+  });
+
+  it('estima a oferta da casa a partir da odd ao vivo (com haircut de margem)', () => {
+    // odd da casa caiu p/ 2.20 → oferta ≈ 100*2.75/2.20*(1-0.06) = 125*0.94 = 117.5
+    const e = estimateCashout({ stake: 100, oddEntrada: 2.75, fairProbNow: 1 / 2.2, oddCasaNow: 2.2 });
+    expect(e.houseCashout!).toBeCloseTo(117.5, 4);
+    expect(e.houseProfit!).toBeCloseTo(17.5, 4);
+  });
+
+  it('sem odd da casa → só valor justo (houseCashout null)', () => {
+    const e = estimateCashout({ stake: 100, oddEntrada: 2.75, fairProbNow: 1 / 2.2 });
+    expect(e.houseCashout).toBeNull();
+    expect(e.houseProfit).toBeNull();
+    expect(e.fairValue).toBeCloseTo(125, 6);
+  });
+
+  it('stake não informado (0) → %s valem, valores monetários = 0', () => {
+    const e = estimateCashout({ stake: 0, oddEntrada: 2.75, fairProbNow: 1 / 2.2 });
+    expect(e.valida).toBe(true);
+    expect(e.emLucro).toBe(true);              // independe do stake
+    expect(e.dropPctSinceEntry).toBeCloseTo(0.2, 6);
+    expect(e.fairValue).toBe(0);
+    expect(e.houseCashout).toBeNull();
+  });
+
+  it('entradas inválidas → valida=false, não quebra', () => {
+    expect(estimateCashout({ stake: 100, oddEntrada: 1, fairProbNow: 0.5 }).valida).toBe(false);
+    expect(estimateCashout({ stake: 100, oddEntrada: 2.0, fairProbNow: 0 }).valida).toBe(false);
+    expect(estimateCashout({ stake: 100, oddEntrada: 2.0, fairProbNow: 1 }).valida).toBe(false);
+    expect(estimateCashout({ stake: 100, oddEntrada: NaN, fairProbNow: 0.5 }).valida).toBe(false);
+  });
+
+  it('hedge: nos preços justos do oposto, o lucro travado ≈ fairProfit', () => {
+    const p = 1 / 2.2;                 // fairProb do lado apostado
+    const oddOposto = 1 / (1 - p);     // odd justa do lado oposto
+    const e = estimateCashout({ stake: 100, oddEntrada: 2.75, fairProbNow: p, oddOpostoNow: oddOposto });
+    expect(e.hedge).not.toBeNull();
+    expect(e.hedge!.lucroTravado).toBeCloseTo(e.fairProfit, 4); // ≈ 25
+    // retorno igual nos dois lados = stake*oddEntrada = 275
+    expect(e.hedge!.stakeHedge).toBeCloseTo(275 / oddOposto, 6);
+  });
+});
+
+describe('hedgeToLock', () => {
+  it('iguala o retorno e trava lucro positivo quando o oposto pagou pouco', () => {
+    // apostou 100 @ 2.75 (retorno 275); oposto ao vivo @ 1.80 → hedge 275/1.8 = 152.78
+    const h = hedgeToLock(100, 2.75, 1.8)!;
+    expect(h.stakeHedge).toBeCloseTo(152.78, 2);
+    // lucro travado = 275 - (100 + 152.78) = 22.22 em qualquer resultado
+    expect(h.lucroTravado).toBeCloseTo(22.22, 2);
+  });
+
+  it('rejeita entradas inválidas', () => {
+    expect(hedgeToLock(0, 2.0, 2.0)).toBeNull();
+    expect(hedgeToLock(100, 1.0, 2.0)).toBeNull();
+    expect(hedgeToLock(100, 2.0, 1.0)).toBeNull();
   });
 });

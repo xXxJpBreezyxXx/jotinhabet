@@ -20,11 +20,16 @@ import { SignalPipeline } from './signals/signalPipeline';
 import { TelegramIngestService } from './signals/telegramIngestService';
 import { regraPermiteOportunidade } from './arbitrage/regras';
 import { cashoutCapture } from './cashout/cashoutCapture';
-import { getRecentOpportunities, getOpportunityById, getLatestTargetOdd, deleteOpportunity } from './cashout/cashoutRepo';
+import { cashoutBetMonitor } from './cashout/cashoutBetMonitor';
+import { casasComFonteLive } from './cashout/cashoutSources';
+import {
+  getRecentOpportunities, getOpportunityById, getLatestTargetOdd, deleteOpportunity,
+  insertUserBet, listUserBets, getUserBetById, updateUserBetStatus,
+} from './cashout/cashoutRepo';
 import { CASHOUT_CONFIG, devig2Way } from './cashout/cashoutEngine';
 import { alignOdd } from './cashout/cashoutMatch';
 import { areEventsSame, splitEvento } from './arbitrage/matcher';
-import { mesmaOferta } from './arbitrage/markets';
+import { mesmaOferta, normalizarMercado } from './arbitrage/markets';
 
 dotenv.config();
 
@@ -715,7 +720,143 @@ app.delete('/api/cashout/opportunities/:id', async (req, res) => {
 
 // GET - Status do worker de captura (habilitado, intervalo, fontes, último ciclo).
 app.get('/api/cashout/status', (_req, res) => {
-  res.json(cashoutCapture.status());
+  res.json({ ...cashoutCapture.status(), betMonitor: { ...cashoutBetMonitor.status(), casasComFonteLive: casasComFonteLive() } });
+});
+
+// ---------------------- MINHA APOSTA (cashout_user_bets) ----------------------
+// A pessoa cadastra a aposta que já fez (casa, seleção, odd de entrada, stake) e o
+// monitor por-aposta rastreia AO VIVO quanto vale e sinaliza a hora de sacar.
+
+const SELECOES_VALIDAS = ['home', 'away', 'draw', 'over', 'under'];
+
+// POST - cadastra uma aposta do usuário.
+app.post('/api/cashout/bets', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const casa = String(b.casa || '').trim();
+    const sport = String(b.sport || '').trim();
+    const event_label = String(b.event_label || '').trim();
+    const market_label = String(b.market_label || '').trim();
+    const selection = String(b.selection || '').trim();
+    const oddEntrada = Number(b.odd_entrada);
+
+    if (!casa || !sport || !event_label || !market_label || !SELECOES_VALIDAS.includes(selection)) {
+      return res.status(400).json({ ok: false, error: 'Campos obrigatórios: casa, sport, event_label, market_label e selection (home/away/draw/over/under).' });
+    }
+    if (!Number.isFinite(oddEntrada) || oddEntrada <= 1) {
+      return res.status(400).json({ ok: false, error: 'odd_entrada deve ser um decimal > 1 (ex.: 2.75).' });
+    }
+    if (!splitEvento(event_label)) {
+      return res.status(400).json({ ok: false, error: 'event_label deve estar no formato "Time A vs Time B".' });
+    }
+    const lineRaw = b.line === '' || b.line == null ? null : Number(b.line);
+    const stakeRaw = b.stake === '' || b.stake == null ? null : Number(b.stake);
+
+    const created = await insertUserBet({
+      casa, sport, event_label, market_label,
+      market_norm: normalizarMercado(market_label),
+      selection: selection as any,
+      selection_label: b.selection_label ? String(b.selection_label) : null,
+      line: Number.isFinite(lineRaw as number) ? (lineRaw as number) : null,
+      odd_entrada: oddEntrada,
+      stake: Number.isFinite(stakeRaw as number) ? (stakeRaw as number) : null,
+      starts_at: b.starts_at ? String(b.starts_at) : null,
+    });
+    if (!created) return res.status(500).json({ ok: false, error: 'Falha ao salvar a aposta (ver logs do banco).' });
+    res.json({ ok: true, aposta: created });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao cadastrar a aposta' });
+  }
+});
+
+// GET - lista as apostas (status=open por padrão; ?status=all inclui sacadas/liquidadas).
+app.get('/api/cashout/bets', async (req, res) => {
+  try {
+    const status = String(req.query.status || 'open');
+    const statuses = status === 'all' ? ['open', 'cashed', 'settled'] : [status];
+    const apostas = await listUserBets(statuses);
+    res.json({ apostas, casasComFonteLive: casasComFonteLive() });
+  } catch (error: any) {
+    res.status(500).json({ apostas: [], error: error.message || 'Erro ao listar apostas' });
+  }
+});
+
+// GET - "monitorar": avalia UMA aposta AO VIVO agora (busca dirigida) e persiste o eval.
+// alertar=false: consulta sob demanda NÃO dispara WhatsApp (só o ciclo do worker alerta).
+app.get('/api/cashout/bets/:id/monitorar', async (req, res) => {
+  try {
+    const bet = await getUserBetById(req.params.id);
+    if (!bet) return res.status(404).json({ ok: false, error: 'Aposta não encontrada.' });
+    const avaliacao = await cashoutBetMonitor.avaliarAposta(bet, Date.now(), false);
+    res.json({ ok: true, avaliacao });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao monitorar a aposta' });
+  }
+});
+
+// POST - "Monitorar ao vivo": promove uma OPORTUNIDADE detectada para uma aposta em
+// "Minhas Apostas" (odd de entrada = a odd atual do alvo), e o worker passa a rastreá-la
+// AO VIVO avisando no WhatsApp a cada movimento + a hora de sacar. Dedupe por
+// evento/mercado/seleção/casa (não cria duplicata se já estiver monitorando).
+app.post('/api/cashout/opportunities/:id/monitorar', async (req, res) => {
+  try {
+    const opp = await getOpportunityById(req.params.id);
+    if (!opp) return res.status(404).json({ ok: false, error: 'Oportunidade não encontrada.' });
+
+    const abertas = await listUserBets(['open']);
+    const jaExiste = abertas.find(
+      (b) => b.event_label === opp.event_label && b.market_label === opp.market_label &&
+        b.selection === opp.selection && b.casa === opp.target_name
+    );
+    if (jaExiste) return res.json({ ok: true, aposta: jaExiste, jaExistia: true });
+
+    const stakeRaw = req.body && req.body.stake !== '' && req.body.stake != null ? Number(req.body.stake) : null;
+    // Odd de entrada: usa a que o USUÁRIO informou (a que ele de fato pegou na aposta);
+    // só cai na odd capturada do alvo se não vier nenhuma válida.
+    const oddRaw = req.body && req.body.odd_entrada !== '' && req.body.odd_entrada != null ? Number(req.body.odd_entrada) : NaN;
+    const oddEntrada = Number.isFinite(oddRaw) && oddRaw > 1 ? oddRaw : Number(opp.target_odd_value);
+    const created = await insertUserBet({
+      casa: opp.target_name,
+      sport: opp.sport,
+      event_label: opp.event_label,
+      market_label: opp.market_label,
+      market_norm: normalizarMercado(opp.market_label),
+      selection: opp.selection,
+      selection_label: opp.selection_label,
+      line: opp.line == null ? null : Number(opp.line),
+      odd_entrada: oddEntrada,
+      stake: Number.isFinite(stakeRaw as number) ? (stakeRaw as number) : null,
+      starts_at: opp.starts_at || null,
+    });
+    if (!created) return res.status(500).json({ ok: false, error: 'Falha ao criar o monitoramento.' });
+    res.json({ ok: true, aposta: created });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao promover a oportunidade' });
+  }
+});
+
+// PATCH - muda o status da aposta (marcar como sacada/liquidada/reabrir).
+app.patch('/api/cashout/bets/:id/status', async (req, res) => {
+  try {
+    const status = String((req.body || {}).status || '').trim();
+    if (!['open', 'cashed', 'settled'].includes(status)) {
+      return res.status(400).json({ ok: false, error: 'status deve ser open, cashed ou settled.' });
+    }
+    const ok = await updateUserBetStatus(req.params.id, status);
+    res.json({ ok });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao atualizar status' });
+  }
+});
+
+// DELETE - remove a aposta (soft-delete).
+app.delete('/api/cashout/bets/:id', async (req, res) => {
+  try {
+    const ok = await updateUserBetStatus(req.params.id, 'deleted');
+    res.json({ ok });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao excluir a aposta' });
+  }
 });
 
 // Start Server
@@ -742,6 +883,10 @@ app.listen(port, () => {
   // Radar Cashout: worker de captura da série temporal de odds (bússola × alvos) e
   // detecção de Dropping Odds. Guardado por CASHOUT_CAPTURE_ENABLED (default on).
   cashoutCapture.start().catch((e) => console.error('❌ [Cashout] Falha ao iniciar captura:', e?.message || e));
+
+  // Radar Cashout — monitor POR-APOSTA ("Minha aposta"): rastreia AO VIVO as apostas
+  // que o usuário cadastrou (valor de saque + sinal). Guardado por CASHOUT_BET_MONITOR_ENABLED.
+  cashoutBetMonitor.start().catch((e) => console.error('❌ [Cashout/Bets] Falha ao iniciar monitor:', e?.message || e));
 
   // Enriquecimento de IA é MANUAL (botão "Analisar IA") para poupar tokens/cota das APIs.
   // O worker automático fica desligado de propósito; a análise roda sob demanda via

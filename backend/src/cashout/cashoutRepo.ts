@@ -234,7 +234,7 @@ export async function getOpportunityById(id: string): Promise<any | null> {
     const { data, error } = await supabase
       .from('cashout_opportunities')
       .select('id, event_id, target_bookmaker_id, selection, line, target_odd_value, ' +
-        'fair_probability, compass_fair_odd, event_label, sport, selection_label, market_label, target_name')
+        'fair_probability, compass_fair_odd, event_label, sport, selection_label, market_label, target_name, starts_at')
       .eq('id', id)
       .maybeSingle();
     if (error) {
@@ -301,6 +301,114 @@ export async function getCompassSnapshotsForSeed(
     console.error('[cashout] getCompassSnapshotsForSeed falhou:', err.message);
   }
   return out;
+}
+
+// ============================================================================
+// APOSTAS DO USUÁRIO ("Minha aposta") — tabela cashout_user_bets (migration 013).
+// ============================================================================
+
+export interface UserBetInsert {
+  casa: string;
+  sport: string;
+  event_label: string;
+  market_label: string;
+  market_norm: string;
+  selection: CashoutSelection;
+  selection_label?: string | null;
+  line?: number | null;
+  odd_entrada: number;
+  stake?: number | null;
+  starts_at?: string | null;
+}
+
+/** Avaliação AO VIVO gravada pelo monitor por-aposta (colunas last_*). */
+export interface UserBetEval {
+  last_fair_prob: number | null;
+  last_fair_odd: number | null;
+  last_house_odd: number | null;
+  last_cashout_value: number | null;
+  last_profit: number | null;
+  last_drop_pct: number | null;
+  last_signal: boolean | null;
+  last_note: string | null;
+  last_eval_at: string;
+}
+
+/** Cadastra uma aposta do usuário e devolve a linha criada (ou null em falha). */
+export async function insertUserBet(row: UserBetInsert): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .from('cashout_user_bets')
+      .insert(row)
+      .select('*')
+      .maybeSingle();
+    if (error) { console.warn('[cashout] insertUserBet:', error.message); return null; }
+    return data ?? null;
+  } catch (err: any) {
+    console.error('[cashout] insertUserBet falhou:', err.message);
+    return null;
+  }
+}
+
+/** Lista apostas do usuário por status (default: as abertas), mais recentes primeiro. */
+export async function listUserBets(statuses: string[] = ['open']): Promise<any[]> {
+  try {
+    const { data, error } = await supabase
+      .from('cashout_user_bets')
+      .select('*')
+      .in('status', statuses)
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) { console.warn('[cashout] listUserBets:', error.message); return []; }
+    return data || [];
+  } catch (err: any) {
+    console.error('[cashout] listUserBets falhou:', err.message);
+    return [];
+  }
+}
+
+/** Uma aposta pelo id. */
+export async function getUserBetById(id: string): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .from('cashout_user_bets')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) { console.warn('[cashout] getUserBetById:', error.message); return null; }
+    return data ?? null;
+  } catch (err: any) {
+    console.error('[cashout] getUserBetById falhou:', err.message);
+    return null;
+  }
+}
+
+/** Atualiza a avaliação ao vivo (colunas last_*) de uma aposta. */
+export async function updateUserBetEval(id: string, evalRow: UserBetEval): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('cashout_user_bets')
+      .update({ ...evalRow, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) console.warn('[cashout] updateUserBetEval:', error.message);
+  } catch (err: any) {
+    console.error('[cashout] updateUserBetEval falhou:', err.message);
+  }
+}
+
+/** Muda o status de uma aposta ('open'|'cashed'|'settled'|'deleted'). */
+export async function updateUserBetStatus(id: string, status: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('cashout_user_bets')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) { console.warn('[cashout] updateUserBetStatus:', error.message); return false; }
+    return true;
+  } catch (err: any) {
+    console.error('[cashout] updateUserBetStatus falhou:', err.message);
+    return false;
+  }
 }
 
 /** Eventos por id (event_key + orientação) — p/ o seed reconstruir as chaves de histórico. */

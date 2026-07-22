@@ -27,6 +27,9 @@ interface KambiConfig {
   // inconsistentes). Capturado do próprio site (KTO: client_id=200, channel_id=1).
   clientId?: number;
   channelId?: number;
+  // Radar Cashout: quando true, NÃO descarta partidas ao vivo/iniciadas (mantém o alvo
+  // visível após o kickoff). O scanner de surebets constrói SEM esta opção (só pré-jogo).
+  incluirAoVivo?: boolean;
 }
 
 interface KambiOutcome {
@@ -127,6 +130,7 @@ export class KambiScraper implements OddsScraper {
       maxEventosPorEsporte: 120,
       clientId: 0,
       channelId: 1,
+      incluirAoVivo: false,
       ...cfg,
     };
   }
@@ -203,6 +207,7 @@ export class KambiScraper implements OddsScraper {
           // sem eles, a revalidação podia casar o evento virtual homônimo.
           .filter((ev: KambiEvent) => parensSeguros(ev.homeName) && parensSeguros(ev.awayName))
           .filter((ev: KambiEvent) => {
+            if (this.cfg.incluirAoVivo) return true; // cashout ao vivo mantém live+pré-jogo
             const t = Date.parse(ev.start || '');
             return isNaN(t) || t > Date.now();
           })
@@ -244,8 +249,10 @@ export class KambiScraper implements OddsScraper {
       // jogador entre parênteses (ex.: "Tottenham (zoyir)"). São voláteis e geram
       // "arbs" de odd travada, não reais. Marcadores seguros ("(W)", "(BRA)") passam.
       .filter((ev: KambiEvent) => parensSeguros(ev.homeName) && parensSeguros(ev.awayName))
-      // Só PRÉ-JOGO: descarta partidas já iniciadas/ao vivo (start no passado).
+      // Cashout ao vivo (incluirAoVivo) mantém live+pré-jogo; senão só PRÉ-JOGO
+      // (descarta partidas já iniciadas/ao vivo com start no passado).
       .filter((ev: KambiEvent) => {
+        if (this.cfg.incluirAoVivo) return true;
         const t = Date.parse(ev.start || '');
         return isNaN(t) || t > Date.now();
       });
@@ -440,14 +447,14 @@ export class KambiScraper implements OddsScraper {
 
 /** KTO — Kambi offering "ktobr", client_id=200 (capturado do site → odds consistentes). */
 export class KtoScraper extends KambiScraper {
-  constructor() {
-    super({ nome: 'KTO', offering: 'ktobr', referer: 'https://www.kto.bet.br/', clientId: 200, channelId: 1 });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'KTO', offering: 'ktobr', referer: 'https://www.kto.bet.br/', clientId: 200, channelId: 1, incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
 /** BetWarrior — Kambi offering "bwbr", client_id=200 (capturado do site; host EU). */
 export class BetWarriorScraper extends KambiScraper {
-  constructor() {
+  constructor(opts?: { incluirAoVivo?: boolean }) {
     super({
       nome: 'BetWarrior',
       offering: 'bwbr',
@@ -455,6 +462,7 @@ export class BetWarriorScraper extends KambiScraper {
       referer: 'https://apostas.betwarrior.bet.br/',
       clientId: 200,
       channelId: 1,
+      incluirAoVivo: opts?.incluirAoVivo,
     });
   }
 }

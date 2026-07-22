@@ -55,18 +55,20 @@ import {
 // Bússolas disponíveis (linha afiada). `heavy` = Playwright (navegador) → puxada com
 // throttle (a cada CASHOUT_HEAVY_EVERY_N ciclos) pra não saturar a CPU de 1 core.
 // Pinnacle é leve (API); 1xBet/Stake são pesadas (Chromium) — só habilitar com RAM livre.
-const COMPASS_FACTORY: Record<string, { heavy: boolean; make: () => OddsScraper }> = {
-  Pinnacle: { heavy: false, make: () => new PinnacleScraper() },
-  Betfair: { heavy: false, make: () => new BetfairScraper() }, // exchange (API) — precisa conta .com + BETFAIR_PROXY
+// `make(aoVivo)`: quando aoVivo=true, as fontes que suportam in-play (Pinnacle, Kambi)
+// mantêm partidas já iniciadas no feed (o resto ignora o parâmetro e segue pré-jogo).
+const COMPASS_FACTORY: Record<string, { heavy: boolean; make: (aoVivo: boolean) => OddsScraper }> = {
+  Pinnacle: { heavy: false, make: (aoVivo) => new PinnacleScraper({ incluirAoVivo: aoVivo }) },
+  Betfair: { heavy: false, make: () => new BetfairScraper() }, // exchange (API) — precisa conta .com + BETFAIR_PROXY (in-play não habilitado)
   '1xBet': { heavy: true, make: () => new OneXBetScraper() },
   Stake: { heavy: true, make: () => new StakeScraper() },
 };
 
 // Alvos leves por API disponíveis (todos sem Playwright). Configurável por CASHOUT_TARGETS.
-const TARGET_FACTORY: Record<string, () => OddsScraper> = {
+const TARGET_FACTORY: Record<string, (aoVivo: boolean) => OddsScraper> = {
   Superbet: () => new SuperbetScraper(),
-  KTO: () => new KtoScraper(),
-  BetWarrior: () => new BetWarriorScraper(),
+  KTO: (aoVivo) => new KtoScraper({ incluirAoVivo: aoVivo }),
+  BetWarrior: (aoVivo) => new BetWarriorScraper({ incluirAoVivo: aoVivo }),
   BetBoom: () => new BetBoomScraper(),
   EsportesDaSorte: () => new EsportesDaSorteScraper(),
   Aposta1: () => new Aposta1Scraper(),
@@ -112,6 +114,9 @@ export class CashoutCaptureService {
   private intervalSeconds = 60;
   private heavyEveryN = 4;   // bússola pesada (Playwright) puxada a cada N ciclos
   private cycleCount = 0;
+  // Quando true, as fontes com in-play (Pinnacle/Kambi) mantêm partidas AO VIVO no feed,
+  // pra o módulo seguir rastreando a queda DEPOIS do kickoff. Gate CASHOUT_INCLUIR_AO_VIVO.
+  private incluirAoVivo = true;
   private cfg: CashoutConfig = CASHOUT_CONFIG; // thresholds (com override por env)
   private bookmakers = new Map<string, BookmakerRow>();
 
@@ -151,6 +156,7 @@ export class CashoutCaptureService {
       running: !!this.intervalId,
       intervalSeconds: this.intervalSeconds,
       heavyEveryN: this.heavyEveryN,
+      incluirAoVivo: this.incluirAoVivo,
       sports: this.sports,
       targets: this.targets.map((t) => t.getNome()),
       compass: nomes.join(', '),   // compat: o frontend lê `compass` como string
@@ -178,14 +184,15 @@ export class CashoutCaptureService {
       minDropPct: envNum('CASHOUT_MIN_DROP_PCT', CASHOUT_CONFIG.minDropPct),
     };
     this.sports = envList('CASHOUT_SPORTS', ['Futebol', 'Basquete', 'Tenis']);
+    this.incluirAoVivo = (process.env.CASHOUT_INCLUIR_AO_VIVO || 'true').toLowerCase() !== 'false';
 
     const compassNames = envList('CASHOUT_COMPASS', ['Pinnacle']).filter((n) => COMPASS_FACTORY[n]);
     this.compasses = (compassNames.length ? compassNames : ['Pinnacle']).map((n) => ({
-      scraper: COMPASS_FACTORY[n].make(), name: n, heavy: COMPASS_FACTORY[n].heavy,
+      scraper: COMPASS_FACTORY[n].make(this.incluirAoVivo), name: n, heavy: COMPASS_FACTORY[n].heavy,
     }));
 
     const targetNames = envList('CASHOUT_TARGETS', ['Superbet', 'KTO', 'BetWarrior', 'BetBoom', 'EsportesDaSorte']);
-    this.targets = targetNames.filter((n) => TARGET_FACTORY[n]).map((n) => TARGET_FACTORY[n]());
+    this.targets = targetNames.filter((n) => TARGET_FACTORY[n]).map((n) => TARGET_FACTORY[n](this.incluirAoVivo));
 
     this.bookmakers = await ensureBookmakers(
       this.compasses.map((c) => c.name),
@@ -196,7 +203,8 @@ export class CashoutCaptureService {
     console.log(
       `🎯 [Cashout] Captura iniciada. Intervalo: ${this.intervalSeconds}s | Bússolas: ` +
         `${this.compasses.map((c) => c.name).join(', ')}${heavies.length ? ` (pesadas ${heavies.join(',')} a cada ${this.heavyEveryN} ciclos)` : ''} | ` +
-        `Alvos: ${this.targets.map((t) => t.getNome()).join(', ')} | Esportes: ${this.sports.join(', ')}`
+        `Alvos: ${this.targets.map((t) => t.getNome()).join(', ')} | Esportes: ${this.sports.join(', ')} | ` +
+        `AO VIVO: ${this.incluirAoVivo ? 'sim (Pinnacle/Kambi in-play)' : 'não (só pré-jogo)'}`
     );
 
     await this.seedHistory(); // reidrata a série de queda dos snapshots persistidos
