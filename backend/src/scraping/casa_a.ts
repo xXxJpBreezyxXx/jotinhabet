@@ -1,7 +1,6 @@
-import { chromium } from 'playwright';
+import { chromium, Browser } from 'playwright';
 import { decrypt, encrypt } from '../auth/crypto';
 import { supabase } from '../db/client';
-import * as path from 'path';
 
 
 
@@ -25,6 +24,7 @@ export class BetanoScraper extends ScraperBase {
   // por-aposta (1 evento por vez) — NUNCA no loop do cashoutCapture (Playwright é pesado
   // na VPS 1-core). A revalidação de surebet constrói SEM a opção (segue só pré-jogo).
   private incluirAoVivo: boolean;
+  private browser: Browser | null = null;
 
   constructor(opts?: { incluirAoVivo?: boolean }) {
     super('Betano');
@@ -32,25 +32,36 @@ export class BetanoScraper extends ScraperBase {
   }
 
   protected async inicializarNavegador(headless: boolean): Promise<void> {
-    const userDir = path.resolve(__dirname, '../../tests/chrome-profile-betano-prod');
+    // Contexto LIMPO (sem perfil persistente): odds são páginas PÚBLICAS e o perfil
+    // "aquecido" (chrome-profile-betano-prod) QUEBRAVA a renderização das odds no SPA da
+    // Betano — o waitForSelector estourava e vinha 0 odds (diagnóstico 21/07: contexto
+    // efêmero rende 38 botões, o persistente 0). Login/sessão (SessionManager) é à parte.
     const opts: any = {
       headless,
       args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 }
     };
-    // Prod (container) NÃO tem o Google Chrome (channel) — só o chromium bundled do
-    // Playwright. Tenta o channel e cai no bundled; sem isso o launch lança e a casa
-    // fica inerte (scan e revalidação).
+    // Prod (container) NÃO tem o Google Chrome (channel) — só o chromium bundled. Tenta o
+    // channel e cai no bundled.
     try {
-      this.context = await chromium.launchPersistentContext(userDir, { ...opts, channel: 'chrome' });
+      this.browser = await chromium.launch({ ...opts, channel: 'chrome' });
     } catch {
-      this.context = await chromium.launchPersistentContext(userDir, opts);
+      this.browser = await chromium.launch(opts);
     }
-
+    this.context = await this.browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1366, height: 900 },
+    });
     await this.context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
+  }
+
+  /** Fecha contexto + browser (launch não fecha o browser ao fechar só o contexto). */
+  protected async fecharNavegador(): Promise<void> {
+    try { if (this.context) await this.context.close(); } catch { /* ignora */ }
+    try { if (this.browser) await this.browser.close(); } catch { /* ignora */ }
+    this.context = undefined;
+    this.browser = null;
   }
 
   private async resolverPopups(page: any): Promise<void> {
@@ -75,10 +86,36 @@ export class BetanoScraper extends ScraperBase {
     } catch (_) {}
   }
 
+  /**
+   * Coleta links de eventos da página atual. O Betano é SPA: a lista de jogos (e as
+   * páginas AO VIVO, atrás de uma "splash screen") renderizam por JS DEPOIS do
+   * domcontentloaded — então ROLA a página e faz POLL até aparecerem links ou estourar
+   * o tempo. Sem isto, a leitura pegava 0 (bug histórico: espera fixa de 2s curta demais).
+   * `incluirLive`: inclui `/live/{slug}/{id}` além de `/odds/{slug}/{id}` — só no cashout
+   * ao vivo (o scan de surebet fica só em `/odds/`, pré-jogo).
+   */
+  private async coletarLinksDeEventos(page: any, incluirLive = false, tentativaMs = 9000): Promise<string[]> {
+    const padrao = incluirLive ? /\/(?:odds|live)\/[^/?#]+\/\d+/ : /\/odds\/[^/?#]+\/\d+/;
+    const deadline = Date.now() + tentativaMs;
+    let links: string[] = [];
+    let n = 0;
+    while (Date.now() < deadline) {
+      const hrefs: string[] = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('a')).map((a) => (a as HTMLAnchorElement).href)
+      );
+      links = hrefs.filter((h) => padrao.test(h));
+      if (links.length) break;
+      n++;
+      await page.evaluate((y: number) => window.scrollBy(0, y), 1200 * n).catch(() => {});
+      await page.waitForTimeout(1200);
+    }
+    return [...new Set(links)];
+  }
+
   protected async extrairLinksDaLista(esporte: string, datas: string[]): Promise<string[]> {
     if (!this.context) throw new Error("Contexto não inicializado.");
     const page = this.context.pages()[0] || await this.context.newPage();
-    
+
     console.log(`   [Betano] Acessando esportes na Betano...`);
     // Esporte sem rota mapeada (ex.: Volei/TenisDeMesa/Beisebol, cobertos só pelos
     // scrapers de API) → pula. O fallback antigo caía na rota de FUTEBOL e re-varria
@@ -87,18 +124,12 @@ export class BetanoScraper extends ScraperBase {
     if (!rota) return [];
 
     await page.goto(`${this.urlBase}/${rota}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(2500);
     await this.resolverPopups(page);
-    
-    const links = await page.evaluate(() => {
-        const anchors = Array.from(document.querySelectorAll('a'));
-        return anchors
-            .map(a => a.href)
-            .filter(href => href.includes('/odds/')); // Links de jogos individuais
-    });
-    
-    const uniqueLinks = [...new Set(links)];
-    return uniqueLinks.slice(0, 5);
+
+    // Scan de surebet (sem incluirAoVivo) fica só em pré-jogo (/odds/).
+    const links = await this.coletarLinksDeEventos(page, false);
+    return links.slice(0, 5);
   }
 
   protected async extrairMercadosDoEvento(url: string, esporte: string): Promise<ScrapedOdd[]> {
@@ -109,9 +140,28 @@ export class BetanoScraper extends ScraperBase {
     const odds: ScrapedOdd[] = [];
     
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.waitForTimeout(3000);
-      
+      // ⚠️ A Betano rende as odds de forma INTERMITENTE em headless: o Cloudflare/anti-bot
+      // libera o shell (HTTP 200) mas às vezes BLOQUEIA a API de odds → 0 botões (medido:
+      // ora 21+, ora 0 na MESMA página, minutos depois). Não é proxy/seletor/timing — é
+      // anti-bot na camada de dados. Mitigação: poll por botão com valor numérico
+      // (querySelectorAll; waitForSelector c/ lista de seletores não pegava) + RETRY 2x
+      // re-navegando (como rende ~50%/tentativa, 2 tentativas sobem bem a taxa).
+      const SEL_ODDS = 'button.selections__selection, button[class*="selection"], button[class*="Selection"], [class*="selection-horizontal-button"]';
+      const temOddsAgora = () => page.evaluate((sel: string) =>
+        Array.from(document.querySelectorAll(sel)).some((b) => {
+          const t = b.querySelector('.tw-font-bold, [class*="font-bold"], [class*="odd-value"]')?.textContent?.trim() || '';
+          return /^\d{1,3}[.,]\d{1,3}$/.test(t);
+        }), SEL_ODDS);
+      let temOdds = false;
+      for (let attempt = 0; attempt < 2 && !temOdds; attempt++) {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        for (let i = 0; i < 7 && !temOdds; i++) {
+          await page.waitForTimeout(2000);
+          temOdds = await temOddsAgora();
+          if (!temOdds && i === 0) await page.evaluate(() => window.scrollBy(0, 600)).catch(() => {});
+        }
+      }
+
       const result = await page.evaluate(({ esporteArg, urlArg }) => {
           const rawOdds: any[] = [];
           
@@ -119,10 +169,10 @@ export class BetanoScraper extends ScraperBase {
           let timeB = "Time B";
           
           // ── Método 1: Parse da URL (mais confiável no Betano)
-          // URL: /odds/argentina-suica/88703633/ ou /odds/operario-pr-gremio-novorizontino/88707489/
+          // URL: /odds/argentina-suica/88703633/ (pré-jogo) ou /live/vila-nova-fortaleza/89313045/ (ao vivo)
           try {
             const pathParts = urlArg.split('/');
-            const slugIdx = pathParts.findIndex((p: string) => p === 'odds') + 1;
+            const slugIdx = pathParts.findIndex((p: string) => p === 'odds' || p === 'live') + 1;
             const slug = pathParts[slugIdx] || '';
             const parts = slug.split('-').filter(Boolean);
             if (parts.length >= 2) {
@@ -289,14 +339,11 @@ export class BetanoScraper extends ScraperBase {
         let links: string[];
         try {
           await page.goto(pagina, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          // Hub ao vivo é SPA e carrega os cards por JS — dá mais tempo/rolagem.
-          await page.waitForTimeout(this.incluirAoVivo && /\/live\//.test(pagina) ? 3500 : 2000);
+          await page.waitForTimeout(2500);
           await this.resolverPopups(page);
-          links = await page.evaluate(() =>
-            Array.from(document.querySelectorAll('a'))
-              .map((a) => (a as HTMLAnchorElement).href)
-              .filter((href) => href.includes('/odds/'))
-          );
+          // Ao vivo (incluirAoVivo): coleta também links /live/{slug}/{id} (o hub /live/
+          // NÃO usa /odds/). Com scroll + poll pra vencer a SPA/splash.
+          links = await this.coletarLinksDeEventos(page, this.incluirAoVivo);
         } catch {
           continue; // falha só nesta página; se todas falharem, cai no throw de infra
         }
@@ -325,7 +372,7 @@ export class BetanoScraper extends ScraperBase {
    * confirmação final é do areEventsSame sobre o nome REAL extraído da página do evento.
    */
   private slugCasaComEvento(url: string, evento: string): boolean {
-    const m = url.match(/\/odds\/([^/?#]+)/);
+    const m = url.match(/\/(?:odds|live)\/([^/?#]+)/);
     if (!m) return false;
     const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
     const slugTokens = new Set(norm(m[1]).split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
