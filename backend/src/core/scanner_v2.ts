@@ -19,6 +19,11 @@ import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
 import { alertAlreadySent, markAlertAsSent } from '../notify/alertCache';
 import { RevalidationService } from './revalidationService';
+import { comLimite } from '../utils/concorrencia';
+import { encontrarValor, encontrarMiddles } from '../arbitrage/valor';
+import { upsertValorOportunidades, expirarValorAntigas, upsertMiddles, expirarMiddlesAntigos } from './valorRepo';
+import { getBrowserOddsFresh } from '../scraping/browserOddsCache';
+import { logAlerta } from './calibracaoRepo';
 
 // Timestamp (ms) do início da partida: usa dataHora (ISO/UTC) e cai para a data no
 // texto do evento "(DD/MM/AAAA HH:MM)" interpretada como horário de Brasília (UTC-3).
@@ -36,10 +41,6 @@ export function ehPreJogo(opp: { dataHora?: string; evento: string }): boolean {
   return k === null ? true : k > Date.now();
 }
 
-// Hora de Brasília (0-23) a partir da qual o alerta passa a incluir TAMBÉM as
-// partidas de AMANHÃ. Antes disso, só o dia atual entra no WhatsApp.
-const HORA_LIBERA_AMANHA_BR = 20;
-
 // Data/hora ATUAL decomposta no fuso de Brasília. Brasil sem horário de verão
 // desde 2019 → America/Sao_Paulo é UTC-3 constante (mesma premissa de kickoffMs
 // e do greenMonitorService), então basta deslocar o instante em -3h e ler em UTC.
@@ -48,20 +49,18 @@ function agoraBrasilia(): { ano: number; mes: number; dia: number; hora: number 
   return { ano: d.getUTCFullYear(), mes: d.getUTCMonth() + 1, dia: d.getUTCDate(), hora: d.getUTCHours() };
 }
 
-// Janela de envio do alerta no WhatsApp, em horário de Brasília:
-//  - partidas de HOJE: sempre;
-//  - partidas de AMANHÃ: só a partir das HORA_LIBERA_AMANHA_BR (20h).
-// A data do evento vem SEMPRE em Brasília no texto "(DD/MM/AAAA HH:MM)".
-export function dentroDaJanelaDeAlerta(eventoStr: string): boolean {
-  const agora = agoraBrasilia();
-  const hojeChave = Date.UTC(agora.ano, agora.mes - 1, agora.dia);       // meia-noite BR de hoje
-  const amanhaChave = hojeChave + 24 * 60 * 60 * 1000;                    // meia-noite BR de amanhã
-  const liberouAmanha = agora.hora >= HORA_LIBERA_AMANHA_BR;
+// Janela de envio do alerta no WhatsApp: partidas cujo INÍCIO cai dentro das próximas
+// HORAS_JANELA_ALERTA horas. Substituiu a regra "HOJE sempre / AMANHÃ só após 20h /
+// depois nunca" por uma janela plana de 48h (mais volume pré-jogo; decisão do produto).
+// NÃO afeta a coleta (os scrapers de API já retornam vários dias) — só o que alerta. O
+// piso (partida já iniciada) é do ehPreJogo, chamado junto neste gate no scanner.
+const HORAS_JANELA_ALERTA = 48;
 
+export function dentroDaJanelaDeAlerta(eventoStr: string): boolean {
   const lower = eventoStr.toLowerCase();
-  // Rótulos textuais sem data numérica ("(Hoje …" / "(Amanhã …").
+  // Rótulos textuais sem data numérica: "Hoje" e "Amanhã" cabem sempre na janela de 48h.
   if (lower.includes('(hoje')) return true;
-  if (lower.includes('(amanh')) return liberouAmanha; // pega "amanha" e "amanhã"
+  if (lower.includes('(amanh')) return true; // pega "amanha" e "amanhã"
 
   // "(DD/MM/AAAA HH:MM)" ou "(DD/MM HH:MM)" no fim do evento.
   const match = eventoStr.match(/\((\d{2})\/(\d{2})(?:\/(\d{4}))?\s+(\d{2}):(\d{2})\)$/);
@@ -70,14 +69,16 @@ export function dentroDaJanelaDeAlerta(eventoStr: string): boolean {
     return true;
   }
 
+  const agora = agoraBrasilia();
   const dia = parseInt(match[1]);
   const mes = parseInt(match[2]) - 1; // 0-indexed
   const ano = match[3] ? parseInt(match[3]) : agora.ano;
-  const eventoChave = Date.UTC(ano, mes, dia);
-
-  if (eventoChave === hojeChave) return true;
-  if (eventoChave === amanhaChave) return liberouAmanha;
-  return false;
+  const hora = parseInt(match[4]);
+  const min = parseInt(match[5]);
+  // A data do evento vem em Brasília (UTC-3) → +3h para obter o instante em UTC.
+  const kickoffUtc = Date.UTC(ano, mes, dia, hora + 3, min);
+  const limite = Date.now() + HORAS_JANELA_ALERTA * 60 * 60 * 1000;
+  return kickoffUtc <= limite;
 }
 
 // Converte a string de data/hora do evento em um objeto Date do JavaScript
@@ -145,6 +146,20 @@ export class ArbitrageScannerV2 {
    * carga da VPS pesar, é 1-linha tirá-la daqui (cai só no scan COMPLETO manual).
    */
   private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional']);
+
+  /**
+   * Scrapers baseados em BROWSER (Playwright) — coletados SEQUENCIALMENTE (um chromium
+   * por vez é pesado na VPS 1-core). Todo o resto (REST/WS, I/O-bound) roda em paralelo
+   * com limite. Betnacional é browser APESAR de estar no SCRAPERS_API (feed bet6 bloqueia
+   * por fingerprint TLS — ver casa_betnacional.ts), por isso entra aqui também.
+   */
+  private static readonly SCRAPERS_BROWSER = new Set(['Betano', 'Blaze', '1xBet', 'Betnacional']);
+
+  /** Teto de scrapers de API coletados em paralelo. I/O-bound; o limite protege a VPS 1-core. */
+  private static readonly LIMITE_PARALELO = 5;
+
+  /** Idade máxima aceita p/ odds de browser vindas do cache do BrowserScrapeWorker (25min). */
+  private static readonly BROWSER_CACHE_MAX_AGE_MS = 25 * 60 * 1000;
 
   /**
    * Trava GLOBAL de varredura — cobre o scheduler E o endpoint do botão "Escanear
@@ -216,14 +231,43 @@ export class ArbitrageScannerV2 {
 
       const todasOdds: any[] = [];
 
-      // Coleta sequencial para evitar estouro de memória no modo Headless
-      for (const scraper of scrapersUsados) {
+      // Particiona a coleta: scrapers de BROWSER (Playwright, memória pesada) seguem
+      // SEQUENCIAIS; os de API/WS (I/O-bound) vão em PARALELO com limite. Antes tudo era
+      // sequencial "para evitar estouro de memória no modo Headless" — mas isso só vale
+      // para os browsers; serializar os de API inflava o snapshot para ~minutos e o skew
+      // temporal (casa A em t=0 × casa B em t=90s) fabricava arb fantasma.
+      const leves = scrapersUsados.filter((s) => !ArbitrageScannerV2.SCRAPERS_BROWSER.has(s.getNome()));
+      const pesados = scrapersUsados.filter((s) => ArbitrageScannerV2.SCRAPERS_BROWSER.has(s.getNome()));
+
+      const resLeves = await comLimite(leves, ArbitrageScannerV2.LIMITE_PARALELO, (s) =>
+        s.executarCrawler(esportes, datas, true)
+      );
+      resLeves.forEach((r, i) => {
+        if (r.status === 'fulfilled') {
+          todasOdds.push({ nome: leves[i].getNome(), odds: r.value });
+        } else {
+          console.error(`❌ Erro no scraper ${leves[i].getNome()}: ${r.reason?.message || r.reason}`);
+        }
+      });
+
+      // Browser: um de cada vez (o finally de cada crawler fecha o contexto antes do próximo).
+      for (const scraper of pesados) {
         try {
           const odds = await scraper.executarCrawler(esportes, datas, true);
           todasOdds.push({ nome: scraper.getNome(), odds });
         } catch (err: any) {
           console.error(`❌ Erro no scraper ${scraper.getNome()}: ${err.message}`);
         }
+      }
+
+      // Casas de BROWSER (Betano/Blaze/1xBet) coletadas por um worker de cadência própria
+      // entram via cache em memória — participam do scan automático sem Playwright inline.
+      // Vazio quando o worker está desligado (env) → no-op. Só adiciona as casas que NÃO
+      // foram coletadas inline nesta varredura (evita duplicar no scan COMPLETO manual).
+      // Odds possivelmente defasadas, mas o gate pré-alerta revalida cada perna AO VIVO.
+      const nomesPresentes = new Set(todasOdds.map((t) => t.nome));
+      for (const entrada of getBrowserOddsFresh(ArbitrageScannerV2.BROWSER_CACHE_MAX_AGE_MS)) {
+        if (!nomesPresentes.has(entrada.nome)) todasOdds.push({ nome: entrada.nome, odds: entrada.odds });
       }
 
       console.log('⚡ [Scanner V2] Buscando a MELHOR combinação de odds entre as casas...');
@@ -235,6 +279,42 @@ export class ArbitrageScannerV2 {
         oportunidadesGerais.push(...ops);
         motorOps = ops;
         motorVarreu = true; // cruzamento rodou → a lista (mesmo vazia) é autoritativa p/ reconciliar
+      }
+
+      // 💎 Value bets (+EV) vs Pinnacle — RADAR-ONLY, tabela própria (valor_oportunidades).
+      // TOTALMENTE isolado do arb: try/catch que nunca propaga, e NADA aqui dispara alerta
+      // no WhatsApp (o gate de alerta só olha a tabela `oportunidades`). Só reconcilia
+      // (expira as não re-detectadas) quando a REFERÊNCIA (Pinnacle) esteve presente —
+      // senão uma falha transitória dela expiraria oportunidades válidas.
+      try {
+        const temReferencia = fontes.some(
+          (f) => (f.nome || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase() === 'pinnacle'
+        );
+        if (temReferencia) {
+          const agoraIso = new Date().toISOString();
+          const valorOps = encontrarValor(fontes);
+          await upsertValorOportunidades(valorOps, agoraIso);
+          await expirarValorAntigas(agoraIso);
+          console.log(`💎 [Scanner V2] Value bets: ${valorOps.length} oportunidade(s) de valor (radar).`);
+        }
+      } catch (e: any) {
+        console.error('⚠️ [Scanner V2] Value bets (não-fatal, arb segue):', e?.message || e);
+      }
+
+      // 🎯 Middles (totais over/under com linhas diferentes) — RADAR-ONLY, tabela própria
+      // (middle_oportunidades), também isolado do arb. Reconcilia (expira os não
+      // re-detectados) só quando o cruzamento teve material (>= 2 fontes) — senão uma
+      // varredura degradada expiraria middles válidos.
+      try {
+        if (fontes.length >= 2) {
+          const agoraIso = new Date().toISOString();
+          const middles = encontrarMiddles(fontes);
+          await upsertMiddles(middles, agoraIso);
+          await expirarMiddlesAntigos(agoraIso);
+          console.log(`🎯 [Scanner V2] Middles: ${middles.length} oportunidade(s) (radar).`);
+        }
+      } catch (e: any) {
+        console.error('⚠️ [Scanner V2] Middles (não-fatal, arb segue):', e?.message || e);
       }
     }
 
@@ -442,12 +522,24 @@ export class ArbitrageScannerV2 {
                  // uma falha transitória suprimiria o alerta PARA SEMPRE enquanto a linha
                  // vivesse no banco. Removida, a próxima varredura (5 min) reinsere e
                  // re-passa pelo gate.
-                 if (/falha ao|indisponível/i.test(reval.motivo)) {
+                 const ehInfra = /falha ao|indisponível/i.test(reval.motivo);
+                 if (ehInfra) {
                    try {
                      await supabase.from('oportunidades').delete().eq('id', novaOpp.id);
                      console.log('   ↳ linha removida p/ re-gate na próxima varredura (falha de infra).');
                    } catch { /* segue */ }
                  }
+                 // Calibração: registra a supressão (falso positivo do scan) ou a falha de infra.
+                 void logAlerta({
+                   fonte: ehSureRadar ? 'sureradar' : 'motor',
+                   esporte: opp.esporte, evento: opp.evento, mercado: opp.mercado,
+                   casaA: opp.casaA, casaB: opp.casaB, opcaoA: opp.opcaoA, opcaoB: opp.opcaoB,
+                   roiScan: roi, roiRevalidado: reval.roiAtual ?? null,
+                   oddA: reval.oddA ?? null, oddB: reval.oddB ?? null,
+                   confianca: opp.confianca ?? null, envolvePinnacle,
+                   resultado: ehInfra ? 'nao_verificado' : 'suprimido', motivo: reval.motivo,
+                   startsAt: opp.dataHora ?? null,
+                 });
                } else {
                  // Usa as odds FRESCAS no alerta (o apostador vê o que a casa mostra agora)
                  // — recomputando TAMBÉM totalPerc/oddCombinada, senão as stakes sairiam
@@ -498,6 +590,17 @@ export class ArbitrageScannerV2 {
                      eventosAlertadosMotor.add(base); // consome o teto/dedup só em envio real
                    }
                  }
+                 // Calibração: arb confirmada pela revalidação AO VIVO → conta como "enviado"
+                 // (a sobrevivência scan→revalidação é o sinal, independente da entrega do WhatsApp).
+                 void logAlerta({
+                   fonte: ehSureRadar ? 'sureradar' : 'motor',
+                   esporte: opp.esporte, evento: opp.evento, mercado: opp.mercado,
+                   casaA: opp.casaA, casaB: opp.casaB, opcaoA: opp.opcaoA, opcaoB: opp.opcaoB,
+                   roiScan: roi, roiRevalidado: reval.roiAtual ?? null,
+                   oddA: reval.oddA ?? null, oddB: reval.oddB ?? null,
+                   confianca: opp.confianca ?? null, envolvePinnacle,
+                   resultado: 'enviado', startsAt: opp.dataHora ?? null,
+                 });
                }
              } else {
                console.log(`ℹ️ [WhatsApp] Alerta ignorado (já enviado): ${opp.evento} (${roi}%)`);

@@ -10,7 +10,10 @@ import { projetarEvolucaoDiaria } from './core/evolution';
 import { SchedulerService } from './scheduler/scheduler';
 import { EnrichmentService } from './scheduler/enrichmentService';
 import { GreenMonitorService } from './scheduler/greenMonitorService';
+import { BrowserScrapeWorker } from './scheduler/browserScrapeWorker';
 import { RevalidationService } from './core/revalidationService';
+import { getValorAtivas, deleteValor, getMiddlesAtivos, deleteMiddle } from './core/valorRepo';
+import { getResumoCalibracao, getAlertasRecentes } from './core/calibracaoRepo';
 import { requireApiToken } from './auth/apiToken';
 import { generateWithFallback } from './IA/aiProvider';
 import { WhatsAppNotifier } from './notify/whatsapp';
@@ -587,6 +590,65 @@ app.get('/api/cashout/opportunities', async (_req, res) => {
   }
 });
 
+// 💎 Value bets (+EV) — RADAR-ONLY (tabela valor_oportunidades, migration 014). Fonte
+// separada do arb: nunca dispara alerta, só alimenta a aba de valor no radar.
+app.get('/api/valor', async (_req, res) => {
+  try {
+    const oportunidades = await getValorAtivas();
+    res.json({ oportunidades });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao obter value bets', oportunidades: [] });
+  }
+});
+
+app.delete('/api/valor/:id', async (req, res) => {
+  try {
+    const ok = await deleteValor(req.params.id);
+    res.json({ ok });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao excluir value bet' });
+  }
+});
+
+// 🎯 Middles (totais com linhas diferentes) — RADAR-ONLY (tabela middle_oportunidades).
+app.get('/api/middles', async (_req, res) => {
+  try {
+    const oportunidades = await getMiddlesAtivos();
+    res.json({ oportunidades });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao obter middles', oportunidades: [] });
+  }
+});
+
+app.delete('/api/middles/:id', async (req, res) => {
+  try {
+    const ok = await deleteMiddle(req.params.id);
+    res.json({ ok });
+  } catch (error: any) {
+    res.status(500).json({ ok: false, error: error.message || 'Erro ao excluir middle' });
+  }
+});
+
+// 📐 Calibração do alerta de surebet — precisão scan→revalidação (tabela alerta_log).
+app.get('/api/calibracao', async (req, res) => {
+  try {
+    const dias = Math.max(1, Math.min(365, Number(req.query.dias) || 30));
+    const resumo = await getResumoCalibracao(dias);
+    res.json(resumo);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao obter calibração' });
+  }
+});
+
+app.get('/api/calibracao/alertas', async (_req, res) => {
+  try {
+    const alertas = await getAlertasRecentes();
+    res.json({ alertas });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao obter alertas', alertas: [] });
+  }
+});
+
 // GET - "Verificar": rebusca a odd MAIS RECENTE da casa desregulada p/ esta oportunidade
 // (último snapshot do worker, ≤ ~1min) e diz se a odd mudou e se o valor ainda está de pé.
 app.get('/api/cashout/opportunities/:id/verificar', async (req, res) => {
@@ -887,6 +949,15 @@ app.listen(port, () => {
   // Radar Cashout — monitor POR-APOSTA ("Minha aposta"): rastreia AO VIVO as apostas
   // que o usuário cadastrou (valor de saque + sinal). Guardado por CASHOUT_BET_MONITOR_ENABLED.
   cashoutBetMonitor.start().catch((e) => console.error('❌ [Cashout/Bets] Falha ao iniciar monitor:', e?.message || e));
+
+  // Worker das casas de BROWSER (Betano/Blaze/1xBet): coleta em cadência própria e alimenta
+  // o browserOddsCache, que a varredura lê para incluí-las no scan automático. DESLIGADO por
+  // padrão (mexe na carga da VPS 1-core) — ligar com BROWSER_WORKER_ENABLED=true observando o load.
+  if (process.env.BROWSER_WORKER_ENABLED === 'true') {
+    new BrowserScrapeWorker().start(Number(process.env.BROWSER_WORKER_MINUTES) || 20);
+  } else {
+    console.log('ℹ️ [BrowserWorker] Desligado (defina BROWSER_WORKER_ENABLED=true p/ incluir Betano/Blaze/1xBet no scan automático).');
+  }
 
   // Enriquecimento de IA é MANUAL (botão "Analisar IA") para poupar tokens/cota das APIs.
   // O worker automático fica desligado de propósito; a análise roda sob demanda via

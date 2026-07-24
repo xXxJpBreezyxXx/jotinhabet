@@ -231,6 +231,42 @@ function mesmosTokens(a: string, b: string): boolean {
 }
 
 /**
+ * True se `curto` aparece em `longo` alinhado a FRONTEIRAS DE TOKEN (começo, fim ou
+ * cercado por espaços) — nunca no MEIO de uma palavra. Substitui o `includes` cru,
+ * que casava "Inter" (Milão) com "Internacional" e "River" com "Riverside": substring
+ * de meio de palavra em times DISTINTOS = prejuízo real. "Bayern" × "Bayern Munique"
+ * segue casando (token inteiro). Exige `curto` com mais de 3 chars (evita fragmento curto).
+ */
+function contemComoTokens(longo: string, curto: string): boolean {
+  if (curto.length <= 3 || longo.length < curto.length) return false;
+  if (longo === curto) return true;
+  return (
+    longo.startsWith(curto + ' ') ||
+    longo.endsWith(' ' + curto) ||
+    longo.includes(' ' + curto + ' ')
+  );
+}
+
+/** Razão de comprimento [0..1] entre duas strings (menor/maior). */
+function razaoComprimento(a: string, b: string): number {
+  const la = a.length, lb = b.length;
+  if (la === 0 || lb === 0) return 0;
+  return Math.min(la, lb) / Math.max(la, lb);
+}
+
+/**
+ * Jaro-Winkler com GUARDA DE COMPRIMENTO. O bônus de prefixo do Winkler casava um
+ * nome CURTO com um LONGO que o contém como prefixo ("inter"/"internacional",
+ * "river"/"riverside") — times DISTINTOS, dinheiro real. Variantes de grafia
+ * legítimas ("bulgaria"/"bulgária", typos) têm comprimento parecido, então exigir
+ * min/max >= 0.7 barra o prefixo-de-longo sem atingir as variantes reais.
+ */
+function jwCasa(a: string, b: string, threshold: number): boolean {
+  if (razaoComprimento(a, b) < 0.7) return false;
+  return jaroWinkler(a, b) >= threshold;
+}
+
+/**
  * Casamento por SOBRENOME + INICIAL ("alcaraz c" × "carlos alcaraz") — formato comum
  * em tênis/tênis de mesa. Exige que TODOS os tokens completos do lado abreviado
  * existam no outro nome, e que cada inicial seja compatível com uma palavra restante.
@@ -267,8 +303,8 @@ export function areTeamsSame(teamA: string, teamB: string, threshold = 0.75): bo
   if (!normA || !normB) return false;
 
   if (normA === normB) return true;
-  if (normA.includes(normB) && normB.length > 3) return true;
-  if (normB.includes(normA) && normA.length > 3) return true;
+  // Substring ALINHADA A TOKEN (não mais o `includes` cru, que casava "Inter"/"Internacional").
+  if (contemComoTokens(normA, normB) || contemComoTokens(normB, normA)) return true;
   // Mesmos tokens em ordem diferente (sobrenome-primeiro sem vírgula)
   if (mesmosTokens(normA, normB)) return true;
 
@@ -280,9 +316,9 @@ export function areTeamsSame(teamA: string, teamB: string, threshold = 0.75): bo
   // Sobrenome + inicial ("alcaraz c" × "carlos alcaraz")
   if (casaPorIniciais(normA, normB)) return true;
 
-  // Jaro-Winkler sobre os nomes normalizados e canônicos
-  if (jaroWinkler(normA, normB) >= threshold) return true;
-  if (jaroWinkler(canonA, canonB) >= threshold) return true;
+  // Jaro-Winkler (com guarda de comprimento) sobre os nomes normalizados e canônicos
+  if (jwCasa(normA, normB, threshold)) return true;
+  if (jwCasa(canonA, canonB, threshold)) return true;
 
   return false;
 }
@@ -375,10 +411,12 @@ function simTime(a: string, b: string): number {
   const nb = pb.nome;
   if (!na || !nb) return 0;
   if (na === nb) return 1;
-  if ((na.includes(nb) && nb.length > 3) || (nb.includes(na) && na.length > 3)) return 0.95;
+  if (contemComoTokens(na, nb) || contemComoTokens(nb, na)) return 0.95;
   if (mesmosTokens(na, nb)) return 0.95;
   if (canonicalDoNome(na) === canonicalDoNome(nb)) return 0.9;
   if (casaPorIniciais(na, nb)) return 0.9;
+  // Mesma guarda de comprimento do areTeamsSame: prefixo-de-longo não infla a força.
+  if (razaoComprimento(na, nb) < 0.7) return 0;
   return jaroWinkler(na, nb);
 }
 

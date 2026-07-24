@@ -57,6 +57,18 @@ describe('matcher.areTeamsSame — guardas duras (anti falso positivo)', () => {
     expect(areTeamsSame('Barcelona B', 'Barcelona')).toBe(false);
     expect(areTeamsSame('Sporting II', 'Sporting B')).toBe(true);
   });
+  it('nome curto que é PREFIXO de outro longo NÃO casa ("Inter"/"Internacional")', () => {
+    // Substring de meio de palavra + bônus de prefixo do Jaro-Winkler: os dois
+    // vetores que casavam times distintos. A guarda de comprimento cobre ambos.
+    expect(areTeamsSame('Inter', 'Internacional')).toBe(false);
+    expect(areTeamsSame('River', 'Riverside')).toBe(false);
+    expect(areTeamsSame('Boca', 'Boca Juniors')).toBe(true); // token inteiro adicional AINDA casa
+  });
+  it('token inteiro adicional AINDA casa ("Bayern" × "Bayern Munique")', () => {
+    expect(areTeamsSame('Bayern', 'Bayern Munique')).toBe(true);
+    expect(areTeamsSame('Flamengo', 'Flamengo RJ')).toBe(true);
+    expect(areTeamsSame('Manchester City', 'Manchester City')).toBe(true);
+  });
 });
 
 describe('matcher.areEventsSame — eventos completos', () => {

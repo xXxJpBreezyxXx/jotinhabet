@@ -184,6 +184,77 @@ const CASAS_PADRAO = [
   'BetWarrior', 'Aposta1', 'Novibet', 'Sportingbet', 'SeuBet', 'Vbet', 'Pinnacle',
 ];
 
+/** Aposta de VALOR (+EV vs Pinnacle), como devolvida por GET /api/valor. */
+interface ValorOportunidade {
+  id: string;
+  esporte?: string;
+  evento: string;
+  mercado: string;
+  linha?: number | null;
+  casa: string;
+  opcao: string;
+  odd_casa: number;
+  fair_odd: number;
+  prob_real: number;
+  edge_pct: number;       // 5.0 = +5% de EV
+  referencia: string;     // ex.: 'Pinnacle'
+  confianca?: number | null;
+  starts_at?: string | null;
+  detected_at: string;
+}
+
+/** Calibração do alerta — resumo (GET /api/calibracao) e itens (GET /api/calibracao/alertas). */
+interface CalibFaixa {
+  enviados: number;
+  suprimidos: number;
+  naoVerificados: number;
+  taxaSobrevivencia: number | null; // % dos flagrados que a revalidação confirmou
+}
+interface CalibResumo {
+  dias: number;
+  total: number;
+  geral: CalibFaixa;
+  driftMedioPp: number | null;      // média (ROI revalidado − ROI scan), em pontos %
+  porFonte: Record<string, CalibFaixa>;
+  comPinnacle: CalibFaixa;
+  semPinnacle: CalibFaixa;
+  atualizadoEm: string;
+}
+interface CalibAlerta {
+  id: string;
+  fonte: string;
+  esporte?: string;
+  evento: string;
+  mercado?: string;
+  casa_a?: string;
+  casa_b?: string;
+  roi_scan?: number;
+  roi_revalidado?: number;
+  confianca?: number;
+  envolve_pinnacle?: boolean;
+  resultado: string;                // 'enviado' | 'suprimido' | 'nao_verificado'
+  motivo?: string;
+  created_at: string;
+}
+
+/** Middle (totais com linhas diferentes), como devolvido por GET /api/middles. */
+interface ValorMiddle {
+  id: string;
+  esporte?: string;
+  evento: string;
+  mercado: string;
+  over_casa: string;
+  over_odd: number;
+  over_linha: number;
+  under_casa: string;
+  under_odd: number;
+  under_linha: number;
+  largura: number;
+  pior_caso_roi_pct: number;   // >=0: lucro garantido + middle; <0: custo se o meio não bater
+  starts_at?: string | null;
+  detected_at: string;
+}
+
 /** Oportunidade do Radar Cashout, como devolvida por GET /api/cashout/opportunities. */
 interface CashoutOpportunity {
   id: string;
@@ -312,8 +383,18 @@ function CashoutGapBadge({ gapPct }: { gapPct: number }) {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'valor' | 'calibracao' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
+
+  // Value bets (+EV vs Pinnacle) + middles — radar-only (polling só quando a aba está aberta).
+  const [valorOpps, setValorOpps] = useState<ValorOportunidade[]>([]);
+  const [middlesOpps, setMiddlesOpps] = useState<ValorMiddle[]>([]);
+  const [valorLoading, setValorLoading] = useState(true);
+
+  // Calibração do alerta (precisão scan→revalidação).
+  const [calibResumo, setCalibResumo] = useState<CalibResumo | null>(null);
+  const [calibAlertas, setCalibAlertas] = useState<CalibAlerta[]>([]);
+  const [calibLoading, setCalibLoading] = useState(true);
 
   // Radar Cashout: oportunidades ativas + status do worker (polling só quando a aba está aberta).
   const [cashoutOpps, setCashoutOpps] = useState<CashoutOpportunity[]>([]);
@@ -442,6 +523,54 @@ export default function App() {
     setCashoutOpps((ops) => ops.filter((o) => o.id !== id)); // some da lista na hora
     fetch(`/api/cashout/opportunities/${id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
   };
+
+  // Excluir uma aposta de valor / middle do radar (soft-delete no backend; some da lista local).
+  const excluirValor = (id: string) => {
+    setValorOpps((prev) => prev.filter((o) => o.id !== id));
+    fetch(`/api/valor/${id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
+  };
+  const excluirMiddle = (id: string) => {
+    setMiddlesOpps((prev) => prev.filter((o) => o.id !== id));
+    fetch(`/api/middles/${id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'valor') return;
+    let vivo = true;
+    const puxar = () => {
+      fetch('/api/valor')
+        .then((r) => r.json())
+        .then((d) => { if (vivo) setValorOpps(Array.isArray(d.oportunidades) ? d.oportunidades : []); })
+        .catch(() => { /* mantém o último estado */ })
+        .finally(() => { if (vivo) setValorLoading(false); });
+      fetch('/api/middles')
+        .then((r) => r.json())
+        .then((d) => { if (vivo) setMiddlesOpps(Array.isArray(d.oportunidades) ? d.oportunidades : []); })
+        .catch(() => { /* mantém o último estado */ });
+    };
+    puxar();
+    const id = setInterval(puxar, 8000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'calibracao') return;
+    let vivo = true;
+    const puxar = () => {
+      fetch('/api/calibracao')
+        .then((r) => r.json())
+        .then((d) => { if (vivo) setCalibResumo(d && typeof d === 'object' && 'geral' in d ? d : null); })
+        .catch(() => { /* mantém o último estado */ })
+        .finally(() => { if (vivo) setCalibLoading(false); });
+      fetch('/api/calibracao/alertas')
+        .then((r) => r.json())
+        .then((d) => { if (vivo) setCalibAlertas(Array.isArray(d.alertas) ? d.alertas : []); })
+        .catch(() => { /* mantém o último estado */ });
+    };
+    puxar();
+    const id = setInterval(puxar, 15000);
+    return () => { vivo = false; clearInterval(id); };
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab !== 'radar-cashout') return;
@@ -1493,6 +1622,20 @@ export default function App() {
               Radar Cashout
             </a>
             <a
+              className={`nav-item ${activeTab === 'valor' ? 'active' : ''}`}
+              onClick={() => setActiveTab('valor')}
+            >
+              <TrendingUp size={18} />
+              Value Bets
+            </a>
+            <a
+              className={`nav-item ${activeTab === 'calibracao' ? 'active' : ''}`}
+              onClick={() => setActiveTab('calibracao')}
+            >
+              <Activity size={18} />
+              Calibração
+            </a>
+            <a
               className={`nav-item ${activeTab === 'calculadora' ? 'active' : ''}`}
               onClick={() => setActiveTab('calculadora')}
             >
@@ -1560,6 +1703,8 @@ export default function App() {
             <h1>
               {activeTab === 'dashboard' && 'Radar de Surebets'}
               {activeTab === 'radar-cashout' && 'Radar Cashout'}
+              {activeTab === 'valor' && 'Value Bets (+EV)'}
+              {activeTab === 'calibracao' && 'Calibração do Alerta'}
               {activeTab === 'calculadora' && 'Calculadora de Arbitragem'}
               {activeTab === 'juros-compostos' && 'Evolução Diária e Juros Compostos'}
               {activeTab === 'saldos' && 'Saldo Disponível nas Casas'}
@@ -1568,6 +1713,8 @@ export default function App() {
             <p>
               {activeTab === 'dashboard' && 'Monitore oportunidades de lucro garantido em tempo real'}
               {activeTab === 'radar-cashout' && 'Monitore oportunidades de cashout em tempo real'}
+              {activeTab === 'valor' && 'Apostas com valor esperado positivo (odd acima da justa da Pinnacle) — só radar, sem alerta'}
+              {activeTab === 'calibracao' && 'Precisão do alerta: quantas surebets flagradas o scan viu que sobreviveram à revalidação ao vivo'}
               {activeTab === 'calculadora' && 'Calcule as stakes ideais e ROI para operações de arbitragem'}
               {activeTab === 'juros-compostos' && 'Simulação e projeção baseadas na planilha de Arbitragem'}
               {activeTab === 'saldos' && 'Registre quanto você tem disponível em cada casa de apostas'}
@@ -2751,6 +2898,197 @@ export default function App() {
                   );
                 })}
               </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'valor' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div className="glass-panel" style={{ padding: '14px 18px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px', fontSize: '13px' }}>
+              <TrendingUp size={16} style={{ color: '#34d399' }} />
+              <span style={{ color: 'var(--text-secondary)' }}>
+                Odd da casa <strong>acima da justa sem-margem da Pinnacle</strong>. É estimativa de <strong>valor esperado (EV)</strong> — não é lucro garantido como a surebet. Radar-only: nada aqui dispara alerta.
+              </span>
+            </div>
+
+            {valorLoading && valorOpps.length === 0 ? (
+              <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>Carregando…</div>
+            ) : valorOpps.length === 0 ? (
+              <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                Nenhuma aposta de valor no momento. O radar atualiza a cada varredura.
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+                {valorOpps.map((o) => (
+                  <div key={o.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px', position: 'relative' }}>
+                    <button onClick={() => excluirValor(o.id)} title="Excluir do radar"
+                      style={{ position: 'absolute', top: '12px', right: '12px', background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                      <Trash2 size={15} />
+                    </button>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+                      <span style={{ fontSize: '22px', fontWeight: 700, color: '#34d399' }}>+{o.edge_pct.toFixed(2)}%</span>
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>EV</span>
+                    </div>
+                    <div style={{ fontWeight: 600, color: 'var(--text-primary)', paddingRight: '20px' }}>{o.evento}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {[o.esporte, o.mercado, o.linha != null ? `linha ${o.linha}` : null].filter(Boolean).join(' • ')}
+                    </div>
+                    <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '13px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>{o.casa} — {o.opcao}</span>
+                        <strong style={{ color: '#34d399' }}>{o.odd_casa.toFixed(2)}</strong>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+                        <span>Justa ({o.referencia})</span>
+                        <span>{o.fair_odd.toFixed(2)}</span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)' }}>
+                      <span>{o.starts_at ? new Date(o.starts_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</span>
+                      {o.confianca != null && <span>conf. {Math.round(o.confianca * 100)}%</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Seção Middles: totais com linhas diferentes (ex.: Over 2.5 × Under 3.5). */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '8px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                🎯 Middles
+                <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--text-muted)' }}>
+                  linhas diferentes entre casas — o total no meio ganha as duas pernas
+                </span>
+              </h3>
+              {middlesOpps.length === 0 ? (
+                <div className="glass-panel" style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                  Nenhum middle no momento.
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+                  {middlesOpps.map((m) => {
+                    const garantido = m.pior_caso_roi_pct >= 0;
+                    return (
+                      <div key={m.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px', position: 'relative' }}>
+                        <button onClick={() => excluirMiddle(m.id)} title="Excluir do radar"
+                          style={{ position: 'absolute', top: '12px', right: '12px', background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
+                          <Trash2 size={15} />
+                        </button>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+                          <span style={{ fontSize: '15px', fontWeight: 700, color: garantido ? '#34d399' : '#f59e0b' }}>
+                            {garantido ? `+${m.pior_caso_roi_pct.toFixed(2)}% garantido` : `${m.pior_caso_roi_pct.toFixed(2)}% (pior caso)`}
+                          </span>
+                        </div>
+                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', paddingRight: '20px' }}>{m.evento}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                          {[m.esporte, m.mercado].filter(Boolean).join(' • ')} · janela {m.over_linha}–{m.under_linha} (largura {m.largura})
+                        </div>
+                        <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '10px', display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '13px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>{m.over_casa} — Mais de {m.over_linha}</span>
+                            <strong style={{ color: 'var(--text-primary)' }}>{m.over_odd.toFixed(2)}</strong>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>{m.under_casa} — Menos de {m.under_linha}</span>
+                            <strong style={{ color: 'var(--text-primary)' }}>{m.under_odd.toFixed(2)}</strong>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                          {m.starts_at ? new Date(m.starts_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'calibracao' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div className="glass-panel" style={{ padding: '14px 18px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px', fontSize: '13px' }}>
+              <Activity size={16} style={{ color: '#34d399' }} />
+              <span style={{ color: 'var(--text-secondary)' }}>
+                <strong>Taxa de sobrevivência</strong> = dos alertas que o scan flagrou, quantos % a revalidação AO VIVO confirmou (o resto foi suprimido = falso positivo do scan). Falhas de infra ficam de fora.
+              </span>
+            </div>
+
+            {calibLoading && !calibResumo ? (
+              <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>Carregando…</div>
+            ) : !calibResumo || calibResumo.total === 0 ? (
+              <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                Sem dados ainda. A calibração começa a preencher quando o scan tomar decisões de alerta.
+              </div>
+            ) : (
+              <>
+                {/* Stat tiles */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+                  <div className="glass-panel" style={{ padding: '18px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Sobrevivência (geral)</div>
+                    <div style={{ fontSize: '28px', fontWeight: 700, color: '#34d399' }}>
+                      {calibResumo.geral.taxaSobrevivencia != null ? `${calibResumo.geral.taxaSobrevivencia}%` : '—'}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>últimos {calibResumo.dias} dias</div>
+                  </div>
+                  <div className="glass-panel" style={{ padding: '18px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Drift médio de ROI</div>
+                    <div style={{ fontSize: '28px', fontWeight: 700, color: (calibResumo.driftMedioPp ?? 0) >= 0 ? '#34d399' : '#f59e0b' }}>
+                      {calibResumo.driftMedioPp != null ? `${calibResumo.driftMedioPp > 0 ? '+' : ''}${calibResumo.driftMedioPp} pp` : '—'}
+                    </div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>scan → revalidado</div>
+                  </div>
+                  <div className="glass-panel" style={{ padding: '18px' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Decisões</div>
+                    <div style={{ fontSize: '28px', fontWeight: 700, color: 'var(--text-primary)' }}>{calibResumo.total}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {calibResumo.geral.enviados} enviados · {calibResumo.geral.suprimidos} suprimidos · {calibResumo.geral.naoVerificados} infra
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quebra por Pinnacle e por fonte */}
+                <div className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>Sobrevivência por segmento</h3>
+                  {([
+                    ['Com Pinnacle', calibResumo.comPinnacle],
+                    ['Sem Pinnacle (2 softs)', calibResumo.semPinnacle],
+                    ...Object.entries(calibResumo.porFonte).map(([f, v]) => [`Fonte: ${f}`, v] as [string, CalibFaixa]),
+                  ] as [string, CalibFaixa][]).map(([rotulo, fx]) => (
+                    <div key={rotulo} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', borderTop: '1px solid var(--panel-border)', paddingTop: '8px' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>{rotulo}</span>
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        <strong style={{ color: 'var(--text-primary)' }}>{fx.taxaSobrevivencia != null ? `${fx.taxaSobrevivencia}%` : '—'}</strong>
+                        {' '}({fx.enviados}✓ / {fx.suprimidos}✕)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Alertas recentes */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>Alertas recentes</h3>
+                  {calibAlertas.length === 0 ? (
+                    <div className="glass-panel" style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>Nenhum registro ainda.</div>
+                  ) : (
+                    calibAlertas.map((a) => {
+                      const cor = a.resultado === 'enviado' ? '#34d399' : a.resultado === 'suprimido' ? '#f59e0b' : 'var(--text-muted)';
+                      const rot = a.resultado === 'enviado' ? 'ENVIADO' : a.resultado === 'suprimido' ? 'SUPRIMIDO' : 'INFRA';
+                      return (
+                        <div key={a.id} className="glass-panel" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '13px', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 700, color: cor, minWidth: '78px' }}>{rot}</span>
+                          <span style={{ color: 'var(--text-primary)', fontWeight: 600, flex: 1, minWidth: '160px' }}>{a.evento}</span>
+                          <span style={{ color: 'var(--text-muted)' }}>{[a.casa_a, a.casa_b].filter(Boolean).join(' × ')}</span>
+                          <span style={{ color: 'var(--text-secondary)' }}>
+                            {a.roi_scan != null ? `${a.roi_scan.toFixed(1)}%` : '—'} → {a.roi_revalidado != null ? `${a.roi_revalidado.toFixed(1)}%` : '—'}
+                          </span>
+                          {a.envolve_pinnacle && <span style={{ fontSize: '11px', color: '#60a5fa' }}>Pinnacle</span>}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </>
             )}
           </div>
         )}
