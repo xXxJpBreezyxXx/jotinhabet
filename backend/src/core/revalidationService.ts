@@ -166,9 +166,14 @@ export class RevalidationService {
     const fab = SCRAPER_FACTORY[chave];
     if (!fab) return [];
     const odds = await fab().oddsDoEvento(evento, esporte);
-    this.memoOdds.set(key, { at: Date.now(), odds });
-    // higiene: não deixa o memo crescer sem limite entre varreduras
-    if (this.memoOdds.size > 200) this.memoOdds.clear();
+    // NÃO memoiza lista vazia: [] tanto vem de falha transitória quanto de ausência real,
+    // e cachear por 60s envenenaria a revalidação (perna some do gate por engano). Só
+    // cacheia resultado com conteúdo — o vazio é re-buscado na próxima chamada.
+    if (odds.length > 0) {
+      this.memoOdds.set(key, { at: Date.now(), odds });
+      // higiene: não deixa o memo crescer sem limite entre varreduras
+      if (this.memoOdds.size > 200) this.memoOdds.clear();
+    }
     return odds;
   }
 
@@ -236,9 +241,11 @@ export class RevalidationService {
     return Number(((1 / totalPerc - 1) * 100).toFixed(2));
   }
 
-  /** Handicap COM SINAL embutido no rótulo ("Time A (-1.5)"), ou null. */
+  /** Handicap COM SINAL embutido no rótulo ("Time A (-1.5)"), ou null.
+   *  Normaliza vírgula decimal ("-1,5" → "-1.5"): o SureRadar entrega linha com vírgula
+   *  e o parse parcial casava a linha ERRADA (ver revalidacao-pre-alerta). */
   private linhaEmbutida(s: string): number | null {
-    const m = (s || '').match(/\(([+-]?\d+(?:\.\d+)?)\)\s*$/);
+    const m = (s || '').replace(/,/g, '.').match(/\(([+-]?\d+(?:\.\d+)?)\)\s*$/);
     return m ? parseFloat(m[1]) : null;
   }
 
@@ -251,7 +258,9 @@ export class RevalidationService {
   private linhaDaOpcao(s: string): number | null {
     const emb = this.linhaEmbutida(s);
     if (emb !== null) return Math.abs(emb);
-    const m = (s || '').match(/\b(?:mais de|menos de|over|under|acima de|abaixo de)\s+([+-]?\d+(?:\.\d+)?)/i);
+    // Normaliza vírgula decimal ("Acima de 2,5" → "2.5") antes do regex — sem isso o
+    // parse casava só o inteiro ("2") e devolvia a odd de OUTRA linha (2.0 ≠ 2.5).
+    const m = (s || '').replace(/,/g, '.').match(/\b(?:mais de|menos de|over|under|acima de|abaixo de)\s+([+-]?\d+(?:\.\d+)?)/i);
     return m ? Math.abs(parseFloat(m[1])) : null;
   }
 
@@ -377,7 +386,15 @@ export class RevalidationService {
         const oddA = alinhado ? match.oddA : match.oddB;
         const oddB = alinhado ? match.oddB : match.oddA;
         // casaA/casaB da oportunidade → aplica comissão de exchange na perna certa.
-        const roi = this.roiVerdadeiro(oddA, oddB, opp.casaA, opp.casaB);
+        let roi = this.roiVerdadeiro(oddA, oddB, opp.casaA, opp.casaB);
+        // QUARTER-LINE (.25/.75): o ROI garantido é o PISO (cenário do meio devolve metade)
+        // — MESMA convenção do revalidarPelasCasas/engine. Sem isto o gate da lista dizia
+        // "confirmada 3%" para um piso real de 1,5%. Deriva a linha do rótulo (a opp da
+        // SureRadar não carrega opp.linha) ou usa a linha embutida do handicap.
+        const linhaEfetivaSR = opp.linha ?? this.linhaDaOpcao(opp.opcaoA) ?? this.linhaDaOpcao(opp.opcaoB);
+        if (roi !== null && linhaEfetivaSR != null && ehLinhaQuarter(linhaEfetivaSR)) {
+          roi = Number((roi / 2).toFixed(2));
+        }
         return { ok: roi !== null && roi > 0, oddA, oddB, roiAtual: roi, motivo: roi === null ? 'odds inválidas' : `confirmada no SureRadar (ROI ${roi}%)` };
       } catch (e: any) {
         return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `falha ao reconsultar SureRadar: ${e?.message || e}` };

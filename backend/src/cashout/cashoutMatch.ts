@@ -89,22 +89,26 @@ export function alignOdd(
     if (!split) return null;
     const [ownHome, ownAway] = split;
 
-    // Orienta as pernas desta casa contra o canônico por identidade de time.
+    // Orienta as pernas desta casa contra o canônico por identidade de time. Pontua as
+    // duas hipóteses nas DUAS pontas (não com OR): times homônimos ("River Plate (ARG)"
+    // × "River Plate (URU)") casam fuzzy dos dois lados e o OR antigo escolhia a mesma
+    // orientação por vir primeiro — invertendo home/away. Empate de placar (ambíguo ou
+    // nenhum lado bate) → null (não arrisca).
     let aSel: CashoutSelection;
     let bSel: CashoutSelection;
-    const mesmaOrientacao =
-      areTeamsSame(ownHome, canonHome) || areTeamsSame(ownAway, canonAway);
-    const orientacaoInvertida =
-      areTeamsSame(ownHome, canonAway) || areTeamsSame(ownAway, canonHome);
+    const placarMesma =
+      (areTeamsSame(ownHome, canonHome) ? 1 : 0) + (areTeamsSame(ownAway, canonAway) ? 1 : 0);
+    const placarInvertida =
+      (areTeamsSame(ownHome, canonAway) ? 1 : 0) + (areTeamsSame(ownAway, canonHome) ? 1 : 0);
 
-    if (mesmaOrientacao) {
+    if (placarMesma > placarInvertida) {
       aSel = 'home';
       bSel = 'away';
-    } else if (orientacaoInvertida) {
+    } else if (placarInvertida > placarMesma) {
       aSel = 'away';
       bSel = 'home';
     } else {
-      return null; // times não bateram — não arrisca alinhar
+      return null; // ambíguo (homônimos casam dos dois lados) ou nenhum lado bate
     }
 
     return [

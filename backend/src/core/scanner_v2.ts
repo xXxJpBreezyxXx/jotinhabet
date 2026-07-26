@@ -444,12 +444,25 @@ export class ArbitrageScannerV2 {
           // Reconfirma: a surebet ainda está no SureRadar → atualiza "visto_em" para que a
           // idade da odd reflita a última vez vista (o SureRadar atualiza a cada ~10 min),
           // e não a primeira detecção. (Coluna vem da migration 007.)
+          // ATUALIZA TAMBÉM as odds/ROI/stakes FRESCOS desta varredura — sem isto o radar
+          // exibia a odd velha da 1ª detecção com carimbo de "vista agora" (odd defasada).
           try {
-            await supabase.from('oportunidades').update({ visto_em: new Date().toISOString() }).eq('id', existingId);
+            await supabase
+              .from('oportunidades')
+              .update({
+                visto_em: new Date().toISOString(),
+                odd_casa_1: opp.oddA,
+                odd_casa_2: opp.oddB,
+                roi_pct: opp.lucroGarantidoPerc,
+                stake_casa_1: distr.apostaA,
+                stake_casa_2: distr.apostaB,
+                lucro_esperado: distr.lucroR$,
+              })
+              .eq('id', existingId);
           } catch {
-            /* coluna visto_em pode não existir ainda; sem impacto */
+            /* colunas podem não existir ainda; sem impacto */
           }
-          console.log(`ℹ️ [Scanner V2] Surebet já ativa (visto_em atualizado): ${opp.evento}`);
+          console.log(`ℹ️ [Scanner V2] Surebet já ativa (odds/visto_em atualizados): ${opp.evento}`);
           continue;
         }
 
@@ -506,7 +519,12 @@ export class ArbitrageScannerV2 {
             // Só PRÉ-JOGO: nunca alerta partida que já começou (não fazemos ao vivo).
             if (!alreadyEntered && ehPreJogo(opp) && dentroDaJanelaDeAlerta(opp.evento) && (alertarSureRadar || alertarMotor)) {
              const fonte = ehSureRadar ? 'SureRadar' : 'Motor';
-             const alertKey = `${fonte}_${opp.evento.trim()}_${opp.mercado.trim()}_${opp.casaA.trim()}_${opp.casaB.trim()}_${roi.toFixed(1)}`;
+             // Casas ORDENADAS (o motor pode trocar A↔B entre scans conforme a melhor odd)
+             // e SEM o ROI na chave: o dedupe de conteúdo é evento+mercado+casas. Antes, o
+             // par de casas fora de ordem + o ROI com 1 decimal (que flutua 0.1) geravam
+             // chave nova a cada ciclo deleta/reinsere → alerta duplicado no WhatsApp.
+             const casasOrdenadas = [opp.casaA.trim(), opp.casaB.trim()].sort().join('_');
+             const alertKey = `${fonte}_${opp.evento.trim()}_${opp.mercado.trim()}_${casasOrdenadas}`;
              if (!alertAlreadySent(alertKey)) {
                // REVALIDAÇÃO PRÉ-ALERTA: reconsulta as pernas na casa de origem AGORA.
                // Só alerta se a surebet segue de pé com as odds ATUAIS e ROI >= piso —
@@ -619,7 +637,10 @@ export class ArbitrageScannerV2 {
     // SÓ com fonte 'api' (autoritativa): o fallback via browser não enxerga as VIP/locked,
     // e reconciliar com essa lista parcial apagaria surebets válidas de alto ROI do banco.
     if (sureradarScraper.ultimaFonte === 'api') {
-      await this.reconciliarSureRadar(srOps);
+      // Fonte 'api' é autoritativa: lista vazia = "zero surebets agora" (real). Reconcilia
+      // mesmo vazia — sem isto, quando o SureRadar zera, as surebets mortas ficavam presas
+      // no radar até a limpeza de 24h.
+      await this.reconciliarSureRadar(srOps, true);
     } else if (srOps.length > 0) {
       console.log(`ℹ️ [Scanner V2] Reconciliação pulada (fonte: ${sureradarScraper.ultimaFonte} — lista parcial).`);
     }
@@ -685,12 +706,13 @@ export class ArbitrageScannerV2 {
 
   /**
    * Remove as oportunidades do SureRadar ('detectada') que não estão mais na lista fresca.
-   * Guarda: se a lista fresca vier vazia (scrape falho/indisponível), NÃO remove nada.
-   * Auto-corrigível: se algo for removido por engano, o próximo scan (5 min) reinsere.
+   * Guarda: lista vazia de fonte NÃO autoritativa (scrape falho/browser parcial) NÃO remove
+   * nada. Com fonteAutoritativa=true (API), lista vazia É estado válido ("zero surebets
+   * agora") e limpa tudo. Auto-corrigível: removido por engano, o próximo scan reinsere.
    */
-  private async reconciliarSureRadar(freshOps: ArbitrageOpportunity[]): Promise<void> {
-    if (!freshOps || freshOps.length === 0) return;
-    const validos = new Set(freshOps.map((o) => this.assinaturaSurebet(o.evento, o.casaA, o.casaB, o.mercado)));
+  private async reconciliarSureRadar(freshOps: ArbitrageOpportunity[], fonteAutoritativa = false): Promise<void> {
+    if ((!freshOps || freshOps.length === 0) && !fonteAutoritativa) return;
+    const validos = new Set((freshOps || []).map((o) => this.assinaturaSurebet(o.evento, o.casaA, o.casaB, o.mercado)));
     try {
       const { data: rows, error } = await supabase
         .from('oportunidades')
