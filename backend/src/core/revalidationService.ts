@@ -5,11 +5,12 @@ import { areEventsSame, areTeamsSame, jaroWinkler, parseKickoff } from '../arbit
 import { mesmaOferta, ehLinhaQuarter, normalizarMercado, rotuloOver, rotuloUnder } from '../arbitrage/markets';
 import { canonizarCasa } from '../signals/casasAliases';
 import { normalizarCasa } from '../IA/riskAnalyzer';
+import { oddEfetiva } from '../arbitrage/comissao';
 import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
-import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper, FourPlayScraper } from '../scraping/casa_altenar';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
@@ -33,7 +34,8 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   esportesdasorte: () => new EsportesDaSorteScraper(),
   betnacional: () => new BetnacionalScraper(),
   betpix365: () => new BetPix365Scraper(), // Altenar (só revalidação; não é fonte do scanner)
-  estrelabet: () => new EstrelaBetScraper(), // Altenar (só revalidação; não é fonte do scanner)
+  estrelabet: () => new EstrelaBetScraper(), // Altenar (fonte do scanner + revalidação)
+  '4play': () => new FourPlayScraper(), // Altenar "4play" (fonte do scanner + revalidação)
   mcgames: () => new MCGamesScraper(), // Altenar "mcgames2" (só revalidação; não é fonte do scanner)
   // Casas de BROWSER (Playwright) — só mercado principal (Resultado Final). oddsDoEvento
   // sobe um chromium por revalidação (memo 60s dedup a; contrato de falha = throw p/ infra).
@@ -223,10 +225,14 @@ export class RevalidationService {
     return { oddA: fresh.oddA, oddB: fresh.oddB };
   }
 
-  /** ROI "verdadeiro" (lucro/investimento) a partir de duas odds — mesma convenção do SureRadar. */
-  private roiVerdadeiro(oddA: number, oddB: number): number | null {
+  /** ROI "verdadeiro" (lucro/investimento) a partir de duas odds — mesma convenção do SureRadar.
+   *  Com as casas informadas, aplica a odd EFETIVA (desconta comissão de exchange, ex.: Bolsa
+   *  de Aposta 1,5%) — senão a revalidação superestimaria o ROI da perna na exchange. */
+  private roiVerdadeiro(oddA: number, oddB: number, casaA?: string, casaB?: string): number | null {
     if (!(oddA > 1) || !(oddB > 1)) return null;
-    const totalPerc = 1 / oddA + 1 / oddB;
+    const effA = casaA ? oddEfetiva(casaA, oddA) : oddA;
+    const effB = casaB ? oddEfetiva(casaB, oddB) : oddB;
+    const totalPerc = 1 / effA + 1 / effB;
     return Number(((1 / totalPerc - 1) * 100).toFixed(2));
   }
 
@@ -370,7 +376,8 @@ export class RevalidationService {
         const alinhado = this.opcaoIgual(match.opcaoA, opp.opcaoA);
         const oddA = alinhado ? match.oddA : match.oddB;
         const oddB = alinhado ? match.oddB : match.oddA;
-        const roi = this.roiVerdadeiro(oddA, oddB);
+        // casaA/casaB da oportunidade → aplica comissão de exchange na perna certa.
+        const roi = this.roiVerdadeiro(oddA, oddB, opp.casaA, opp.casaB);
         return { ok: roi !== null && roi > 0, oddA, oddB, roiAtual: roi, motivo: roi === null ? 'odds inválidas' : `confirmada no SureRadar (ROI ${roi}%)` };
       } catch (e: any) {
         return { ok: false, oddA: null, oddB: null, roiAtual: null, motivo: `falha ao reconsultar SureRadar: ${e?.message || e}` };
@@ -423,7 +430,7 @@ export class RevalidationService {
         const faltou = [oddA === null ? opp.casaA : null, oddB === null ? opp.casaB : null].filter(Boolean).join(' e ');
         return { ok: false, oddA, oddB, roiAtual: null, motivo: `perna não encontrada agora em ${faltou} (linha removida/movida?)` };
       }
-      let roi = this.roiVerdadeiro(oddA, oddB);
+      let roi = this.roiVerdadeiro(oddA, oddB, opp.casaA, opp.casaB);
       // QUARTER-LINE (.25/.75): o ROI garantido é o PISO (o cenário do meio devolve
       // metade de cada perna → lucro = metade do nominal) — MESMA convenção do
       // engine.enriquecer, senão o alerta diria "revalidado 3%" para um piso de 1.5%.
@@ -465,7 +472,8 @@ export class RevalidationService {
     // Baseline calculado das MESMAS odds armazenadas (apples-to-apples com roiAtual),
     // caindo para o roi_pct só se as odds não estiverem disponíveis.
     let roiAnterior =
-      this.roiVerdadeiro(Number(opp.odd_casa_1), Number(opp.odd_casa_2)) ?? (Number(opp.roi_pct) || 0);
+      this.roiVerdadeiro(Number(opp.odd_casa_1), Number(opp.odd_casa_2), opp.casa_a_nome, opp.casa_b_nome) ??
+      (Number(opp.roi_pct) || 0);
     // Quarter-line no MOTOR próprio: o roiAtual do checarPernasAoVivo é o PISO, então
     // o baseline precisa ser o piso também — senão odds inalteradas viravam 'reduzida'.
     // (No SureRadar os dois lados seguem nominais → consistente sem ajuste.)
@@ -603,8 +611,11 @@ export class RevalidationService {
     }
 
     const { oddA, oddB } = this.alinharOdds(match, opp);
-    const totalPerc = 1 / oddA + 1 / oddB;
     // ROI "verdadeiro" (lucro/investimento) — MESMA convenção que o SureRadar grava em roi_pct.
+    // Odd EFETIVA desconta comissão de exchange (ex.: Bolsa de Aposta 1,5%) na perna certa.
+    const effA = oddEfetiva(opp.casa_a_nome, oddA);
+    const effB = oddEfetiva(opp.casa_b_nome, oddB);
+    const totalPerc = 1 / effA + 1 / effB;
     const roiAtual = Number(((1 / totalPerc - 1) * 100).toFixed(2));
 
     let status: RevalStatus;

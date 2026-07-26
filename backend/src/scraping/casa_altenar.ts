@@ -326,3 +326,15 @@ export class MCGamesScraper extends AltenarWidgetScraper {
     super({ nome: 'MC Games', integration: 'mcgames2', referer: 'https://www.mcgames.bet.br/' });
   }
 }
+
+/**
+ * 4Play — Altenar widget, integration "4play" (confirmado no recon 25/07/2026: menu de
+ * 80KB / 537 campeonatos, GetEvents com odds decimais; o feed biahosted responde direto,
+ * sem passar pelo bloqueio Akamai da home). Operador distinto → preço próprio: entra como
+ * FONTE do scanner e também no SCRAPER_FACTORY (revalidação).
+ */
+export class FourPlayScraper extends AltenarWidgetScraper {
+  constructor() {
+    super({ nome: '4Play', integration: '4play', referer: 'https://4play.bet.br/' });
+  }
+}

@@ -9,7 +9,7 @@ import { SuperbetScraper } from '../scraping/casa_superbet';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
-import { Aposta1Scraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, EstrelaBetScraper, FourPlayScraper } from '../scraping/casa_altenar';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
@@ -126,6 +126,8 @@ export class ArbitrageScannerV2 {
     new SuperbetScraper(),
     new PinnacleScraper(),
     new Aposta1Scraper(),
+    new EstrelaBetScraper(),
+    new FourPlayScraper(),
     new BetBoomScraper(),
     new SeuBetScraper(),
     new VbetScraper(),
@@ -145,7 +147,7 @@ export class ArbitrageScannerV2 {
    * está aqui de propósito para ser fonte REAL de odds (não só revalidação). Se a
    * carga da VPS pesar, é 1-linha tirá-la daqui (cai só no scan COMPLETO manual).
    */
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional']);
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional']);
 
   /**
    * Scrapers baseados em BROWSER (Playwright) — coletados SEQUENCIALMENTE (um chromium

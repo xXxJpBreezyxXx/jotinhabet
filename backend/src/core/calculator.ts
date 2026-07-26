@@ -1,3 +1,11 @@
+import { comissaoDaCasa } from '../arbitrage/comissao';
+
+/** Comissão efetiva do lado: usa a explícita (fração 0..1) se válida; senão resolve pelo nome da casa. */
+function comissaoResolvida(comissao?: number, casa?: string): number {
+  if (typeof comissao === 'number' && Number.isFinite(comissao) && comissao > 0 && comissao < 1) return comissao;
+  return casa ? comissaoDaCasa(casa) : 0;
+}
+
 export interface CalculatorInput {
   banca1: number;         // Banca disponível na Casa 1
   banca2: number;         // Banca disponível na Casa 2
@@ -6,6 +14,14 @@ export interface CalculatorInput {
   odd2: number;           // Cotação na Casa 2
   roundStep1?: number;    // Arredondamento da Casa 1 (ex: 1.0 para inteiros, 0.50, 0.01)
   roundStep2?: number;    // Arredondamento da Casa 2 (ex: 1.0, 0.50, 0.01)
+  // Comissão de EXCHANGE por lado (fração do lucro, ex.: 0.015 = 1,5% da Bolsa de Aposta).
+  // Quando informada, a odd efetiva do lado vira 1+(odd-1)*(1-comissão) e entra no
+  // cálculo (arbitragem/stake/lucro). Aceita também o nome da casa (casa1/casa2) → a
+  // comissão é resolvida pelo mapa de exchanges. 0/ausente = casa comum (sem efeito).
+  comissao1?: number;
+  comissao2?: number;
+  casa1?: string;
+  casa2?: string;
 }
 
 export interface CalculatorResult {
@@ -44,10 +60,19 @@ export function calcularArbitragem(input: CalculatorInput): CalculatorResult | n
     return null;
   }
 
-  // 2. Cálculo do gatilho mínimo para arbitragem
-  const oddMinimaExigida = odd1 / (odd1 - 1);
-  const margem = (1 / odd1) + (1 / odd2);
-  const isArbitrage = odd2 > oddMinimaExigida;
+  // Odd EFETIVA por lado descontando comissão de exchange (Bolsa de Aposta 1,5% etc.).
+  // A comissão vem explícita (comissao1/2) OU resolvida do nome da casa (casa1/2). A odd
+  // exibida segue crua; TODA a matemática de arbitragem (gatilho, margem, stake, lucro)
+  // usa a efetiva, para o lucro informado já sair líquido da comissão.
+  const c1 = comissaoResolvida(input.comissao1, input.casa1);
+  const c2 = comissaoResolvida(input.comissao2, input.casa2);
+  const eff1 = c1 > 0 ? 1 + (odd1 - 1) * (1 - c1) : odd1;
+  const eff2 = c2 > 0 ? 1 + (odd2 - 1) * (1 - c2) : odd2;
+
+  // 2. Cálculo do gatilho mínimo para arbitragem (sobre as odds efetivas)
+  const oddMinimaExigida = eff1 / (eff1 - 1);
+  const margem = (1 / eff1) + (1 / eff2);
+  const isArbitrage = eff2 > oddMinimaExigida;
 
   // Se não houver arbitragem viável, retornamos que não é arbitragem
   const margemTeoricaPct = Number(((1 - margem) * 100).toFixed(2));
@@ -60,13 +85,14 @@ export function calcularArbitragem(input: CalculatorInput): CalculatorResult | n
   let rawStake2 = 0;
 
   // Tentamos primeiro apostar o limite máximo na Casa 1 e calcular a Casa 2 proporcional
+  // (pela odd EFETIVA, para igualar o retorno LÍQUIDO das duas pernas).
   rawStake1 = limit1;
-  rawStake2 = rawStake1 * (odd1 / odd2);
+  rawStake2 = rawStake1 * (eff1 / eff2);
 
   // Se ultrapassar o limite da Casa 2, reduzimos proporcionalmente baseado na Casa 2
   if (rawStake2 > limit2) {
     rawStake2 = limit2;
-    rawStake1 = rawStake2 * (odd2 / odd1);
+    rawStake1 = rawStake2 * (eff2 / eff1);
   }
 
   // 4. Aplicação das regras de arredondamento configuráveis por casa
@@ -74,11 +100,11 @@ export function calcularArbitragem(input: CalculatorInput): CalculatorResult | n
   const stake1 = Number((Math.round(rawStake1 / roundStep1) * roundStep1).toFixed(2));
   const stake2 = Number((Math.round(rawStake2 / roundStep2) * roundStep2).toFixed(2));
 
-  // 5. Cálculo dos retornos reais pós-arredondamento
+  // 5. Cálculo dos retornos reais pós-arredondamento (LÍQUIDOS de comissão via odd efetiva)
   const investimentoTotal = Number((stake1 + stake2).toFixed(2));
-  
-  const retornoCasa1 = Number((stake1 * odd1).toFixed(2));
-  const retornoCasa2 = Number((stake2 * odd2).toFixed(2));
+
+  const retornoCasa1 = Number((stake1 * eff1).toFixed(2));
+  const retornoCasa2 = Number((stake2 * eff2).toFixed(2));
   
   const lucroCasa1 = Number((retornoCasa1 - investimentoTotal).toFixed(2));
   const lucroCasa2 = Number((retornoCasa2 - investimentoTotal).toFixed(2));

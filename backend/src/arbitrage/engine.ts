@@ -2,6 +2,7 @@ import { ScrapedOdd } from '../scraping/scraper_base';
 import { areEventsSame, areTeamsSame, mesmoHorario, forcaMatchEvento, parseKickoff } from './matcher';
 import { mesmaOferta, ehLinhaQuarter, normalizarMercado } from './markets';
 import { regraPermiteOportunidade } from './regras';
+import { oddEfetiva } from './comissao';
 
 export interface ArbitrageOpportunity {
   evento: string;
@@ -334,9 +335,15 @@ export class ArbitrageEngine {
    * cenários o lucro real é o dobro. As apostas em si não mudam.
    */
   calcularDistribuicaoStake(opp: ArbitrageOpportunity, stakeTotal: number) {
-    const apostaA = stakeTotal * opp.oddCombinadaA;
-    const apostaB = stakeTotal * opp.oddCombinadaB;
-    const retorno = apostaA * opp.oddA; // retorno é igual em qualquer lado se hitar
+    // Distribuição por ODD EFETIVA (desconta comissão de exchange, ex.: Bolsa de Aposta
+    // 1,5% sobre o lucro): as pernas são balanceadas pelo retorno LÍQUIDO, então o lucro
+    // informado já é o que sobra na mão. Casa comum → efetiva == crua (sem efeito).
+    const effA = oddEfetiva(opp.casaA, opp.oddA);
+    const effB = oddEfetiva(opp.casaB, opp.oddB);
+    const totalPercEff = 1 / effA + 1 / effB;
+    const apostaA = (stakeTotal * (1 / effA)) / totalPercEff;
+    const apostaB = (stakeTotal * (1 / effB)) / totalPercEff;
+    const retorno = apostaA * effA; // retorno LÍQUIDO — igual dos dois lados por construção
     const lucroNominal = retorno - stakeTotal;
     const ehQuarter = opp.linha != null && ehLinhaQuarter(opp.linha);
     const lucroR$ = ehQuarter ? lucroNominal / 2 : lucroNominal;

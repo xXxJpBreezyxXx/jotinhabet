@@ -600,6 +600,9 @@ export default function App() {
   const [calcMaxStakePct, setCalcMaxStakePct] = useState('50'); // 50%
   const [calcRoundStep1, setCalcRoundStep1] = useState('1'); // step 1.00 standard
   const [calcRoundStep2, setCalcRoundStep2] = useState('1');
+  // Exchange (comissão de 1,5% sobre o lucro, ex.: Bolsa de Aposta) por lado.
+  const [calcExchange1, setCalcExchange1] = useState(false);
+  const [calcExchange2, setCalcExchange2] = useState(false);
   const [calcResult, setCalcResult] = useState<CalculatorResult | null>(null);
   const [calcError, setCalcError] = useState('');
 
@@ -1422,7 +1425,10 @@ export default function App() {
         odd1,
         odd2,
         roundStep1,
-        roundStep2
+        roundStep2,
+        // Comissão de exchange (1,5% sobre o lucro) por lado quando marcado.
+        comissao1: calcExchange1 ? 0.015 : 0,
+        comissao2: calcExchange2 ? 0.015 : 0
       })
     })
       .then(res => res.json())
@@ -1437,7 +1443,7 @@ export default function App() {
       .catch(() => {
         setCalcResult(null);
       });
-  }, [calcOdd1, calcOdd2, calcBanca1, calcBanca2, calcMaxStakePct, calcRoundStep1, calcRoundStep2]);
+  }, [calcOdd1, calcOdd2, calcBanca1, calcBanca2, calcMaxStakePct, calcRoundStep1, calcRoundStep2, calcExchange1, calcExchange2]);
 
 
 
@@ -3105,10 +3111,18 @@ export default function App() {
                 <div className="form-group">
                   <label>Odd Casa 1 (O1)</label>
                   <input className="form-control" type="number" step="0.01" value={calcOdd1} onChange={(e) => setCalcOdd1(e.target.value)} />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', fontSize: '12px', fontWeight: 400, color: 'var(--text-secondary)' }}>
+                    <input type="checkbox" checked={calcExchange1} onChange={(e) => setCalcExchange1(e.target.checked)} />
+                    Exchange (Bolsa de Aposta) · comissão 1,5%
+                  </label>
                 </div>
                 <div className="form-group">
                   <label>Odd Casa 2 (O2)</label>
                   <input className="form-control" type="number" step="0.01" value={calcOdd2} onChange={(e) => setCalcOdd2(e.target.value)} />
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', fontSize: '12px', fontWeight: 400, color: 'var(--text-secondary)' }}>
+                    <input type="checkbox" checked={calcExchange2} onChange={(e) => setCalcExchange2(e.target.checked)} />
+                    Exchange (Bolsa de Aposta) · comissão 1,5%
+                  </label>
                 </div>
                 <div className="form-group">
                   <label>Banca Casa 1 (R$)</label>

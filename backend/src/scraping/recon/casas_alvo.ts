@@ -39,6 +39,17 @@ export const CASAS_ALVO: CasaAlvo[] = [
   { nome: 'Reidopitaco', dominio: 'https://pitaco.bet.br', pathsPrematch: ['/betting', '/'], pathsAoVivo: ['/betting/live'], pesoCobertura: 1 },
   // Domínio real é seu.bet.br (seubet.bet.br não resolve — conferido em 17/07/2026).
   { nome: 'SeuBet', dominio: 'https://seu.bet.br', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
+  // Lote 25/07/2026 (pedido do usuário). Recon:
+  //  - 4Play: Altenar integration "4play" (FEITO — FourPlayScraper, fonte do scanner).
+  //  - EstrelaBet: Altenar "estrelabet" (FEITO — já existia p/ revalidação, agora fonte).
+  //  - BetMGM: Digitain (goldrush.llc). Odds via GraphQL WS (wss://www.betmgm.bet.br/api/graphql);
+  //    REST só entrega config (groupConfig 2.6MB). Bot: Incapsula. Scraper novo (classe do Stake) — PENDENTE.
+  //  - Betsson: Digitain proxied (/sb/fe-api/v2/), auth so_browser. Mesmo parser do BetMGM — PENDENTE.
+  //  - JogaJunto (jogajunto.bet): SPA sem feed de odds observável — INVIÁVEL por ora.
+  { nome: 'BetMGM', dominio: 'https://betmgm.bet.br', pathsPrematch: ['/aposta-esportiva', '/esportes', '/'], pathsAoVivo: ['/aposta-esportiva/ao-vivo'], pesoCobertura: 2 },
+  { nome: 'Betsson', dominio: 'https://www.betsson.bet.br', pathsPrematch: ['/apostas-esportivas', '/esportes', '/'], pathsAoVivo: ['/apostas-esportivas/ao-vivo'], pesoCobertura: 2 },
+  { nome: 'JogaJunto', dominio: 'https://jogajunto.bet', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
+  { nome: '4Play', dominio: 'https://4play.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
 ];
 
 /** Busca uma casa pelo nome (case-insensitive), para o runner de casa única. */

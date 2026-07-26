@@ -137,6 +137,9 @@ export class WhatsAppNotifier {
     if (c.includes('esportesdasorte')) return 'https://esportesdasorte.bet.br';
     if (c.includes('betwarrior')) return 'https://apostas.betwarrior.bet.br';
     if (c.includes('aposta1')) return 'https://www.aposta1.bet.br';
+    if (c.includes('estrela')) return 'https://www.estrelabet.bet.br';
+    if (c.includes('4play') || c.includes('fourplay')) return 'https://4play.bet.br';
+    if (c.includes('bolsa')) return 'https://bolsadeaposta.bet.br';
     if (c.includes('pinnacle')) return 'https://www.pinnacle.com';
     if (c.includes('pixbet')) return 'https://pixbet.com';
     if (c.includes('sportingbet')) return 'https://sportingbet.com';

@@ -3,6 +3,7 @@ import { chromium } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fetchTextoComRetry } from '../utils/http';
+import { oddEfetiva, ehExchangeComComissao } from '../arbitrage/comissao';
 
 // ---------------------------------------------------------------------------
 // Tipos da API interna do SureRadar (descobertos via engenharia do painel /app)
@@ -195,8 +196,15 @@ export class SureRadarScraper {
     }
 
     const [legA, legB] = sb.legs;
+    const casaA = legA.bookmaker_label || legA.bookmaker;
+    const casaB = legB.bookmaker_label || legB.bookmaker;
     const oddsValidas = Number.isFinite(legA.odd) && Number.isFinite(legB.odd) && legA.odd > 1 && legB.odd > 1;
-    const totalPerc = 1 / legA.odd + 1 / legB.odd;
+    // Odd EFETIVA por perna: desconta a comissão de exchange (ex.: Bolsa de Aposta 1,5%
+    // sobre o lucro). O break-even, o ROI e os pesos de stake usam a efetiva; as odds
+    // EXIBIDAS (oddA/oddB) seguem cruas (é a cotação que a casa mostra e o apostador clica).
+    const effA = oddEfetiva(casaA, legA.odd);
+    const effB = oddEfetiva(casaB, legB.odd);
+    const totalPerc = 1 / effA + 1 / effB;
     if (!oddsValidas || totalPerc >= 1) {
       console.warn(`⚠️ [SureRadar] Surebet ignorada (falha no break-even): ${sb.event} | odds ${legA.odd} / ${legB.odd}`);
       return null;
@@ -205,8 +213,12 @@ export class SureRadarScraper {
     // ROI: usa o do site quando é um número são; senão deriva das odds já validadas
     // ((1/totalPerc - 1) * 100 — mesma convenção do revalidationService p/ roi_pct).
     // Sem isso, um profit_pct null/0 da API suprimiria o alerta WhatsApp (gate ROI >= 1.5%).
+    // COM perna de exchange, o profit_pct do site IGNORA a comissão → usa SEMPRE o
+    // derivado (das odds efetivas), que já a desconta.
     const roiDerivado = Number(((1 / totalPerc - 1) * 100).toFixed(2));
-    const roi = Number.isFinite(sb.profit_pct) && sb.profit_pct > 0 ? sb.profit_pct : roiDerivado;
+    const temComissao = ehExchangeComComissao(casaA) || ehExchangeComComissao(casaB);
+    const roi =
+      !temComissao && Number.isFinite(sb.profit_pct) && sb.profit_pct > 0 ? sb.profit_pct : roiDerivado;
 
     // "(DD/MM/AAAA HH:MM)" no fim do evento — formato que o scanner usa para expirar/filtrar por data.
     const quando = this.formatarQuando(sb);
@@ -225,13 +237,14 @@ export class SureRadarScraper {
       mercado: sb.market_label || sb.market || 'Mercado',
       opcaoA: legA.desc || legA.outcome,
       opcaoB: legB.desc || legB.outcome,
-      oddA: legA.odd,
+      oddA: legA.odd, // odd CRUA (exibição/aposta); a comissão entra só no cálculo
       oddB: legB.odd,
-      casaA: legA.bookmaker_label || legA.bookmaker,
-      casaB: legB.bookmaker_label || legB.bookmaker,
+      casaA,
+      casaB,
       lucroGarantidoPerc: roi,
-      oddCombinadaA: 1 / legA.odd / totalPerc,
-      oddCombinadaB: 1 / legB.odd / totalPerc,
+      // Pesos de stake pela odd EFETIVA (retorno líquido balanceado com a comissão).
+      oddCombinadaA: 1 / effA / totalPerc,
+      oddCombinadaB: 1 / effB / totalPerc,
       totalPerc: parseFloat(totalPerc.toFixed(4)),
       esporte: sb.sport_label || sb.sport,
       url: SURERADAR_APP_URL,
@@ -323,16 +336,22 @@ export class SureRadarScraper {
           const boxA = card.oddsInfo[0];
           const boxB = card.oddsInfo[1];
 
-          // Validação própria de break-even (regra.md) + sanidade de dados.
+          // Validação própria de break-even (regra.md) + sanidade de dados. Odd EFETIVA
+          // desconta a comissão de exchange (ex.: Bolsa de Aposta 1,5%) no break-even/ROI/stake.
           const oddsValidas =
             Number.isFinite(boxA.odd) && Number.isFinite(boxB.odd) && boxA.odd > 1 && boxB.odd > 1;
-          const totalPerc = 1 / boxA.odd + 1 / boxB.odd;
+          const effA = oddEfetiva(boxA.book, boxA.odd);
+          const effB = oddEfetiva(boxB.book, boxB.odd);
+          const totalPerc = 1 / effA + 1 / effB;
           if (!oddsValidas || totalPerc >= 1) {
             console.warn(
               `⚠️ [SureRadar/Browser] Card ignorado (falha no break-even): ${card.evento} | odds ${boxA.odd} / ${boxB.odd}`
             );
             continue;
           }
+          // COM perna de exchange o ROI do painel ignora a comissão → recalcula do efetivo.
+          const temComissao = ehExchangeComComissao(boxA.book) || ehExchangeComComissao(boxB.book);
+          const roiCard = temComissao ? Number(((1 / totalPerc - 1) * 100).toFixed(2)) : card.roi;
 
           opportunities.push({
             // Normaliza o sufixo de tempo para o MESMO formato do caminho via API —
@@ -345,13 +364,13 @@ export class SureRadarScraper {
             oddB: boxB.odd,
             casaA: boxA.book,
             casaB: boxB.book,
-            lucroGarantidoPerc: card.roi,
-            oddCombinadaA: 1 / boxA.odd / totalPerc,
-            oddCombinadaB: 1 / boxB.odd / totalPerc,
+            lucroGarantidoPerc: roiCard,
+            oddCombinadaA: 1 / effA / totalPerc,
+            oddCombinadaB: 1 / effB / totalPerc,
             totalPerc: parseFloat(totalPerc.toFixed(4)),
             esporte: card.sport,
             url: SURERADAR_APP_URL,
-            analiseIA: `🟢 Oportunidade de Surebet importada diretamente do SureRadar com ROI garantido de ${card.roi}%.`,
+            analiseIA: `🟢 Oportunidade de Surebet importada diretamente do SureRadar com ROI garantido de ${roiCard}%.`,
           });
         }
       }
