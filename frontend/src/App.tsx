@@ -873,6 +873,28 @@ export default function App() {
     return JSON.parse(localStorage.getItem('jotinhabet_launched_keys') || '[]');
   });
 
+  // Entrada MANUAL de surebet: lança na banca uma operação digitada pelo usuário,
+  // sem depender de uma oportunidade detectada pelo radar (oportunidade_id = null).
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualForm, setManualForm] = useState({
+    evento: '', mercado: '', casaA: '', opcaoA: '', oddA: '', casaB: '', opcaoB: '', oddB: ''
+  });
+  const [manualTotal, setManualTotal] = useState('50.00');
+  const [manualStakeA, setManualStakeA] = useState('');
+  const [manualStakeB, setManualStakeB] = useState('');
+  // false = distribui o total pelas odds (como no modal do radar); true = o usuário
+  // digitou as stakes que de fato apostou e o total passa a ser a soma delas.
+  const [manualStakesEditadas, setManualStakesEditadas] = useState(false);
+
+  const abrirEntradaManual = () => {
+    setManualForm({ evento: '', mercado: '', casaA: '', opcaoA: '', oddA: '', casaB: '', opcaoB: '', oddB: '' });
+    setManualTotal(userBanca);
+    setManualStakeA('');
+    setManualStakeB('');
+    setManualStakesEditadas(false);
+    setManualOpen(true);
+  };
+
   const [dashboardSubTab, setDashboardSubTab] = useState<'radar' | 'historico'>('radar');
   const [filterDate, setFilterDate] = useState<string>(''); // YYYY-MM-DD
   const [sortBy, setSortBy] = useState<'roi' | 'horario'>('roi'); // 'roi' or 'horario'
@@ -1358,6 +1380,112 @@ export default function App() {
       });
   };
 
+  // Cálculo da entrada manual. No modo automático distribui o total pelas odds
+  // (mesma matemática de getModalCalculations); com stakes editadas, o total é a
+  // soma das stakes e o lucro considera o PIOR cenário entre as duas pernas
+  // (stakes desbalanceadas pagam diferente conforme quem vence).
+  const getManualCalc = () => {
+    const oA = parseFloat(manualForm.oddA);
+    const oB = parseFloat(manualForm.oddB);
+    if (!(oA > 1) || !(oB > 1)) return null;
+
+    let stakeA: number, stakeB: number, total: number;
+    if (manualStakesEditadas) {
+      stakeA = parseFloat(manualStakeA) || 0;
+      stakeB = parseFloat(manualStakeB) || 0;
+      total = stakeA + stakeB;
+    } else {
+      total = parseFloat(manualTotal) || 0;
+      const margem = 1 / oA + 1 / oB;
+      stakeA = (total * (1 / oA)) / margem;
+      stakeB = total - stakeA;
+    }
+    if (total <= 0) return null;
+
+    const lucro = Math.min(stakeA * oA, stakeB * oB) - total;
+    const roi = (lucro / total) * 100;
+    return { stakeA, stakeB, total, lucro, roi, oA, oB };
+  };
+
+  // Editar uma stake liga o modo manual, congelando a outra perna no valor
+  // auto-calculado vigente (senão ela "pularia" ao recalcular).
+  const editarStakeManual = (lado: 'A' | 'B', valor: string) => {
+    if (!manualStakesEditadas) {
+      const calc = getManualCalc();
+      setManualStakeA(calc ? calc.stakeA.toFixed(2) : '');
+      setManualStakeB(calc ? calc.stakeB.toFixed(2) : '');
+      setManualStakesEditadas(true);
+    }
+    if (lado === 'A') setManualStakeA(valor);
+    else setManualStakeB(valor);
+  };
+
+  // Lançar a entrada manual na banca — mesmo endpoint do fluxo do radar,
+  // porém sem oportunidade vinculada (oportunidade_id = null).
+  const handleRecordManualOperation = () => {
+    const calc = getManualCalc();
+    if (!calc) {
+      alert('Preencha as duas odds (decimais > 1) e um investimento maior que zero.');
+      return;
+    }
+    if (!manualForm.evento.trim()) {
+      alert('Informe o evento (ex.: "Time A vs Time B").');
+      return;
+    }
+    if (calc.lucro < 0 && !confirm(
+      `Atenção: com esses valores o PIOR cenário é prejuízo de R$ ${Math.abs(calc.lucro).toFixed(2)} (ROI ${calc.roi.toFixed(2)}%).\n\nLançar mesmo assim?`
+    )) return;
+
+    setLoadingOperation(true);
+
+    const payload = {
+      oportunidade_id: null,
+      stake_real_1: calc.stakeA,
+      stake_real_2: calc.stakeB,
+      lucro_real: calc.lucro,
+      detalhes: {
+        evento: manualForm.evento.trim(),
+        mercado: manualForm.mercado.trim() || 'Resultado Final',
+        opcaoA: manualForm.opcaoA.trim() || 'Opção A',
+        opcaoB: manualForm.opcaoB.trim() || 'Opção B',
+        casaA: manualForm.casaA.trim() || 'Casa A',
+        casaB: manualForm.casaB.trim() || 'Casa B',
+        oddA: calc.oA,
+        oddB: calc.oB,
+        roi: calc.roi,
+        manual: true
+      }
+    };
+
+    fetch('/api/operations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          // Atualiza a banca ativa com o lucro da entrada (mesma regra do fluxo do radar).
+          const currentBanca = parseFloat(userBancaRef.current);
+          const newBanca = (currentBanca + calc.lucro).toFixed(2);
+          aplicarBanca(newBanca, true); // ref + state + localStorage + banco
+
+          alert(`Entrada manual lançada com sucesso! Sua banca foi atualizada para R$ ${newBanca}`);
+          setManualOpen(false);
+          fetchOperations();
+        } else {
+          alert(`Erro ao lançar: ${data.error}`);
+        }
+      })
+      .catch(err => {
+        alert('Erro ao registrar operação.');
+        console.error(err);
+      })
+      .finally(() => {
+        setLoadingOperation(false);
+      });
+  };
+
   // Excluir uma entrada do histórico e REVERTER a banca ativa (estorna o lucro
   // dessa entrada — inverso exato do lançamento). Serve para desfazer entradas
   // indevidas. Também reexibe a oportunidade no radar (remove a chave que a ocultava).
@@ -1596,6 +1724,7 @@ export default function App() {
   };
 
   const modalCalc = getModalCalculations();
+  const manualCalc = manualOpen ? getManualCalc() : null;
   const totalLucroReal = operationsHistory.reduce((sum, op) => sum + (op.lucro_real || 0), 0);
 
   // Saldos por casa (derivados p/ os cards da aba "Saldo nas Casas").
@@ -2043,7 +2172,28 @@ export default function App() {
                     <button className="btn btn-secondary" onClick={handleClearHistory} style={{ padding: '6px', borderRadius: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center' }} title="Limpar Histórico">
                       <Trash2 size={13} style={{ color: 'var(--color-danger)' }} />
                     </button>
- 
+
+                    {/* Entrada Manual: lançar na banca uma surebet feita fora do radar */}
+                    <button
+                      className="btn"
+                      onClick={abrirEntradaManual}
+                      title="Lançar na banca uma surebet feita manualmente (fora das oportunidades do radar)"
+                      style={{
+                        padding: '5px 10px',
+                        fontSize: '11px',
+                        display: 'flex',
+                        gap: '4px',
+                        alignItems: 'center',
+                        background: 'var(--color-primary)',
+                        color: '#fff',
+                        border: 'none',
+                        fontWeight: 'bold'
+                      }}
+                    >
+                      <Plus size={11} />
+                      Entrada Manual
+                    </button>
+
                     {/* Scan Trigger Buttons */}
                     <button
                       className="btn"
@@ -2466,12 +2616,31 @@ export default function App() {
                   <TrendingUp size={16} style={{ color: '#10b981' }} />
                   Histórico de Entradas Lançadas na Banca
                 </h3>
+                <button
+                  className="btn"
+                  onClick={abrirEntradaManual}
+                  title="Lançar na banca uma surebet feita manualmente (fora das oportunidades do radar)"
+                  style={{
+                    padding: '5px 10px',
+                    fontSize: '11px',
+                    display: 'flex',
+                    gap: '4px',
+                    alignItems: 'center',
+                    background: 'var(--color-primary)',
+                    color: '#fff',
+                    border: 'none',
+                    fontWeight: 'bold'
+                  }}
+                >
+                  <Plus size={11} />
+                  Entrada Manual
+                </button>
               </div>
 
               <div className="table-container" style={{ width: '100%' }}>
                 {operationsHistory.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)', fontSize: '13px' }}>
-                    Nenhuma aposta lançada na banca ainda. Abra a calculadora de uma surebet e clique em "Confirmar Entrada" para registrar!
+                    Nenhuma aposta lançada na banca ainda. Abra a calculadora de uma surebet e clique em "Confirmar Entrada", ou use "Entrada Manual" para registrar uma surebet feita fora do radar!
                   </div>
                 ) : (
                   <table className="custom-table" style={{ fontSize: '12px' }}>
@@ -2495,7 +2664,14 @@ export default function App() {
                             <td style={{ color: 'var(--text-secondary)' }}>
                               {new Date(op.confirmado_em).toLocaleDateString()} {new Date(op.confirmado_em).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </td>
-                            <td style={{ fontWeight: 'bold' }}>{d.evento || 'Evento'}</td>
+                            <td style={{ fontWeight: 'bold' }}>
+                              {d.evento || 'Evento'}
+                              {d.manual && (
+                                <span title="Entrada lançada manualmente (fora do radar)" style={{ marginLeft: '6px', fontSize: '10px', fontWeight: 700, color: 'var(--color-primary)', border: '1px solid var(--color-primary)', borderRadius: '999px', padding: '1px 6px', verticalAlign: 'middle' }}>
+                                  manual
+                                </span>
+                              )}
+                            </td>
                             <td>{d.mercado || 'Mercado'}</td>
                             <td>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
@@ -2504,7 +2680,9 @@ export default function App() {
                               </div>
                             </td>
                             <td>R$ {(op.stake_real_1 + op.stake_real_2).toFixed(2)}</td>
-                            <td style={{ color: 'var(--color-success)', fontWeight: 'bold' }}>+ R$ {op.lucro_real.toFixed(2)}</td>
+                            <td style={{ color: op.lucro_real >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 'bold' }}>
+                              {op.lucro_real >= 0 ? '+' : '−'} R$ {Math.abs(op.lucro_real).toFixed(2)}
+                            </td>
                             <td style={{ color: 'var(--color-accent)', fontWeight: 'bold' }}>{d.roi?.toFixed(2)}%</td>
                             <td style={{ textAlign: 'center' }}>
                               <button
@@ -3701,6 +3879,176 @@ export default function App() {
                 disabled={loadingOperation}
               >
                 {loadingOperation ? 'Lançando...' : '+ Confirmar Entrada (Lançar na Banca)'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de ENTRADA MANUAL: registrar na banca uma surebet feita fora do radar */}
+      {manualOpen && (
+        <div className="modal-overlay" onClick={() => setManualOpen(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Entrada Manual de Surebet</h2>
+              <button className="modal-close" onClick={() => setManualOpen(false)}>
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <datalist id="casas-conhecidas">
+                {Array.from(new Set([...CASAS_PADRAO, ...availableBookmakers])).map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+
+              <div className="resp-grid-2" style={{ gap: '12px' }}>
+                <div className="form-group">
+                  <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Evento *</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    placeholder="Ex.: Flamengo vs Palmeiras"
+                    value={manualForm.evento}
+                    onChange={e => setManualForm({ ...manualForm, evento: e.target.value })}
+                    style={{ marginTop: '4px', padding: '8px 10px' }}
+                  />
+                </div>
+                <div className="form-group">
+                  <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Mercado</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    placeholder="Ex.: Resultado Final"
+                    value={manualForm.mercado}
+                    onChange={e => setManualForm({ ...manualForm, mercado: e.target.value })}
+                    style={{ marginTop: '4px', padding: '8px 10px' }}
+                  />
+                </div>
+              </div>
+
+              {/* Pernas A e B */}
+              <div className="resp-grid-2" style={{ gap: '16px' }}>
+                {([
+                  { lado: 'A' as const, casa: 'casaA' as const, opcao: 'opcaoA' as const, odd: 'oddA' as const },
+                  { lado: 'B' as const, casa: 'casaB' as const, opcao: 'opcaoB' as const, odd: 'oddB' as const }
+                ]).map((p) => (
+                  <div key={p.lado} className="form-group" style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '12px', borderRadius: '8px', border: '1px dashed var(--panel-border)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--color-primary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Perna {p.lado}</div>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Casa</label>
+                      <input
+                        type="text"
+                        className="form-control"
+                        list="casas-conhecidas"
+                        placeholder={`Ex.: ${p.lado === 'A' ? 'Betano' : 'KTO'}`}
+                        value={manualForm[p.casa]}
+                        onChange={e => setManualForm({ ...manualForm, [p.casa]: e.target.value })}
+                        style={{ marginTop: '4px', padding: '6px 10px' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Opção / Seleção</label>
+                      <input
+                        type="text"
+                        className="form-control"
+                        placeholder={`Ex.: ${p.lado === 'A' ? 'Casa vence' : 'Empate ou Fora (X2)'}`}
+                        value={manualForm[p.opcao]}
+                        onChange={e => setManualForm({ ...manualForm, [p.opcao]: e.target.value })}
+                        style={{ marginTop: '4px', padding: '6px 10px' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Odd *</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="1.01"
+                        className="form-control"
+                        placeholder="Ex.: 2.10"
+                        value={manualForm[p.odd]}
+                        onChange={e => setManualForm({ ...manualForm, [p.odd]: e.target.value })}
+                        style={{ marginTop: '4px', padding: '6px 10px', fontWeight: 'bold' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Stake (R$)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        className="form-control"
+                        placeholder="auto"
+                        value={manualStakesEditadas
+                          ? (p.lado === 'A' ? manualStakeA : manualStakeB)
+                          : (manualCalc ? (p.lado === 'A' ? manualCalc.stakeA : manualCalc.stakeB).toFixed(2) : '')}
+                        onChange={e => editarStakeManual(p.lado, e.target.value)}
+                        style={{ marginTop: '4px', padding: '6px 10px', fontWeight: 'bold', color: '#10b981' }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="form-group" style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <label style={{ fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Valor Total a Apostar (R$)</label>
+                  {manualStakesEditadas && (
+                    <button
+                      onClick={() => setManualStakesEditadas(false)}
+                      title="Voltar a distribuir o total automaticamente pelas odds"
+                      style={{ background: 'transparent', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', fontSize: '11px', fontWeight: 700, padding: 0 }}
+                    >
+                      ↺ redistribuir stakes automaticamente
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="number"
+                  className="form-control"
+                  value={manualStakesEditadas && manualCalc ? manualCalc.total.toFixed(2) : manualTotal}
+                  disabled={manualStakesEditadas}
+                  title={manualStakesEditadas ? 'Total = soma das stakes digitadas' : undefined}
+                  onChange={e => setManualTotal(e.target.value)}
+                  style={{ fontSize: '20px', fontWeight: 'bold', marginTop: '8px' }}
+                />
+              </div>
+
+              {manualCalc ? (
+                <div style={{
+                  background: manualCalc.lucro >= 0 ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                  border: manualCalc.lucro >= 0 ? '1px solid rgba(16, 185, 129, 0.2)' : '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: '8px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                }}>
+                  <div>
+                    <div style={{ fontSize: '12px', color: manualCalc.lucro >= 0 ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
+                      {manualCalc.lucro >= 0 ? 'LUCRO GARANTIDO' : 'PIOR CENÁRIO (PREJUÍZO)'}
+                    </div>
+                    <div style={{ fontSize: '24px', fontWeight: '800', color: manualCalc.lucro >= 0 ? '#fff' : '#ef4444' }}>
+                      {manualCalc.lucro >= 0 ? '+' : '−'} R$ {Math.abs(manualCalc.lucro).toFixed(2)}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>ROI</div>
+                    <div style={{ fontSize: '16px', fontWeight: 'bold', color: manualCalc.roi >= 0 ? '#f8fafc' : '#ef4444' }}>
+                      {manualCalc.roi.toFixed(2)}%
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ background: 'rgba(148,163,184,0.1)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '12px', fontSize: '13px', color: '#94a3b8' }}>
+                  Preencha as duas odds (decimais &gt; 1) e o investimento para calcular stakes, lucro e ROI.
+                </div>
+              )}
+
+              <button
+                className="btn btn-primary"
+                style={{ width: '100%', padding: '14px', fontSize: '16px' }}
+                onClick={handleRecordManualOperation}
+                disabled={loadingOperation}
+              >
+                {loadingOperation ? 'Lançando...' : '+ Confirmar Entrada Manual (Lançar na Banca)'}
               </button>
             </div>
           </div>
