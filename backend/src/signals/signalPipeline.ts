@@ -9,6 +9,7 @@ import { RevalidationService, casaTemScraper } from '../core/revalidationService
 import { SinalExtraido, ContextoCasa } from '../IA/extractors/telegramSignalExtractor';
 import { canonizarCasa } from './casasAliases';
 import { isoParaBrasilia, dataHoraViaLink } from './dataHoraResolver';
+import { bancaParaAlertas } from '../core/bancaAtiva';
 
 export type AcaoPipeline =
   | 'alertada'                 // inserida + alerta WhatsApp revalidado ao vivo
@@ -93,19 +94,10 @@ export class SignalPipeline {
     };
   }
 
-  /** Banca atual = 50.00 + Σ lucro_real das operações (padrão do scanner_v2). */
+  /** Banca dos alertas: banca ativa do painel (app_config), com fallback no
+   *  legado 50 + Σ lucro_real — ver bancaParaAlertas(). */
   private async bancaAtual(): Promise<number> {
-    let banca = 50.0;
-    try {
-      const { data: operations } = await supabase.from('operacoes').select('lucro_real');
-      if (operations && operations.length > 0) {
-        const lucroAcumulado = operations.reduce((sum: number, op: any) => sum + (Number(op.lucro_real) || 0), 0);
-        banca = 50.0 + lucroAcumulado;
-      }
-    } catch (err) {
-      console.error('⚠️ [Telegram] Erro ao obter lucro acumulado para a banca atual:', err);
-    }
-    return banca < 1.0 ? 50.0 : banca;
+    return bancaParaAlertas();
   }
 
   /**

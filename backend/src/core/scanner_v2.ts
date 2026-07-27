@@ -24,6 +24,7 @@ import { encontrarValor, encontrarMiddles } from '../arbitrage/valor';
 import { upsertValorOportunidades, expirarValorAntigas, upsertMiddles, expirarMiddlesAntigos } from './valorRepo';
 import { getBrowserOddsFresh } from '../scraping/browserOddsCache';
 import { logAlerta } from './calibracaoRepo';
+import { bancaParaAlertas } from './bancaAtiva';
 
 // Timestamp (ms) do início da partida: usa dataHora (ISO/UTC) e cai para a data no
 // texto do evento "(DD/MM/AAAA HH:MM)" interpretada como horário de Brasília (UTC-3).
@@ -343,23 +344,9 @@ export class ArbitrageScannerV2 {
       console.error(`❌ Erro ao extrair dados do SureRadar:`, err.message);
     }
 
-    // Obter o saldo atual da banca com base no histórico de lucros reais (banca inicial = 50.00)
-    let bancaAtual = 50.00;
-    try {
-      const { data: operations } = await supabase
-        .from('operacoes')
-        .select('lucro_real');
-      
-      if (operations && operations.length > 0) {
-        const lucroAcumulado = operations.reduce((sum, op) => sum + (Number(op.lucro_real) || 0), 0);
-        bancaAtual = 50.00 + lucroAcumulado;
-      }
-    } catch (err) {
-      console.error('⚠️ [Scanner V2] Erro ao obter lucro acumulado do banco para a banca atual:', err);
-    }
-    if (bancaAtual < 1.0) {
-      bancaAtual = 50.00;
-    }
+    // Banca dos alertas: a banca ativa salva no painel (app_config), com
+    // fallback no legado 50 + Σ lucro_real — ver bancaParaAlertas().
+    const bancaAtual = await bancaParaAlertas();
 
     // Ordena para o teto de alertas pegar as melhores: Pinnacle (âncora sharp) primeiro,
     // depois maior confiança e ROI. SureRadar tem confiança undefined → tratado como 1.
