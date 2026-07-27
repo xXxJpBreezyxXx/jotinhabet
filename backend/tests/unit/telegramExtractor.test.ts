@@ -198,4 +198,45 @@ describe('normalizarDataHora', () => {
     expect(normalizarDataHora('32/13/2026 25:99')).toBeNull();
     expect(normalizarDataHora(null)).toBeNull();
   });
+
+  // Formatos relativos, ancorados na data da MENSAGEM (ref). 24/07/2026 15:00
+  // em Brasília = 18:00 UTC; 24/07/2026 foi uma sexta-feira (dow=5).
+  const ref = new Date('2026-07-24T18:00:00Z');
+
+  it('resolve "Hoje HH:MM" e "Amanhã HH:MM" pela data da mensagem', () => {
+    expect(normalizarDataHora('Hoje 21:30', ref)).toBe('24/07/2026 21:30');
+    expect(normalizarDataHora('hoje às 21:30', ref)).toBe('24/07/2026 21:30');
+    expect(normalizarDataHora('Amanhã 16:00', ref)).toBe('25/07/2026 16:00');
+    expect(normalizarDataHora('amanha 16:00', ref)).toBe('25/07/2026 16:00');
+  });
+
+  it('vira o dia em Brasília, não em UTC (23:30 BRT ainda é o mesmo dia)', () => {
+    // 23:30 em Brasília de 24/07 = 02:30 UTC de 25/07.
+    const refNoite = new Date('2026-07-25T02:30:00Z');
+    expect(normalizarDataHora('Hoje 23:45', refNoite)).toBe('24/07/2026 23:45');
+  });
+
+  it('resolve dia da semana para a PRÓXIMA ocorrência (hoje conta)', () => {
+    expect(normalizarDataHora('Sex 19:00', ref)).toBe('24/07/2026 19:00');   // hoje é sexta
+    expect(normalizarDataHora('Sáb 18:00', ref)).toBe('25/07/2026 18:00');
+    expect(normalizarDataHora('sab 18:00', ref)).toBe('25/07/2026 18:00');
+    expect(normalizarDataHora('Ter 19:00', ref)).toBe('28/07/2026 19:00');
+    expect(normalizarDataHora('segunda-feira 20:00', ref)).toBe('27/07/2026 20:00');
+  });
+
+  it('dia da semana + data numérica usa a data numérica', () => {
+    expect(normalizarDataHora('Sáb, 26/07 18:00', ref)).toBe('26/07/2026 18:00');
+  });
+
+  it('só o horário assume o dia da mensagem; aceita grafia "21h30"/"21h"', () => {
+    expect(normalizarDataHora('21:30', ref)).toBe('24/07/2026 21:30');
+    expect(normalizarDataHora('21h30', ref)).toBe('24/07/2026 21:30');
+    expect(normalizarDataHora('21h', ref)).toBe('24/07/2026 21:00');
+    expect(normalizarDataHora('Hoje 21h30', ref)).toBe('24/07/2026 21:30');
+  });
+
+  it('continua exigindo horário: "amanhã" sozinho é null', () => {
+    expect(normalizarDataHora('amanhã', ref)).toBeNull();
+    expect(normalizarDataHora('sábado', ref)).toBeNull();
+  });
 });

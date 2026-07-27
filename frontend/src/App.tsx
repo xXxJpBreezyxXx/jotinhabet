@@ -78,6 +78,10 @@ interface OpportunityItem {
   salva?: boolean; // salva pelo usuário: o rescan nunca a remove (migration 009)
   url?: string;
   fonte?: string;  // origem explícita (migration 010): 'telegram' | null (demais fontes inferem por url)
+  // Links diretos do grupo do Telegram (migration 017): por perna + lista completa
+  url_casa_1?: string | null;
+  url_casa_2?: string | null;
+  links_grupo?: Array<{ url: string; casa?: string | null }> | null;
   // Enriquecimento de risco por IA (async)
   ia_status?: 'pendente' | 'processando' | 'concluido' | 'erro';
   ia_risco?: 'ok' | 'atencao' | 'critico';
@@ -3695,8 +3699,8 @@ export default function App() {
                 <div 
                   className="odd-box clickable-odd-box" 
                   style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}
-                  onClick={() => window.open(getHouseUrl(selectedOpp.casa_a_nome || ''), '_blank')}
-                  title={`Abrir jogo na ${selectedOpp.casa_a_nome || 'Casa 1'}`}
+                  onClick={() => window.open(selectedOpp.url_casa_1 || getHouseUrl(selectedOpp.casa_a_nome || ''), '_blank')}
+                  title={selectedOpp.url_casa_1 ? `Abrir o link direto do grupo na ${selectedOpp.casa_a_nome || 'Casa 1'}` : `Abrir jogo na ${selectedOpp.casa_a_nome || 'Casa 1'}`}
                 >
                   <div style={{ width: '100%', display: 'flex', justifyContent: 'space-between' }}>
                     <span className="odd-outcome">{selectedOpp.opcao_a || 'Opção A'}</span>
@@ -3713,8 +3717,8 @@ export default function App() {
                 <div 
                   className="odd-box clickable-odd-box" 
                   style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}
-                  onClick={() => window.open(getHouseUrl(selectedOpp.casa_b_nome || ''), '_blank')}
-                  title={`Abrir jogo na ${selectedOpp.casa_b_nome || 'Casa 2'}`}
+                  onClick={() => window.open(selectedOpp.url_casa_2 || getHouseUrl(selectedOpp.casa_b_nome || ''), '_blank')}
+                  title={selectedOpp.url_casa_2 ? `Abrir o link direto do grupo na ${selectedOpp.casa_b_nome || 'Casa 2'}` : `Abrir jogo na ${selectedOpp.casa_b_nome || 'Casa 2'}`}
                 >
                   <div style={{ width: '100%', display: 'flex', justifyContent: 'space-between' }}>
                     <span className="odd-outcome">{selectedOpp.opcao_b || 'Opção B'}</span>
@@ -3728,6 +3732,25 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Links colhidos do grupo do Telegram (migration 017) — todos, inclusive os
+                  que não casaram com uma perna (o rótulo é a casa ou o domínio do link). */}
+              {selectedOpp.links_grupo && selectedOpp.links_grupo.length > 0 && (
+                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', display: 'flex', flexWrap: 'wrap', gap: '6px 10px', alignItems: 'center', border: '1px dashed var(--panel-border)', borderRadius: '8px', padding: '8px 12px' }}>
+                  <span style={{ fontWeight: 700 }}>🔗 Links do grupo:</span>
+                  {selectedOpp.links_grupo.map((l, i) => {
+                    let rotulo = l.casa || '';
+                    if (!rotulo) {
+                      try { rotulo = new URL(l.url).hostname.replace(/^www\./, ''); } catch { rotulo = l.url.slice(0, 40); }
+                    }
+                    return (
+                      <a key={i} href={l.url} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                        {rotulo} <ExternalLink size={9} />
+                      </a>
+                    );
+                  })}
+                </div>
+              )}
 
               <div style={{ background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: '8px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
@@ -3835,8 +3858,8 @@ export default function App() {
                         {typeof revalResult.odd_a === 'number' && typeof revalResult.odd_b === 'number' && (
                           <div className="resp-grid-2" style={{ gap: '8px', marginBottom: revalResult.movimento?.explicacao ? '8px' : 0 }}>
                             {[
-                              { casa: selectedOpp.casa_a_nome, opc: selectedOpp.opcao_a, old: selectedOpp.odd_casa_1, novo: revalResult.odd_a as number },
-                              { casa: selectedOpp.casa_b_nome, opc: selectedOpp.opcao_b, old: selectedOpp.odd_casa_2, novo: revalResult.odd_b as number }
+                              { casa: selectedOpp.casa_a_nome, opc: selectedOpp.opcao_a, old: selectedOpp.odd_casa_1, novo: revalResult.odd_a as number, link: selectedOpp.url_casa_1 },
+                              { casa: selectedOpp.casa_b_nome, opc: selectedOpp.opcao_b, old: selectedOpp.odd_casa_2, novo: revalResult.odd_b as number, link: selectedOpp.url_casa_2 }
                             ].map((leg, i) => {
                               const diff = leg.novo - leg.old;
                               const arrow = Math.abs(diff) < 0.005 ? '=' : diff > 0 ? '▲' : '▼';
@@ -3851,7 +3874,7 @@ export default function App() {
                                     <span style={{ fontSize: '12px', fontWeight: 700, color: dcol }}>{arrow}</span>
                                   </div>
                                   <button
-                                    onClick={() => window.open(getHouseUrl(leg.casa || ''), '_blank')}
+                                    onClick={() => window.open(leg.link || getHouseUrl(leg.casa || ''), '_blank')}
                                     style={{ marginTop: '6px', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', fontWeight: 700, color: 'var(--color-primary)', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
                                     title={`Abrir ${leg.casa || 'casa'} para conferir a odd`}
                                   >

@@ -64,11 +64,12 @@ Responda ESTRITAMENTE com um único objeto JSON, sem texto antes ou depois, no s
   "oddB": number,          // odd decimal da 2ª perna
   "casaA": string,         // casa de apostas da 1ª perna — em tipo="print_casa" é a ÚNICA casa do print
   "casaB": string,         // casa de apostas da 2ª perna
-  "dataHora": string|null  // início da partida "DD/MM/AAAA HH:MM" ou "DD/MM HH:MM" como impresso; null se ausente
+  "dataHora": string|null  // início da partida COMO IMPRESSO na imagem, copie LITERAL sem converter nem completar: "29/07/2026 21:30", "29/07 21:30", "Hoje 21:30", "Amanhã 16:00", "Ter 19:00", "21h30" ou só "21:30"; null se não aparecer
 }
 Regras:
 - tipo="sinal": print da calculadora (layout descrito no prompt). Preencha todos os campos.
-- tipo="print_casa": screenshot do site/app de UMA casa de apostas mostrando o evento/aposta. Preencha casaA (nome da casa), evento e principalmente dataHora (data e horário da partida como exibidos — se só houver horário, use "DD/MM" de hoje implícito e retorne só o que estiver visível no formato pedido); demais campos podem ficar vazios/null. eh_sinal=false.
+- tipo="print_casa": screenshot do site/app de UMA casa de apostas mostrando o evento/aposta. Preencha casaA, evento e principalmente dataHora (copie a data/hora da partida exatamente como exibida, ex.: "Hoje 21:30" — NÃO invente a parte que não estiver visível); demais campos podem ficar vazios/null. eh_sinal=false.
+  · casaA = o nome da casa de apostas DONA do site/app (logo/marca no topo, nome do app). NÃO confunda com fornecedor de dados/estatística ("Opta", "Sportradar", "Betradar", "Genius") nem com nome de liga/campeonato — isso NUNCA é a casa. Se não conseguir identificar a casa com segurança, casaA=null (não chute).
 - tipo="outro": meme, print de banca, propaganda, comprovante, tabela de resultados → {"tipo":"outro","eh_sinal":false,"confianca":0}.
 - Horários impressos são horário de Brasília — copie como está, NÃO converta.
 - Odds em formato decimal com ponto (2,10 na imagem → 2.10).
@@ -106,20 +107,88 @@ function minConfianca(): number {
   return Number.isFinite(v) && v >= 0 && v <= 100 ? v : 70;
 }
 
+/** Componentes de uma data no fuso de Brasília (UTC-3 constante — Brasil sem
+ *  horário de verão desde 2019; mesma premissa do scanner_v2). */
+function diaEmBrasilia(instante: Date, maisDias = 0): { dia: number; mes: number; ano: number; dow: number } {
+  const d = new Date(instante.getTime() - 3 * 60 * 60 * 1000 + maisDias * 24 * 60 * 60 * 1000);
+  return { dia: d.getUTCDate(), mes: d.getUTCMonth() + 1, ano: d.getUTCFullYear(), dow: d.getUTCDay() };
+}
+
+/** Índice 0=domingo…6=sábado de um token de dia da semana pt-BR; null se não for. */
+function indiceDiaSemana(token: string): number | null {
+  const t = token.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const tabela = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sab'];
+  const i = tabela.indexOf(t.slice(0, 3));
+  return i >= 0 ? i : null;
+}
+
 /**
- * Normaliza "DD/MM/AAAA HH:MM" ou "DD/MM HH:MM" (completa o ano corrente).
+ * Normaliza a data/hora COMO IMPRESSA num print de casa/calculadora para
+ * "DD/MM/AAAA HH:MM". Além do formato numérico ("DD/MM[/AAAA] HH:MM"), aceita
+ * os formatos relativos que as casas realmente exibem — "Hoje 21:30",
+ * "Amanhã 16:00", "Ter 19:00", "Sáb, 26/07 18:00", "21h30" ou só "21:30" —
+ * ancorados em `ref` (a data da MENSAGEM do Telegram; default: agora). Antes
+ * esses formatos eram descartados e o sinal seguia sem horário.
  * Retorna null quando não parseável — horário desconhecido não bloqueia o
  * gate de pré-jogo (ehPreJogo trata null como "não começou").
  */
-export function normalizarDataHora(raw: any): string | null {
+export function normalizarDataHora(raw: any, ref: Date = new Date()): string | null {
   if (typeof raw !== 'string') return null;
-  const m = raw.trim().match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?\s+(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const dia = +m[1], mes = +m[2], ano = m[3] ? +m[3] : new Date().getFullYear();
-  const hora = +m[4], min = +m[5];
-  if (dia < 1 || dia > 31 || mes < 1 || mes > 12 || hora > 23 || min > 59) return null;
   const p2 = (n: number) => String(n).padStart(2, '0');
-  return `${p2(dia)}/${p2(mes)}/${ano} ${p2(hora)}:${p2(min)}`;
+  const montar = (dia: number, mes: number, ano: number, hora: number, min: number): string | null => {
+    if (dia < 1 || dia > 31 || mes < 1 || mes > 12 || hora > 23 || min > 59) return null;
+    return `${p2(dia)}/${p2(mes)}/${ano} ${p2(hora)}:${p2(min)}`;
+  };
+
+  // Limpeza leve: "às"/vírgulas e espaço múltiplo não carregam informação.
+  // (não usa \b antes de "às": o \b do JS é ASCII e falha antes de acento)
+  let s = raw.trim().replace(/(^|\s)[àa]s(?=\s)/gi, '$1').replace(/[,•·]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+
+  // Hora "21h30"/"21h" → "21:30"/"21:00" (grafia comum nas casas brasileiras).
+  s = s.replace(/\b(\d{1,2})h(\d{2})?\b/gi, (_, h, m) => `${h}:${m || '00'}`);
+
+  const HORA = /(\d{1,2}):(\d{2})/;
+
+  // Dia da semana no começo ("Sáb 26/07 18:00" / "ter 19:00") — guarda e remove.
+  let dowPrefixo: number | null = null;
+  const mDow = s.match(/^([A-Za-zÀ-ÿ]{3,13})(?:-feira)?\.?\s+/i);
+  if (mDow) {
+    const idx = indiceDiaSemana(mDow[1]);
+    if (idx !== null) {
+      dowPrefixo = idx;
+      s = s.slice(mDow[0].length).trim();
+    }
+  }
+
+  // 1) Formato numérico completo: "DD/MM[/AAAA] HH:MM".
+  const mNum = s.match(new RegExp(`^(\\d{1,2})\\/(\\d{1,2})(?:\\/(\\d{4}))?\\s+${HORA.source}$`));
+  if (mNum) {
+    const ano = mNum[3] ? +mNum[3] : diaEmBrasilia(ref).ano;
+    return montar(+mNum[1], +mNum[2], ano, +mNum[4], +mNum[5]);
+  }
+
+  // 2) "Hoje HH:MM" / "Amanhã HH:MM" (ancorado na data da mensagem).
+  const mRel = s.match(new RegExp(`^(hoje|amanh[ãa])\\s+${HORA.source}$`, 'i'));
+  if (mRel) {
+    const d = diaEmBrasilia(ref, /^hoje$/i.test(mRel[1]) ? 0 : 1);
+    return montar(d.dia, d.mes, d.ano, +mRel[2], +mRel[3]);
+  }
+
+  // 3) Só o horário "HH:MM" — com prefixo de dia da semana usa a PRÓXIMA
+  //    ocorrência daquele dia (hoje conta); sem prefixo assume o dia da mensagem.
+  const mHora = s.match(new RegExp(`^${HORA.source}$`));
+  if (mHora) {
+    let maisDias = 0;
+    if (dowPrefixo !== null) {
+      const hoje = diaEmBrasilia(ref);
+      maisDias = (dowPrefixo - hoje.dow + 7) % 7;
+    }
+    const d = diaEmBrasilia(ref, maisDias);
+    return montar(d.dia, d.mes, d.ano, +mHora[1], +mHora[2]);
+  }
+
+  return null;
 }
 
 /** Deriva a linha de um rótulo de opção quando ele a carrega explicitamente
@@ -132,8 +201,9 @@ function linhaDoRotulo(s: string): number | null {
   return m ? Math.abs(parseFloat(m[1])) : null;
 }
 
-/** Valida/saneia o objeto cru do LLM. Determinístico — exportado p/ testes. */
-export function validarSinal(obj: any): { ok: boolean; motivo?: string; sinal?: SinalExtraido } {
+/** Valida/saneia o objeto cru do LLM. Determinístico — exportado p/ testes.
+ *  `ref` ancora datas relativas ("Hoje 21:30") na data da mensagem do Telegram. */
+export function validarSinal(obj: any, ref?: Date): { ok: boolean; motivo?: string; sinal?: SinalExtraido } {
   if (!obj || typeof obj !== 'object') return { ok: false, motivo: 'objeto ausente' };
 
   const camposTexto = ['evento', 'esporte', 'mercado', 'opcaoA', 'opcaoB', 'casaA', 'casaB'] as const;
@@ -192,13 +262,14 @@ export function validarSinal(obj: any): { ok: boolean; motivo?: string; sinal?: 
       oddB,
       casaA: obj.casaA.trim(),
       casaB: obj.casaB.trim(),
-      dataHora: normalizarDataHora(obj.dataHora),
+      dataHora: normalizarDataHora(obj.dataHora, ref),
     },
   };
 }
 
-/** Classifica e extrai um sinal de surebet de uma imagem (base64 sem prefixo). */
-export async function extrairSinalDeImagem(imageBase64: string, mimeType: string): Promise<ResultadoExtracao> {
+/** Classifica e extrai um sinal de surebet de uma imagem (base64 sem prefixo).
+ *  `ref` = data da mensagem no Telegram — âncora de "Hoje 21:30"/"21:30" nos prints. */
+export async function extrairSinalDeImagem(imageBase64: string, mimeType: string, ref?: Date): Promise<ResultadoExtracao> {
   const { text, provider } = await generateFromImageWithFallback(
     PROMPT_EXTRACAO,
     { mimeType, dataBase64: imageBase64 },
@@ -225,7 +296,7 @@ export async function extrairSinalDeImagem(imageBase64: string, mimeType: string
       contexto: {
         casa: typeof obj.casaA === 'string' && obj.casaA.trim() ? obj.casaA.trim() : null,
         evento: typeof obj.evento === 'string' && obj.evento.trim() ? obj.evento.trim() : null,
-        dataHora: normalizarDataHora(obj.dataHora),
+        dataHora: normalizarDataHora(obj.dataHora, ref),
       },
     };
   }
@@ -234,7 +305,7 @@ export async function extrairSinalDeImagem(imageBase64: string, mimeType: string
     return { sinal: null, provider, motivoDescarte: 'nao_e_sinal' };
   }
 
-  const validacao = validarSinal(obj);
+  const validacao = validarSinal(obj, ref);
   if (!validacao.ok || !validacao.sinal) {
     return { sinal: null, provider, motivoDescarte: `validacao: ${validacao.motivo}` };
   }

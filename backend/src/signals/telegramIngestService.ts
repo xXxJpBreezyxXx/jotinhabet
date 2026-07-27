@@ -215,13 +215,20 @@ export class TelegramIngestService {
     return this.grupoIds.some((g) => chatId === g || semPrefixo(chatId) === semPrefixo(g));
   }
 
-  /** URLs do texto/caption + entidades (links "embutidos" em texto formatado). */
+  /** URLs do texto/caption + entidades (links "embutidos" em texto formatado)
+   *  + botões inline (reply markup) — grupos mandam "abrir aposta" como botão. */
   private extrairUrls(message: Api.Message): string[] {
     const urls: string[] = [];
     const texto = message.message || '';
     urls.push(...(texto.match(/https?:\/\/[^\s)\]]+/gi) || []));
     for (const ent of message.entities || []) {
       if (ent instanceof Api.MessageEntityTextUrl && ent.url) urls.push(ent.url);
+    }
+    const markup: any = (message as any).replyMarkup;
+    for (const row of markup?.rows || []) {
+      for (const btn of row?.buttons || []) {
+        if (btn instanceof Api.KeyboardButtonUrl && btn.url) urls.push(btn.url);
+      }
     }
     return [...new Set(urls)];
   }
@@ -231,11 +238,16 @@ export class TelegramIngestService {
     this.stats.ultimoEventoEm = new Date().toISOString();
     const urls = this.extrairUrls(message);
 
-    // Mensagem de TEXTO com links durante a janela de contexto.
+    // Mensagem de TEXTO com links: anexa ao sinal pendente ou, fora da janela,
+    // tenta o late-binding com a oportunidade telegram mais recente.
     if (!message.photo) {
-      if (this.pendente && urls.length > 0) {
+      if (urls.length === 0) return;
+      if (this.pendente) {
         this.pendente.links.push(...urls.map((url) => ({ url, casa: null })));
         console.log(`🔗 [Telegram] ${urls.length} link(s) de texto anexado(s) ao sinal pendente (${this.pendente.sinal.evento}).`);
+      } else {
+        const aplicado = await this.pipeline.anexarContextoTardio(null, urls.map((url) => ({ url, casa: null })));
+        if (!aplicado) console.log(`🔎 [Telegram] ${urls.length} link(s) de texto sem sinal pendente — sem oportunidade recente pra casar, ignorados.`);
       }
       return;
     }
@@ -261,8 +273,10 @@ export class TelegramIngestService {
     }
 
     this.stats.processadas++;
-    // Fotos do Telegram chegam re-encodadas como JPEG.
-    const extracao = await extrairSinalDeImagem(base64, 'image/jpeg');
+    // Fotos do Telegram chegam re-encodadas como JPEG. A data da MENSAGEM ancora
+    // os formatos relativos dos prints ("Hoje 21:30", "Ter 19:00", só "21:30").
+    const refMsg = message.date ? new Date(Number(message.date) * 1000) : new Date();
+    const extracao = await extrairSinalDeImagem(base64, 'image/jpeg', refMsg);
 
     // ---- Novo SINAL (print da calculadora) ----
     if (extracao.sinal) {
@@ -293,7 +307,13 @@ export class TelegramIngestService {
     // ---- PRINT DE CASA (contexto do sinal pendente: dataHora + links) ----
     if (extracao.motivoDescarte === 'print_casa' && extracao.contexto) {
       if (!this.pendente) {
-        console.log(`🔎 [Telegram] Print de casa sem sinal pendente (${extracao.contexto.casa || '?'}) — ignorado.`);
+        // Fora da janela (23% dos prints, medido em 27/07): tenta aplicar o
+        // contexto TARDIAMENTE à oportunidade telegram recente que casar.
+        const aplicado = await this.pipeline.anexarContextoTardio(
+          extracao.contexto,
+          urls.map((url) => ({ url, casa: extracao.contexto!.casa }))
+        );
+        if (!aplicado) console.log(`🔎 [Telegram] Print de casa sem sinal pendente (${extracao.contexto.casa || '?'}) — sem oportunidade recente pra casar, ignorado.`);
         return;
       }
       this.pendente.printsDeCasa++;

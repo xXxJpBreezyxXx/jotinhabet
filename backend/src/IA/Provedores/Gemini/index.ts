@@ -8,6 +8,9 @@ export class GeminiProvider implements IAProvider {
   private ai: GoogleGenAI | null = null;
   // Sobrescrevível via env (GEMINI_MODEL) para trocar de modelo sem rebuild.
   private modelName = process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
+  // VISÃO pode usar um tier acima do texto (GEMINI_MODEL_VISION) — ver nota
+  // no OpenAIProvider (OCR fino dos prints do Telegram).
+  private visionModelName = process.env.GEMINI_MODEL_VISION?.trim() || process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash';
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -47,7 +50,7 @@ export class GeminiProvider implements IAProvider {
 
     try {
       const response = await this.ai.models.generateContent({
-        model: this.modelName,
+        model: this.visionModelName,
         contents: [
           { text: prompt },
           { inlineData: { mimeType: imagem.mimeType, data: imagem.dataBase64 } },

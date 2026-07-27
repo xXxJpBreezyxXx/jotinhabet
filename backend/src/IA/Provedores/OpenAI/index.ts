@@ -9,6 +9,10 @@ export class OpenAIProvider implements IAProvider {
   private openai: OpenAI | null = null;
   // Sobrescrevível via env (OPENAI_MODEL) para trocar de modelo sem rebuild.
   private modelName = process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini';
+  // VISÃO pode usar um tier acima do texto (OPENAI_MODEL_VISION): a extração dos
+  // sinais do Telegram é OCR fino (data pequena, logo da casa) onde o nano mais
+  // erra — medido em 27/07: 51% dos prints com casa ilegível no tier nano.
+  private visionModelName = process.env.OPENAI_MODEL_VISION?.trim() || process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini';
 
   constructor() {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -71,7 +75,7 @@ export class OpenAIProvider implements IAProvider {
       });
 
       const response = await this.openai.chat.completions.create({
-        model: this.modelName,
+        model: this.visionModelName,
         messages: messages,
       });
 

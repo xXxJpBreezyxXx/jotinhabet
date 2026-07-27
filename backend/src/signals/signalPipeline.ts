@@ -6,7 +6,7 @@ import { WhatsAppNotifier } from '../notify/whatsapp';
 import { alertAlreadySent, markAlertAsSent } from '../notify/alertCache';
 import { ehPreJogo, dentroDaJanelaDeAlerta } from '../core/scanner_v2';
 import { RevalidationService, casaTemScraper } from '../core/revalidationService';
-import { SinalExtraido } from '../IA/extractors/telegramSignalExtractor';
+import { SinalExtraido, ContextoCasa } from '../IA/extractors/telegramSignalExtractor';
 import { canonizarCasa } from './casasAliases';
 import { isoParaBrasilia, dataHoraViaLink } from './dataHoraResolver';
 
@@ -187,6 +187,100 @@ export class SignalPipeline {
     console.log(`🕒 [Telegram] dataHora NÃO resolvida (${sinal.evento}) — segue como "(Hoje)".`);
   }
 
+  /** Tokens significativos de um evento p/ matching tolerante (sem acento/caixa
+   *  e sem o sufixo "(data)"). "Fluminense RJ x EC Bahia BA" ≈ "Fluminense x Bahia". */
+  private tokensEvento(evento: string): Set<string> {
+    const semSufixo = (evento || '').replace(/\s*\([^)]*\)\s*$/, '');
+    const norm = semSufixo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    return new Set(norm.split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
+  }
+
+  private eventosBatem(a: string, b: string): boolean {
+    const ta = this.tokensEvento(a);
+    const tb = this.tokensEvento(b);
+    let comuns = 0;
+    for (const t of ta) if (tb.has(t)) comuns++;
+    return comuns >= 2;
+  }
+
+  /**
+   * LATE-BINDING de contexto órfão: print de casa/links que chegam DEPOIS da
+   * janela de contexto (23% dos prints, medido em 27/07) eram jogados fora.
+   * Agora tentam casar com uma oportunidade telegram RECENTE (30 min) e
+   * completam retroativamente o que faltar: a data no evento ("(Hoje)" →
+   * "(DD/MM/AAAA HH:MM)"), url_casa_1/2 e links_grupo. Conservador: sem evento
+   * legível no print, só aplica se houver UMA única candidata na janela.
+   * Nunca lança; retorna true se algo foi aplicado.
+   */
+  async anexarContextoTardio(contexto: ContextoCasa | null, links: LinkSinal[] = []): Promise<boolean> {
+    if (!contexto?.dataHora && links.length === 0) return false;
+    try {
+      const desde = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      // any[]: o shape muda entre o select completo e o fallback sem migration 017.
+      let { data: recentes, error: selErr }: { data: any[] | null; error: any } = await supabase
+        .from('oportunidades')
+        .select('id, evento, casa_a_nome, casa_b_nome, url_casa_1, url_casa_2, links_grupo')
+        .eq('fonte', 'telegram')
+        .eq('status', 'detectada')
+        .gte('detectada_em', desde)
+        .order('detectada_em', { ascending: false })
+        .limit(5);
+      // Migration 017 ausente: repete o select sem as colunas de link.
+      if (selErr && (selErr.code === 'PGRST204' || /column|schema cache/i.test(selErr.message || ''))) {
+        ({ data: recentes } = await supabase
+          .from('oportunidades')
+          .select('id, evento, casa_a_nome, casa_b_nome')
+          .eq('fonte', 'telegram')
+          .eq('status', 'detectada')
+          .gte('detectada_em', desde)
+          .order('detectada_em', { ascending: false })
+          .limit(5));
+      }
+      if (!recentes || recentes.length === 0) return false;
+
+      const alvo: any = contexto?.evento
+        ? recentes.find((o: any) => this.eventosBatem(o.evento, contexto.evento!))
+        : (recentes.length === 1 ? recentes[0] : null);
+      if (!alvo) return false;
+
+      const patch: any = {};
+      if (contexto?.dataHora && /\(Hoje\)\s*$/i.test(alvo.evento)) {
+        patch.evento = alvo.evento.replace(/\(Hoje\)\s*$/i, `(${contexto.dataHora})`);
+      }
+      if (links.length > 0) {
+        const comCasa = links.map((l) => ({ url: l.url, casa: l.casa ?? contexto?.casa ?? null }));
+        const { link1, link2 } = this.linksPorCasa(comCasa, alvo.casa_a_nome || '', alvo.casa_b_nome || '');
+        if (link1 && !alvo.url_casa_1) patch.url_casa_1 = link1;
+        if (link2 && !alvo.url_casa_2) patch.url_casa_2 = link2;
+        const existentes: any[] = Array.isArray(alvo.links_grupo) ? alvo.links_grupo : [];
+        const urlsExistentes = new Set(existentes.map((l: any) => l?.url));
+        const novos = comCasa.filter((l) => !urlsExistentes.has(l.url));
+        if (novos.length > 0) patch.links_grupo = [...existentes, ...novos];
+      }
+      if (Object.keys(patch).length === 0) return false;
+
+      let { error } = await supabase.from('oportunidades').update(patch).eq('id', alvo.id);
+      if (error && (error.code === 'PGRST204' || /column|schema cache/i.test(error.message || ''))) {
+        if (!patch.evento) return false;
+        ({ error } = await supabase.from('oportunidades').update({ evento: patch.evento }).eq('id', alvo.id));
+      }
+      if (error) {
+        console.error('⚠️ [Telegram] Falha no late-binding de contexto:', error.message || error);
+        return false;
+      }
+      console.log(
+        `🧷 [Telegram] Contexto TARDIO aplicado a "${alvo.evento}":` +
+        `${patch.evento ? ` dataHora ${contexto!.dataHora};` : ''}` +
+        `${patch.url_casa_1 ? ' link casa A;' : ''}${patch.url_casa_2 ? ' link casa B;' : ''}` +
+        `${patch.links_grupo ? ` +${links.length} link(s) no links_grupo` : ''}`
+      );
+      return true;
+    } catch (e: any) {
+      console.error(`⚠️ [Telegram] Erro no late-binding: ${e?.message || e}`);
+      return false;
+    }
+  }
+
   async processarSinal(sinal: SinalExtraido, extras?: ExtrasSinal): Promise<ResultadoPipeline> {
     await this.resolverDataHora(sinal, extras);
     const opp = this.construirOportunidade(sinal);
@@ -221,6 +315,12 @@ export class SignalPipeline {
     const banca = await this.bancaAtual();
     const distr = this.engine.calcularDistribuicaoStake(opp, banca);
 
+    // Links diretos colhidos do grupo, casados por casa: PERSISTEM na oportunidade
+    // (url_casa_1/2 + links_grupo, migration 017) e alimentam o alerta do WhatsApp.
+    // Antes eram usados só no alerta e descartados — o frontend nunca via link.
+    const linksGrupo = extras?.links || [];
+    const { link1, link2, soltos } = this.linksPorCasa(linksGrupo, opp.casaA, opp.casaB);
+
     const payload: any = {
       evento: opp.evento,
       odd_casa_1: opp.oddA,
@@ -240,13 +340,22 @@ export class SignalPipeline {
       esporte: opp.esporte || null,
       url: null,
       fonte: 'telegram', // ia_status fica no DEFAULT 'pendente' → EnrichmentService cobre
+      url_casa_1: link1 || null,
+      url_casa_2: link2 || null,
+      links_grupo: linksGrupo.length ? linksGrupo.map((l) => ({ url: l.url, casa: l.casa ?? null })) : null,
     };
 
-    const { data: novaOpp, error: insertError } = await supabase
+    let { data: novaOpp, error: insertError } = await supabase
       .from('oportunidades')
       .insert(payload)
       .select()
       .single();
+    // Fallback: colunas de link ausentes (migration 017 não aplicada) → grava sem elas.
+    if (insertError && (insertError.code === 'PGRST204' || /column|schema cache/i.test(insertError.message || ''))) {
+      console.warn('⚠️ [Telegram] Colunas de links ausentes em "oportunidades" (aplique a migration 017) — gravando sem os links.');
+      const { url_casa_1: _1, url_casa_2: _2, links_grupo: _3, ...semLinks } = payload;
+      ({ data: novaOpp, error: insertError } = await supabase.from('oportunidades').insert(semLinks).select().single());
+    }
     if (insertError || !novaOpp) {
       console.error('⚠️ [Telegram] Erro ao salvar sinal:', insertError);
       return { acao: 'erro', motivo: insertError?.message || 'insert falhou' };
@@ -278,9 +387,8 @@ export class SignalPipeline {
         ? ` · ⚠️ Linha asiática ${opp.linha} (.25/.75): o lucro informado é o PISO garantido — no cenário do meio metade de cada aposta é devolvida; nos demais cenários o lucro é o dobro`
         : '';
 
-    // Links diretos do grupo: casados por casa entram na linha "🔗 Abrir" do
-    // alerta; os não casados vão na nota (melhor mostrar do que perder).
-    const { link1, link2, soltos } = this.linksPorCasa(extras?.links || [], opp.casaA, opp.casaB);
+    // Links do grupo não casados com perna vão na nota (melhor mostrar do que perder);
+    // link1/link2 (casados por casa) já foram calculados antes do insert.
     const notaLinks = soltos.length ? ` · 🔗 Links do grupo: ${soltos.join(' | ')}` : '';
 
     const revalidavel = casaTemScraper(opp.casaA) && casaTemScraper(opp.casaB);
