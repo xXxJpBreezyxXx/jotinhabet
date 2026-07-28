@@ -36,6 +36,8 @@ export interface LinkSinal {
 /** Enriquecimento vindo da correlação de mensagens do grupo. */
 export interface ExtrasSinal {
   links?: LinkSinal[];
+  /** Origem do sinal: 'telegram' (default, grupo de sinais) ou 'copiloto' (chat da IA). */
+  fonte?: 'telegram' | 'copiloto';
 }
 
 const ROI_MIN_ALERTA = 1.5;
@@ -56,7 +58,7 @@ export class SignalPipeline {
    * Análogo de converterSurebet (casa_sureradar.ts): monta a ArbitrageOpportunity
    * a partir do sinal extraído, derivando o ROI das odds (nunca do print).
    */
-  construirOportunidade(sinal: SinalExtraido): ArbitrageOpportunity | null {
+  construirOportunidade(sinal: SinalExtraido, fonte: 'telegram' | 'copiloto' = 'telegram'): ArbitrageOpportunity | null {
     const casaA = canonizarCasa(sinal.casaA);
     const casaB = canonizarCasa(sinal.casaB);
 
@@ -90,7 +92,9 @@ export class SignalPipeline {
       url: undefined,
       linha: sinal.linha ?? undefined,
       dataHora: dataHoraIso,
-      analiseIA: `📲 Sinal importado do grupo do Telegram e extraído por IA de visão (confiança ${sinal.confianca}%). ROI derivado das odds do print — revalide nas casas antes de apostar.`,
+      analiseIA: fonte === 'copiloto'
+        ? '🤖 Oportunidade lançada pelo Copiloto (chat da aba IA & Automação) a pedido do usuário. ROI derivado das odds informadas — revalide nas casas antes de apostar.'
+        : `📲 Sinal importado do grupo do Telegram e extraído por IA de visão (confiança ${sinal.confianca}%). ROI derivado das odds do print — revalide nas casas antes de apostar.`,
     };
   }
 
@@ -274,8 +278,10 @@ export class SignalPipeline {
   }
 
   async processarSinal(sinal: SinalExtraido, extras?: ExtrasSinal): Promise<ResultadoPipeline> {
+    const fonteDb = extras?.fonte || 'telegram';
+    const rotuloAlerta = fonteDb === 'copiloto' ? 'Copiloto (IA)' : 'Telegram (IA)';
     await this.resolverDataHora(sinal, extras);
-    const opp = this.construirOportunidade(sinal);
+    const opp = this.construirOportunidade(sinal, fonteDb);
     if (!opp) {
       return { acao: 'erro', motivo: 'oportunidade inválida (break-even falhou na construção)' };
     }
@@ -331,7 +337,7 @@ export class SignalPipeline {
       analise_ia: opp.analiseIA || null,
       esporte: opp.esporte || null,
       url: null,
-      fonte: 'telegram', // ia_status fica no DEFAULT 'pendente' → EnrichmentService cobre
+      fonte: fonteDb, // ia_status fica no DEFAULT 'pendente' → EnrichmentService cobre
       url_casa_1: link1 || null,
       url_casa_2: link2 || null,
       links_grupo: linksGrupo.length ? linksGrupo.map((l) => ({ url: l.url, casa: l.casa ?? null })) : null,
@@ -388,7 +394,7 @@ export class SignalPipeline {
     if (revalidavel) {
       // REVALIDAÇÃO PRÉ-ALERTA: sinal de grupo chega ATRASADO por natureza —
       // re-busca as duas pernas ao vivo e só alerta se a arb segue de pé.
-      const reval = await this.revalidador.checarPernasAoVivo({ ...opp, fonte: 'telegram' });
+      const reval = await this.revalidador.checarPernasAoVivo({ ...opp, fonte: fonteDb });
       if (!reval.ok || (reval.roiAtual ?? 0) < ROI_MIN_ALERTA) {
         console.log(
           `🛡️ [Telegram] Alerta SUPRIMIDO pela revalidação: ${opp.evento} | ${opp.mercado} ` +
@@ -434,7 +440,7 @@ export class SignalPipeline {
         casa2: opp.casaB,
         esporte: opp.esporte,
         dataPartida: (opp.evento.match(/\((\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})\)\s*$/) || [])[1],
-        fonte: 'Telegram (IA)',
+        fonte: rotuloAlerta,
         link1,
         link2,
         nota: `✅ Revalidada agora nas casas (odds ao vivo)${notaQuarter}${notaLinks}`,
@@ -467,7 +473,7 @@ export class SignalPipeline {
       casa2: opp.casaB,
       esporte: opp.esporte,
       dataPartida: (opp.evento.match(/\((\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})\)\s*$/) || [])[1],
-      fonte: 'Telegram (IA)',
+      fonte: rotuloAlerta,
       link1,
       link2,
       nota: `⚠️ NÃO REVALIDADO — casa(s) sem verificação automática (${semScraper}). Confirme as odds nas casas antes de apostar.${notaQuarter}${notaLinks}`,

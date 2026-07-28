@@ -816,10 +816,10 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatQuickPrompts = [
-    'O que é uma surebet e o que pode dar errado?',
-    'Como dividir minha banca entre as duas casas?',
-    'Quais regras de tênis quebram uma arbitragem?',
-    'O que é um "erro palpável" (palpable error)?'
+    'Como foi meu desempenho? Resuma minhas últimas entradas (lucro e ROI).',
+    'Qual a melhor surebet ativa no radar agora pra minha banca e meus saldos?',
+    'Tenho uma odd promocional — me ajude a montar e lançar uma surebet no radar.',
+    'Quais regras de tênis quebram uma arbitragem?'
   ];
   const [simulationMode, setSimulationMode] = useState(true);
   const [opportunities, setOpportunities] = useState<OpportunityItem[]>([]);
@@ -1943,7 +1943,7 @@ export default function App() {
               {activeTab === 'calculadora' && 'Calcule as stakes ideais e ROI para operações de arbitragem'}
               {activeTab === 'juros-compostos' && 'Simulação e projeção baseadas na planilha de Arbitragem'}
               {activeTab === 'saldos' && 'Registre quanto você tem disponível em cada casa de apostas'}
-              {activeTab === 'ai-test' && 'Configure e teste os provedores de modelos de linguagem'}
+              {activeTab === 'ai-test' && 'Copiloto com acesso aos dados ao vivo: banca, histórico, radar, value bets — e pode lançar oportunidades no radar'}
             </p>
           </div>
 

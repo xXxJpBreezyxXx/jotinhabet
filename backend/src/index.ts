@@ -21,6 +21,7 @@ import { WhatsAppNotifier } from './notify/whatsapp';
 import { avisarDeployWhatsApp } from './notify/deployNotice';
 import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
 import { SignalPipeline } from './signals/signalPipeline';
+import { montarContextoApp, PROTOCOLO_ACAO_COPILOT, extrairAcaoCopilot, executarCriarOportunidade, resumirResultadoCriacao } from './IA/copilot';
 import { TelegramIngestService } from './signals/telegramIngestService';
 import { regraPermiteOportunidade } from './arbitrage/regras';
 import { cashoutCapture } from './cashout/cashoutCapture';
@@ -114,14 +115,19 @@ app.post('/api/test-ai', requireApiToken, async (req, res) => {
   }
 });
 
-// Copiloto de Arbitragem — chat conversacional (multi-turno)
+// Copiloto de Arbitragem — chat conversacional (multi-turno) COM acesso aos dados
+// ao vivo do app (CONTEXTO_APP) e à ação criar_oportunidade (ver IA/copilot.ts).
 const COPILOT_SYSTEM =
   'Você é o Copiloto do JotinhaBet, um assistente especialista em arbitragem esportiva (surebets), ' +
   'gestão de banca e regras de casas de apostas. Responda SEMPRE em português do Brasil, de forma objetiva e prática. ' +
   'Explique riscos quando relevante: erro palpável (odds absurdas), regras de anulação/void divergentes entre casas ' +
   '(ex.: desistência no tênis, prorrogação no basquete), liquidez e limitação de conta. ' +
   'Nunca prometa lucro garantido sem ressalvas e lembre que a execução da aposta é manual — o sistema nunca aposta sozinho. ' +
-  'Se não souber, diga que não sabe. Seja conciso.';
+  'Se não souber, diga que não sabe. Seja conciso.\n\n' +
+  'Você recebe abaixo um bloco CONTEXTO_APP com dados AO VIVO do sistema (banca ativa, saldos por casa, histórico de ' +
+  'entradas com lucro/ROI, surebets ativas do radar, value bets, middles e calibração do alerta). Quando a pergunta for ' +
+  'sobre as entradas/operações do usuário, a banca ou as oportunidades atuais, responda COM BASE NESSES DADOS, citando ' +
+  'números exatos. Se a informação não estiver no contexto, diga que não tem acesso a ela (não invente).';
 
 app.post('/api/ai/chat', requireApiToken, async (req, res) => {
   const { messages } = req.body;
@@ -139,8 +145,31 @@ app.post('/api/ai/chat', requireApiToken, async (req, res) => {
       .join('\n');
     const prompt = `${historico}\nAssistente:`;
 
-    const { text, provider } = await generateWithFallback(prompt, COPILOT_SYSTEM);
-    res.json({ reply: text, provider });
+    // Retrato ao vivo do app injetado no system a cada mensagem (tolerante a falha).
+    const contexto = await montarContextoApp();
+    const system = `${COPILOT_SYSTEM}\n${PROTOCOLO_ACAO_COPILOT}\n\n${contexto}`;
+
+    const { text, provider } = await generateWithFallback(prompt, system);
+
+    // Ação criar_oportunidade: se o modelo emitiu o bloco JSON, valida e roda o
+    // MESMO pipeline dos sinais do Telegram (gates + dedup + revalidação + alerta).
+    const acao = extrairAcaoCopilot(text);
+    if (!acao) {
+      return res.json({ reply: text, provider });
+    }
+    if (acao.erro || !acao.dados) {
+      return res.json({
+        reply: `${acao.replySemBloco}\n\n❌ A ação de criação veio malformada (${acao.erro}). Reformule o pedido com evento, esporte, mercado, opções, odds e casas.`,
+        provider,
+      });
+    }
+    console.log(`🤖 [Copiloto] criar_oportunidade: ${acao.dados.evento} | ${acao.dados.mercado} | ${acao.dados.casaA}×${acao.dados.casaB}`);
+    const resultado = await executarCriarOportunidade(acao.dados, new SignalPipeline(revalidation));
+    res.json({
+      reply: `${acao.replySemBloco}\n\n${resumirResultadoCriacao(resultado)}`,
+      provider,
+      acao: { tipo: 'criar_oportunidade', ...resultado },
+    });
   } catch (error: any) {
     console.error('[ai/chat] erro:', error?.message || error);
     res.status(500).json({ error: 'Erro no chat de IA' });
