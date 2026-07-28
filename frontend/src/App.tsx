@@ -358,6 +358,41 @@ function AoVivoBadge() {
   );
 }
 
+const ESPORTE_EMOJI: Record<string, string> = {
+  'Futebol': '⚽', 'Basquete': '🏀', 'Tênis de Mesa': '🏓', 'Tênis': '🎾',
+  'Esports': '🎮', 'Vôlei': '🏐', 'Beisebol': '⚾', 'Hóquei': '🏒', 'Outro': '🏆',
+};
+
+/**
+ * Esporte canônico de uma entrada do histórico (para filtro/badge). Usa
+ * detalhes.esporte quando gravado (entradas novas); nas antigas, sem o campo,
+ * infere pelo nome do evento com a MESMA heurística do badge dos cards do radar
+ * (inclusive "vs"/"×" → Futebol), para o histórico classificar igual ao card
+ * que o usuário viu ao lançar.
+ */
+function esporteDaEntrada(d: { esporte?: string; evento?: string } | null | undefined): string {
+  const norm = (t: string) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const esp = norm(String(d?.esporte || ''));
+  if (esp) {
+    if (esp.includes('futebol') || esp.includes('football') || esp.includes('soccer')) return 'Futebol';
+    if (esp.includes('basquete') || esp.includes('basket')) return 'Basquete';
+    // Mesa ANTES de tênis: "tenis de mesa" contém "tenis".
+    if (esp.includes('mesa') || esp.includes('table tennis')) return 'Tênis de Mesa';
+    if (esp.includes('tenis') || esp.includes('tennis')) return 'Tênis';
+    if (esp.includes('esport')) return 'Esports';
+    if (esp.includes('volei') || esp.includes('volley')) return 'Vôlei';
+    if (esp.includes('beisebol') || esp.includes('baseball')) return 'Beisebol';
+    if (esp.includes('hoquei') || esp.includes('hockey')) return 'Hóquei';
+  }
+  const evento = String(d?.evento || '');
+  const ev = evento.toLowerCase();
+  if (ev.includes('lakers') || ev.includes('celtics') || ev.includes('nba')) return 'Basquete';
+  if (ev.includes('djokovic') || ev.includes('alcaraz') || ev.includes('federer') || ev.includes('nadal')) return 'Tênis';
+  if (ev.includes('loud') || ev.includes('pain') || ev.includes('gaming')) return 'Esports';
+  if (evento.includes('×') || ev.includes(' vs ')) return 'Futebol';
+  return 'Outro';
+}
+
 /** Data/horário do evento em pt-BR (America/Sao_Paulo), ex.: "21/07 20:00". null se ausente/inválido. */
 function fmtDataHora(iso?: string | null): string | null {
   if (!iso) return null;
@@ -881,7 +916,7 @@ export default function App() {
   // sem depender de uma oportunidade detectada pelo radar (oportunidade_id = null).
   const [manualOpen, setManualOpen] = useState(false);
   const [manualForm, setManualForm] = useState({
-    evento: '', mercado: '', casaA: '', opcaoA: '', oddA: '', casaB: '', opcaoB: '', oddB: ''
+    evento: '', esporte: '', mercado: '', casaA: '', opcaoA: '', oddA: '', casaB: '', opcaoB: '', oddB: ''
   });
   const [manualTotal, setManualTotal] = useState('50.00');
   const [manualStakeA, setManualStakeA] = useState('');
@@ -891,7 +926,7 @@ export default function App() {
   const [manualStakesEditadas, setManualStakesEditadas] = useState(false);
 
   const abrirEntradaManual = () => {
-    setManualForm({ evento: '', mercado: '', casaA: '', opcaoA: '', oddA: '', casaB: '', opcaoB: '', oddB: '' });
+    setManualForm({ evento: '', esporte: '', mercado: '', casaA: '', opcaoA: '', oddA: '', casaB: '', opcaoB: '', oddB: '' });
     setManualTotal(userBanca);
     setManualStakeA('');
     setManualStakeB('');
@@ -901,6 +936,10 @@ export default function App() {
 
   const [dashboardSubTab, setDashboardSubTab] = useState<'radar' | 'historico'>('radar');
   const [filterDate, setFilterDate] = useState<string>(''); // YYYY-MM-DD
+  // Filtros do HISTÓRICO de entradas (data do lançamento + esporte) — os cards de
+  // métricas (lucro, ROI médio) do histórico respondem a este recorte.
+  const [histFiltroData, setHistFiltroData] = useState<string>(''); // YYYY-MM-DD ('' = todas)
+  const [histFiltroEsporte, setHistFiltroEsporte] = useState<string>(''); // '' = todos
   const [sortBy, setSortBy] = useState<'roi' | 'horario'>('roi'); // 'roi' or 'horario'
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     return (localStorage.getItem('jotinhabet_theme') as 'dark' | 'light') || 'dark';
@@ -1335,6 +1374,7 @@ export default function App() {
       lucro_real: modalCalc.lucro,
       detalhes: {
         evento: selectedOpp.evento,
+        esporte: selectedOpp.esporte || undefined,
         mercado: selectedOpp.mercado || 'Resultado Final',
         opcaoA: selectedOpp.opcao_a || 'Opção A',
         opcaoB: selectedOpp.opcao_b || 'Opção B',
@@ -1449,6 +1489,7 @@ export default function App() {
       lucro_real: calc.lucro,
       detalhes: {
         evento: manualForm.evento.trim(),
+        esporte: manualForm.esporte || undefined,
         mercado: manualForm.mercado.trim() || 'Resultado Final',
         opcaoA: manualForm.opcaoA.trim() || 'Opção A',
         opcaoB: manualForm.opcaoB.trim() || 'Opção B',
@@ -1730,6 +1771,34 @@ export default function App() {
   const modalCalc = getModalCalculations();
   const manualCalc = manualOpen ? getManualCalc() : null;
   const totalLucroReal = operationsHistory.reduce((sum, op) => sum + (op.lucro_real || 0), 0);
+
+  // ===== Histórico de Entradas: recorte por data/esporte + métricas do recorte =====
+  // Data LOCAL (não UTC) do lançamento, no formato do <input type="date">.
+  const dataLocalYMD = (iso: string) => {
+    const dt = new Date(iso);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  };
+  const historicoFiltrado = operationsHistory.filter((op) => {
+    if (histFiltroData && dataLocalYMD(op.confirmado_em) !== histFiltroData) return false;
+    if (histFiltroEsporte && esporteDaEntrada(op.detalhes) !== histFiltroEsporte) return false;
+    return true;
+  });
+  const esportesDoHistorico = Array.from(new Set(operationsHistory.map((op) => esporteDaEntrada(op.detalhes)))).sort();
+  const histInvestido = historicoFiltrado.reduce((s, op) => s + (Number(op.stake_real_1) || 0) + (Number(op.stake_real_2) || 0), 0);
+  const histLucro = historicoFiltrado.reduce((s, op) => s + (Number(op.lucro_real) || 0), 0);
+  // ROI por entrada: usa o gravado nos detalhes; sem ele, deriva de lucro/investimento.
+  const roiDaOperacao = (op: any): number => {
+    const r = Number(op.detalhes?.roi);
+    if (Number.isFinite(r)) return r;
+    const inv = (Number(op.stake_real_1) || 0) + (Number(op.stake_real_2) || 0);
+    return inv > 0 ? ((Number(op.lucro_real) || 0) / inv) * 100 : 0;
+  };
+  const histRoiMedio = historicoFiltrado.length
+    ? historicoFiltrado.reduce((s, op) => s + roiDaOperacao(op), 0) / historicoFiltrado.length
+    : 0;
+  // ROI agregado do recorte (lucro total / investido total) — complementa a média simples.
+  const histRoiAgregado = histInvestido > 0 ? (histLucro / histInvestido) * 100 : 0;
+  const histFiltroAtivo = !!(histFiltroData || histFiltroEsporte);
 
   // Saldos por casa (derivados p/ os cards da aba "Saldo nas Casas").
   const totalSaldos = saldosCasas.reduce((acc, s) => acc + (parseFloat(s.valor) || 0), 0);
@@ -2641,10 +2710,120 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Filtros do histórico: data do lançamento + esporte (chips, mesmo padrão do radar) */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '10px 12px', marginBottom: '16px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--panel-border)', borderRadius: '10px' }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Data</span>
+                <input
+                  type="date"
+                  value={histFiltroData}
+                  onChange={(e) => setHistFiltroData(e.target.value)}
+                  style={{
+                    background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid var(--panel-border)',
+                    borderRadius: '8px',
+                    color: 'var(--text-primary)',
+                    fontSize: '12px',
+                    padding: '5px 10px',
+                    outline: 'none',
+                    colorScheme: theme === 'light' ? 'light' : 'dark'
+                  }}
+                />
+                {(() => {
+                  const chip = (active: boolean) => ({
+                    padding: '5px 12px',
+                    borderRadius: '999px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    border: active ? '1px solid var(--color-primary)' : '1px solid var(--panel-border)',
+                    background: active ? 'var(--color-primary)' : 'rgba(255,255,255,0.03)',
+                    color: active ? '#fff' : 'var(--text-secondary)',
+                    transition: 'all 0.15s ease'
+                  });
+                  return (
+                    <>
+                      <span style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Esporte</span>
+                      <button style={chip(!histFiltroEsporte)} onClick={() => setHistFiltroEsporte('')}>Todos</button>
+                      {esportesDoHistorico.map((sport) => (
+                        <button
+                          key={sport}
+                          style={chip(histFiltroEsporte === sport)}
+                          onClick={() => setHistFiltroEsporte(histFiltroEsporte === sport ? '' : sport)}
+                        >
+                          {ESPORTE_EMOJI[sport] || '🏆'} {sport}
+                        </button>
+                      ))}
+                      {histFiltroAtivo && (
+                        <button
+                          style={{ ...chip(false), color: '#ef4444', border: '1px solid rgba(239,68,68,0.35)' }}
+                          onClick={() => { setHistFiltroData(''); setHistFiltroEsporte(''); }}
+                          title="Limpar filtros de data e esporte"
+                        >
+                          ✕ Limpar filtros
+                        </button>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+
+              {/* Métricas do recorte filtrado — lucro e ROI acompanham os filtros acima */}
+              <div className="stats-grid" style={{ marginBottom: '16px' }}>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>Entradas{histFiltroAtivo ? ' (filtro)' : ''}</span>
+                    <CheckCircle size={16} className="stat-icon" />
+                  </div>
+                  <div className="stat-value">{historicoFiltrado.length}</div>
+                  <div className="stat-footer">
+                    {histFiltroAtivo ? `De ${operationsHistory.length} entradas no total` : 'Total de entradas lançadas na banca'}
+                  </div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>Investido{histFiltroAtivo ? ' (filtro)' : ''}</span>
+                    <Layers size={16} className="stat-icon" />
+                  </div>
+                  <div className="stat-value">R$ {histInvestido.toFixed(2)}</div>
+                  <div className="stat-footer">
+                    Soma das stakes das entradas do recorte
+                  </div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>Lucro{histFiltroAtivo ? ' (filtro)' : ' Total'}</span>
+                    <TrendingUp size={16} className="stat-icon" style={{ color: histLucro >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }} />
+                  </div>
+                  <div className="stat-value" style={{ color: histLucro >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                    {histLucro < 0 ? '−' : ''}R$ {Math.abs(histLucro).toFixed(2)}
+                  </div>
+                  <div className="stat-footer">
+                    {histFiltroData
+                      ? `Lucro líquido em ${histFiltroData.split('-').reverse().join('/')}`
+                      : 'Lucro líquido das entradas do recorte'}
+                  </div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>ROI Médio{histFiltroAtivo ? ' (filtro)' : ''}</span>
+                    <Percent size={16} className="stat-icon" style={{ color: 'var(--color-accent)' }} />
+                  </div>
+                  <div className="stat-value" style={{ color: 'var(--color-accent)' }}>
+                    {histRoiMedio.toFixed(2)}%
+                  </div>
+                  <div className="stat-footer">
+                    Média simples por entrada • agregado {histRoiAgregado.toFixed(2)}% (lucro/investido)
+                  </div>
+                </div>
+              </div>
+
               <div className="table-container" style={{ width: '100%' }}>
-                {operationsHistory.length === 0 ? (
+                {historicoFiltrado.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)', fontSize: '13px' }}>
-                    Nenhuma aposta lançada na banca ainda. Abra a calculadora de uma surebet e clique em "Confirmar Entrada", ou use "Entrada Manual" para registrar uma surebet feita fora do radar!
+                    {operationsHistory.length === 0
+                      ? 'Nenhuma aposta lançada na banca ainda. Abra a calculadora de uma surebet e clique em "Confirmar Entrada", ou use "Entrada Manual" para registrar uma surebet feita fora do radar!'
+                      : 'Nenhuma entrada encontrada para os filtros selecionados. Ajuste a data/esporte ou limpe os filtros.'}
                   </div>
                 ) : (
                   <table className="custom-table" style={{ fontSize: '12px' }}>
@@ -2661,8 +2840,9 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {operationsHistory.map((op) => {
+                      {historicoFiltrado.map((op) => {
                         const d = op.detalhes || {};
+                        const esporteOp = esporteDaEntrada(d);
                         return (
                           <tr key={op.id}>
                             <td style={{ color: 'var(--text-secondary)' }}>
@@ -2675,6 +2855,9 @@ export default function App() {
                                   manual
                                 </span>
                               )}
+                              <div style={{ fontSize: '10px', fontWeight: 'normal', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                {ESPORTE_EMOJI[esporteOp] || '🏆'} {esporteOp}
+                              </div>
                             </td>
                             <td>{d.mercado || 'Mercado'}</td>
                             <td>
@@ -3937,6 +4120,20 @@ export default function App() {
                     onChange={e => setManualForm({ ...manualForm, evento: e.target.value })}
                     style={{ marginTop: '4px', padding: '8px 10px' }}
                   />
+                </div>
+                <div className="form-group">
+                  <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Esporte</label>
+                  <select
+                    className="form-control"
+                    value={manualForm.esporte}
+                    onChange={e => setManualForm({ ...manualForm, esporte: e.target.value })}
+                    style={{ marginTop: '4px', padding: '8px 10px' }}
+                  >
+                    <option value="">— selecione —</option>
+                    {Object.keys(ESPORTE_EMOJI).map((s) => (
+                      <option key={s} value={s}>{ESPORTE_EMOJI[s]} {s}</option>
+                    ))}
+                  </select>
                 </div>
                 <div className="form-group">
                   <label style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Mercado</label>
