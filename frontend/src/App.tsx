@@ -358,6 +358,17 @@ function AoVivoBadge() {
   );
 }
 
+/** Data LOCAL (não UTC) de um timestamp, no formato YYYY-MM-DD (o mesmo do <input type="date">). */
+function dataLocalYMD(iso: string | Date): string {
+  const dt = new Date(iso);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+/** "YYYY-MM-DD" → "dd/mm" para exibição compacta nas tabelas. */
+function ymdParaDDMM(ymd: string): string {
+  return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`;
+}
+
 const ESPORTE_EMOJI: Record<string, string> = {
   'Futebol': '⚽', 'Basquete': '🏀', 'Tênis de Mesa': '🏓', 'Tênis': '🎾',
   'Esports': '🎮', 'Vôlei': '🏐', 'Beisebol': '⚾', 'Hóquei': '🏒', 'Outro': '🏆',
@@ -1646,94 +1657,105 @@ export default function App() {
 
   const isDbConnected = systemStatus?.services?.database === 'connected';
 
-  // Sync projBancaInicial with userBanca when userBanca changes
+  // Âncora da série de juros compostos: a banca ANTES da primeira entrada lançada
+  // (banca atual − lucro real acumulado). A banca atual já inclui os lucros das
+  // entradas; usar ela direto como banca do 1º dia real somava os lucros DUAS vezes
+  // e inflava toda a projeção. Com a âncora, o último dia real fecha exatamente na
+  // banca atual do painel e a projeção parte do valor verdadeiro.
   useEffect(() => {
-    setProjBancaInicial(userBanca);
-  }, [userBanca]);
+    const lucroReal = operationsHistory.reduce((sum, op) => sum + (op.lucro_real || 0), 0);
+    const base = parseFloat(userBanca) - lucroReal;
+    if (Number.isFinite(base)) setProjBancaInicial(base.toFixed(2));
+  }, [userBanca, operationsHistory]);
 
-  // Group operations by date and merge them with future projection results
+  // Planilha de juros compostos: dias REAIS (das entradas lançadas) seguidos dos
+  // dias PROJETADOS, numa numeração ÚNICA e contínua (Dia 1..N reais, Dia N+1.. na
+  // projeção) e com data de calendário em toda linha — a projeção começa amanhã.
   const getMergedProjection = (): any[] => {
-    // 1. Group operations by date string
-    const opsByDate: { [dateStr: string]: any[] } = {};
+    // 1. Agrupa as operações pelo dia LOCAL (YYYY-MM-DD: ordena como string e não
+    // colide entre anos, ao contrário do dd/mm antigo).
+    const opsByDate: { [ymd: string]: any[] } = {};
     operationsHistory.forEach(op => {
-      const date = new Date(op.confirmado_em);
-      const dateStr = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
-      if (!opsByDate[dateStr]) {
-        opsByDate[dateStr] = [];
-      }
-      opsByDate[dateStr].push(op);
+      const ymd = dataLocalYMD(op.confirmado_em);
+      if (!opsByDate[ymd]) opsByDate[ymd] = [];
+      opsByDate[ymd].push(op);
     });
-
-    // 2. Sort dates chronologically
-    const sortedDates = Object.keys(opsByDate).sort((a, b) => {
-      const aTime = new Date(opsByDate[a][0].confirmado_em).getTime();
-      const bTime = new Date(opsByDate[b][0].confirmado_em).getTime();
-      return aTime - bTime;
-    });
+    const sortedDates = Object.keys(opsByDate).sort();
+    const hojeYMD = dataLocalYMD(new Date());
 
     const rows: any[] = [];
     let currentBanca = parseFloat(projBancaInicial);
+    let diaNum = 0;
 
-    // Add historical real days
-    sortedDates.forEach(dateStr => {
-      const ops = opsByDate[dateStr];
+    // Dias reais (numeração 1..N na ordem do calendário)
+    sortedDates.forEach(ymd => {
+      const ops = opsByDate[ymd];
       const lucroTotal = ops.reduce((sum, op) => sum + (op.lucro_real || 0), 0);
       const stakeTotal = ops.reduce((sum, op) => sum + (op.stake_real_1 + op.stake_real_2), 0);
-      
+
       const startBanca = currentBanca;
       const endBanca = startBanca + lucroTotal;
       currentBanca = endBanca;
 
-      // Map up to 3 individual turn profits, fold remaining into turn 3
+      // Até 3 lucros individuais por turno; do 3º em diante agrupa em "T3+"
       const t1 = ops[0] ? ops[0].lucro_real : 0;
       const t2 = ops[1] ? ops[1].lucro_real : 0;
-      let t3 = 0;
-      if (ops.length === 3) {
-        t3 = ops[2].lucro_real;
-      } else if (ops.length > 3) {
-        t3 = ops.slice(2).reduce((sum, op) => sum + op.lucro_real, 0);
-      }
+      const t3 = ops.length >= 3 ? ops.slice(2).reduce((sum, op) => sum + op.lucro_real, 0) : 0;
 
+      diaNum += 1;
       rows.push({
-        dia: `${dateStr} (Real)`,
+        key: `real-${ymd}`,
+        diaNum,
+        data: ymdParaDDMM(ymd),
+        isReal: true,
+        isToday: ymd === hojeYMD,
         bancaInicial: startBanca,
         maoPorTurno: ops.length > 0 ? (stakeTotal / ops.length) : 0,
         lucroTurno1: t1,
         lucroTurno2: t2,
         lucroTurno3: t3,
         lucroTotalDia: lucroTotal,
-        bancaFinal: endBanca,
-        isReal: true
+        bancaFinal: endBanca
       });
     });
 
-    // Add simulated projection days starting from the latest real bankroll
+    // Dias projetados: continuam a numeração e o calendário (a partir de AMANHÃ),
+    // compondo sobre a banca final do último dia real.
     const simDaysCount = parseInt(projDias) || 30;
     const maxStakePct = (parseFloat(projMaxStakePct) || 50) / 100;
     const roiMedio = (parseFloat(projRoiMedioPct) || 4) / 100;
     const turnos = parseInt(projTurnosPorDia) || 3;
 
     let simBanca = currentBanca;
+    const hoje = new Date();
 
     for (let i = 1; i <= simDaysCount; i++) {
       const startBanca = simBanca;
       const stake = startBanca * maxStakePct;
-      
+
       const lucroTurno = stake * roiMedio;
       const lucroTotalDia = lucroTurno * turnos;
       const endBanca = startBanca + lucroTotalDia;
       simBanca = endBanca;
 
+      const dataProj = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + i);
+
+      diaNum += 1;
       rows.push({
-        dia: `Dia ${i}`,
+        key: `proj-${i}`,
+        diaNum,
+        data: ymdParaDDMM(dataLocalYMD(dataProj)),
+        isReal: false,
+        isToday: false,
         bancaInicial: startBanca,
         maoPorTurno: stake,
         lucroTurno1: lucroTurno,
         lucroTurno2: turnos >= 2 ? lucroTurno : 0,
-        lucroTurno3: turnos >= 3 ? lucroTurno : 0,
+        // Coerente com os dias reais: turnos além do 2º agrupados em "T3+",
+        // para T1 + T2 + T3+ sempre fechar com o Lucro Diário.
+        lucroTurno3: turnos >= 3 ? lucroTurno * (turnos - 2) : 0,
         lucroTotalDia: lucroTotalDia,
-        bancaFinal: endBanca,
-        isReal: false
+        bancaFinal: endBanca
       });
     }
 
@@ -1773,11 +1795,6 @@ export default function App() {
   const totalLucroReal = operationsHistory.reduce((sum, op) => sum + (op.lucro_real || 0), 0);
 
   // ===== Histórico de Entradas: recorte por data/esporte + métricas do recorte =====
-  // Data LOCAL (não UTC) do lançamento, no formato do <input type="date">.
-  const dataLocalYMD = (iso: string) => {
-    const dt = new Date(iso);
-    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-  };
   const historicoFiltrado = operationsHistory.filter((op) => {
     if (histFiltroData && dataLocalYMD(op.confirmado_em) !== histFiltroData) return false;
     if (histFiltroEsporte && esporteDaEntrada(op.detalhes) !== histFiltroEsporte) return false;
@@ -3572,8 +3589,11 @@ export default function App() {
               
               <div className="test-panel">
                 <div className="form-group">
-                  <label>Banca Inicial (R$)</label>
+                  <label>Banca Inicial da Série (R$)</label>
                   <input className="form-control" type="number" value={projBancaInicial} onChange={(e) => setProjBancaInicial(e.target.value)} />
+                  <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', lineHeight: 1.4 }}>
+                    Preenchida automaticamente com a banca ANTES das entradas lançadas (banca atual − lucro acumulado) — assim o último dia real fecha na sua banca atual.
+                  </div>
                 </div>
                 <div className="form-group">
                   <label>Dias a Projetar</label>
@@ -3629,18 +3649,29 @@ export default function App() {
                       <tr>
                         <th>Dia</th>
                         <th>Banca Inicial</th>
-                        <th>Mão / Turno (50%)</th>
+                        <th>Mão / Turno ({parseFloat(projMaxStakePct) || 50}%)</th>
                         <th>Lucro T1</th>
                         <th>Lucro T2</th>
-                        <th>Lucro T3</th>
+                        <th>Lucro T3+</th>
                         <th>Lucro Diário</th>
                         <th>Banca Final</th>
                       </tr>
                     </thead>
                     <tbody>
                       {mergedProjection.map(day => (
-                        <tr key={day.dia}>
-                          <td style={{ fontWeight: 'bold', color: day.isReal ? 'var(--color-success)' : 'var(--color-primary)' }}>{day.dia}</td>
+                        <tr key={day.key} style={day.isToday ? { background: 'rgba(16, 185, 129, 0.08)' } : undefined}>
+                          <td style={{ fontWeight: 'bold', color: day.isReal ? 'var(--color-success)' : 'var(--color-primary)', whiteSpace: 'nowrap' }}>
+                            Dia {day.diaNum} <span style={{ color: 'var(--text-muted)', fontWeight: 'normal' }}>• {day.data}</span>
+                            <span style={{
+                              marginLeft: '6px', fontSize: '9px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em',
+                              padding: '1px 6px', borderRadius: '999px', verticalAlign: 'middle',
+                              color: day.isReal ? 'var(--color-success)' : 'var(--color-primary)',
+                              border: `1px solid ${day.isReal ? 'var(--color-success)' : 'var(--color-primary)'}`,
+                              opacity: 0.85
+                            }}>
+                              {day.isToday ? 'hoje' : day.isReal ? 'real' : 'proj'}
+                            </span>
+                          </td>
                           <td>R$ {day.bancaInicial.toFixed(2)}</td>
                           <td>R$ {day.maoPorTurno.toFixed(2)}</td>
                           <td style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno1.toFixed(2)}</td>
