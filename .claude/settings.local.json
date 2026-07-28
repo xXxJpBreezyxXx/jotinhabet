@@ -19,7 +19,11 @@
       "Bash(grep -iE \"docker|compose|makefile|\\\\.sh$\")",
       "Bash(docker --version)",
       "Bash(docker info *)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(echo \"---exit $?---\")",
+      "Read(//proc/**)",
+      "Bash(swapon --show)",
+      "Bash(npx vitest *)"
     ]
   }
 }
