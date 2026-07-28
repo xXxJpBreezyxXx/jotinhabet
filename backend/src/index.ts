@@ -11,6 +11,7 @@ import { SchedulerService } from './scheduler/scheduler';
 import { EnrichmentService } from './scheduler/enrichmentService';
 import { GreenMonitorService } from './scheduler/greenMonitorService';
 import { BrowserScrapeWorker } from './scheduler/browserScrapeWorker';
+import { DigestNoturnoService } from './scheduler/digestNoturno';
 import { RevalidationService } from './core/revalidationService';
 import { getValorAtivas, deleteValor, getMiddlesAtivos, deleteMiddle } from './core/valorRepo';
 import { getResumoCalibracao, getAlertasRecentes } from './core/calibracaoRepo';
@@ -941,6 +942,15 @@ app.listen(port, () => {
   // Monitor pós-partida: quando a partida de uma entrada termina, manda o WhatsApp
   // de GREEN (parabéns + lucro + banca). Ciclo de 15 min (timing não é crítico).
   new GreenMonitorService().start(900);
+
+  // Digest noturno de value bets: resumo diário (default 18:30 SP) das +EV que começam
+  // à noite — janela em que o usuário tem mais disponibilidade. Value bets são
+  // radar-only (sem alerta individual); o digest cobre essa lacuna no WhatsApp.
+  if (process.env.DIGEST_NOTURNO_ENABLED !== 'false') {
+    new DigestNoturnoService().start();
+  } else {
+    console.log('ℹ️ [DigestNoturno] Desligado (DIGEST_NOTURNO_ENABLED=false).');
+  }
 
   // Radar Cashout: worker de captura da série temporal de odds (bússola × alvos) e
   // detecção de Dropping Odds. Guardado por CASHOUT_CAPTURE_ENABLED (default on).
