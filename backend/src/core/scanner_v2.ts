@@ -14,6 +14,7 @@ import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
 import { BetnacionalScraper } from '../scraping/casa_betnacional';
+import { RivaloScraper } from '../scraping/casa_rivalo';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -130,6 +131,7 @@ export class ArbitrageScannerV2 {
     new EstrelaBetScraper(),
     new FourPlayScraper(),
     new LuvabetScraper(),
+    new RivaloScraper(),
     new BetBoomScraper(),
     new SeuBetScraper(),
     new VbetScraper(),
@@ -153,7 +155,7 @@ export class ArbitrageScannerV2 {
   // agendada (linha ~223). Casa nova que fique fora daqui compila, aparece no scan manual
   // completo e parece integrada, mas NUNCA roda no scan de 5 min (foi o que aconteceu com
   // a Luvabet em 29/07/2026: 10 min em produção sem uma linha de log).
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional', 'Luvabet']);
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional', 'Luvabet', 'Rivalo']);
 
   /**
    * Scrapers baseados em BROWSER (Playwright) — coletados SEQUENCIALMENTE (um chromium
@@ -161,7 +163,7 @@ export class ArbitrageScannerV2 {
    * com limite. Betnacional é browser APESAR de estar no SCRAPERS_API (feed bet6 bloqueia
    * por fingerprint TLS — ver casa_betnacional.ts), por isso entra aqui também.
    */
-  private static readonly SCRAPERS_BROWSER = new Set(['Betano', 'Blaze', '1xBet', 'Betnacional']);
+  private static readonly SCRAPERS_BROWSER = new Set(['Betano', 'Blaze', '1xBet', 'Betnacional', 'Rivalo']);
 
   /** Teto de scrapers de API coletados em paralelo. I/O-bound; o limite protege a VPS 1-core. */
   private static readonly LIMITE_PARALELO = 5;

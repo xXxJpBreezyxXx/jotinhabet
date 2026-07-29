@@ -20,6 +20,7 @@ import { BetanoScraper } from '../scraping/casa_a';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { StakeScraper } from '../scraping/casa_stake';
+import { RivaloScraper } from '../scraping/casa_rivalo';
 
 /** Casas com scraper próprio que sabem re-buscar UM evento (oddsDoEvento). */
 const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> }> = {
@@ -44,6 +45,7 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   blaze: () => new BlazeScraper(),
   '1xbet': () => new OneXBetScraper(),
   stake: () => new StakeScraper(), // browser-intercept (API JSON só dentro do browser; só Futebol 1X2)
+  rivalo: () => new RivaloScraper(), // browser HEADED (Cloudflare) + API /api/offer com headers X-Betr-*
 };
 
 /** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento).

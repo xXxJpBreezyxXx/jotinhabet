@@ -38,6 +38,7 @@ const ALIAS_PARA_CANONICO: Record<string, string> = {
   luvabet: 'Luvabet',       // Altenar "luvabet" (fonte do scanner + revalidação)
   luva: 'Luvabet',          // domínio é luva.bet.br — o feed às vezes rotula só "Luva"
   stake: 'Stake',           // browser-intercept (Futebol 1X2)
+  rivalo: 'Rivalo',         // plataforma própria (matchserv); browser headed + Xvfb
   // Casas sem scraper (alertadas com tag ⚠️ NÃO REVALIDADO)
   betsson: 'Betsson',
   bet365: 'Bet365',
