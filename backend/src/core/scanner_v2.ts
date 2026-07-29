@@ -149,7 +149,11 @@ export class ArbitrageScannerV2 {
    * está aqui de propósito para ser fonte REAL de odds (não só revalidação). Se a
    * carga da VPS pesar, é 1-linha tirá-la daqui (cai só no scan COMPLETO manual).
    */
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional']);
+  // ATENÇÃO: estar em `this.scrapers` NÃO basta — esta allowlist é o filtro da varredura
+  // agendada (linha ~223). Casa nova que fique fora daqui compila, aparece no scan manual
+  // completo e parece integrada, mas NUNCA roda no scan de 5 min (foi o que aconteceu com
+  // a Luvabet em 29/07/2026: 10 min em produção sem uma linha de log).
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional', 'Luvabet']);
 
   /**
    * Scrapers baseados em BROWSER (Playwright) — coletados SEQUENCIALMENTE (um chromium

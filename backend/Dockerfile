@@ -25,13 +25,18 @@ EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "require('http').get('http://localhost:'+(process.env.PORT||4000)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
-# xvfb-run: dá um X virtual ao processo todo, para os scrapers poderem subir o Chromium
-# em modo HEADED. Casas atrás de Cloudflare (Rivalo, Brazino777, Betsul) barram o
-# fingerprint headless mesmo com stealth — headed sob Xvfb renderiza (mesma técnica que
-# fez o bet365 responder 200; ver memória bet365-recon). Os scrapers headless existentes
-# não são afetados: só passam a ter um DISPLAY disponível, sem obrigação de usar.
-#   -a          escolhe um número de display livre (evita colisão em restart)
-#   --server-args especifica a tela; sem isso o default é 640x480x8 e quebra layout
-# NOTA: se o Xvfb morrer, o xvfb-run derruba o processo filho → o Swarm reinicia a task
-# (restart_policy: any), que é o comportamento desejado.
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1366x900x24 -nolisten tcp", "node", "dist/index.js"]
+# X virtual (Xvfb) para os scrapers poderem subir o Chromium em modo HEADED: casas atrás
+# de Cloudflare (Rivalo, Brazino777, Betsul) barram o fingerprint headless mesmo com
+# stealth — headed sob Xvfb renderiza (mesma técnica que fez o bet365 responder 200; ver
+# memória bet365-recon). Os scrapers headless existentes não mudam: só ganham um DISPLAY
+# disponível, sem obrigação de usar.
+#
+# NÃO usar `xvfb-run` aqui: como PID 1 ele TRAVA antes de executar o comando (o script
+# espera um SIGUSR1 do Xvfb com `trap`/`wait`, e o PID 1 não tem a semântica de sinais
+# que esse handshake assume). Sintoma observado em 29/07/2026: container subia, ZERO
+# linha de log, healthcheck falhava 3x e o Swarm matava com exit 137 — reproduzido até
+# com `xvfb-run -a ... node -e 'console.log(1)'` como PID 1.
+#
+# Subir o Xvfb em background e dar `exec` no node resolve e é melhor: o node fica sendo
+# o PID 1 de verdade, então recebe SIGTERM do Swarm e encerra limpo.
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1366x900x24 -nolisten tcp >/dev/null 2>&1 & export DISPLAY=:99; exec node dist/index.js"]
