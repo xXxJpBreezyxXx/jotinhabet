@@ -975,10 +975,11 @@ export default function App() {
   const [loadingOperation, setLoadingOperation] = useState(false);
 
   // Histórico de surebets de PROMOÇÃO (inserção manual — tabela promo_surebets).
-  // lucro/ROI se calculam sozinhos a partir de valor+odd das duas pernas; digitar
-  // um valor próprio nos campos desliga a sugestão automática (ex.: freebet que
-  // não devolve a stake tem lucro diferente do cálculo padrão).
-  const PROMO_FORM_VAZIO = { casaPromocao: '', valorPromocao: '', oddPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', oddCobertura: '', roiPct: '', lucro: '' };
+  // promoTipo define a matemática: FREEBET_SNR (ficha não retorna → custo da
+  // promoção R$ 0, investimento real = só a cobertura) ou QUALIFYING (dinheiro
+  // real nas duas pernas). lucro/ROI se calculam sozinhos a partir de valor+odd;
+  // digitar um valor próprio nos campos desliga a sugestão automática.
+  const PROMO_FORM_VAZIO = { promoTipo: 'FREEBET_SNR' as 'FREEBET_SNR' | 'QUALIFYING', casaPromocao: '', valorPromocao: '', oddPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', oddCobertura: '', roiPct: '', lucro: '' };
   const [promoHistory, setPromoHistory] = useState<any[]>([]);
   const [promoForm, setPromoForm] = useState({ ...PROMO_FORM_VAZIO });
   const [promoRoiEditado, setPromoRoiEditado] = useState(false);
@@ -1070,17 +1071,20 @@ export default function App() {
       });
   };
 
-  // Cálculo automático da promoção a partir de valor+odd das duas pernas:
-  // lucro de cada cenário (promoção ganha / cobertura ganha) e o garantido (min).
+  // Cálculo automático da promoção a partir de valor+odd das duas pernas, na
+  // fórmula do TIPO (refatoracao promocoes.md): freebet SNR não devolve a ficha
+  // (ganho = stake×(odd−1)) e a ficha perdida custa R$ 0 — investimento real é
+  // só a cobertura. Qualificativa é a surebet clássica com dinheiro real.
   const promoCalc = (() => {
     const vp = parseFloat(promoForm.valorPromocao);
     const op = parseFloat(promoForm.oddPromocao);
     const vc = parseFloat(promoForm.valorCobertura);
     const oc = parseFloat(promoForm.oddCobertura);
     if (![vp, op, vc, oc].every(Number.isFinite) || op <= 1 || oc <= 1) return null;
-    const investido = vp + vc;
-    const seGanhaPromo = vp * op - investido;
-    const seGanhaCobertura = vc * oc - investido;
+    const ehFreebet = promoForm.promoTipo === 'FREEBET_SNR';
+    const investido = ehFreebet ? vc : vp + vc;
+    const seGanhaPromo = ehFreebet ? vp * (op - 1) - vc : vp * op - investido;
+    const seGanhaCobertura = ehFreebet ? vc * (oc - 1) : vc * oc - investido;
     return { investido, seGanhaPromo, seGanhaCobertura, lucro: Math.min(seGanhaPromo, seGanhaCobertura) };
   })();
 
@@ -1089,11 +1093,13 @@ export default function App() {
     ? parseFloat(promoForm.lucro)
     : (promoCalc ? promoCalc.lucro : (promoForm.lucro.trim() ? parseFloat(promoForm.lucro) : NaN));
 
-  // ROI sugerido: lucro efetivo / (valor da promoção + cobertura).
+  // ROI sugerido: lucro efetivo / investimento real do tipo (freebet: só cobertura).
   const promoRoiSugerido = (() => {
     const promo = parseFloat(promoForm.valorPromocao);
     const cob = parseFloat(promoForm.valorCobertura);
-    const investido = (Number.isFinite(promo) ? promo : 0) + (Number.isFinite(cob) ? cob : 0);
+    const investido = promoForm.promoTipo === 'FREEBET_SNR'
+      ? (Number.isFinite(cob) ? cob : 0)
+      : (Number.isFinite(promo) ? promo : 0) + (Number.isFinite(cob) ? cob : 0);
     if (!Number.isFinite(promoLucroEfetivo) || investido <= 0) return '';
     return ((promoLucroEfetivo / investido) * 100).toFixed(2);
   })();
@@ -1119,6 +1125,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        promo_type: promoForm.promoTipo,
         casa_promocao: promoForm.casaPromocao,
         valor_promocao: promoForm.valorPromocao,
         evento: promoForm.evento,
@@ -1153,8 +1160,9 @@ export default function App() {
     fetch(`/api/promocoes/${p.id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
   };
 
-  // Métricas dos cards do histórico de promoções
-  const promoInvestido = promoHistory.reduce((s, p) => s + (Number(p.valor_promocao) || 0) + (Number(p.valor_cobertura) || 0), 0);
+  // Métricas dos cards do histórico de promoções. Investido = dinheiro REAL:
+  // linhas freebet contam só a cobertura (a ficha não é dinheiro do usuário).
+  const promoInvestido = promoHistory.reduce((s, p) => s + (p.promo_type === 'QUALIFYING' ? (Number(p.valor_promocao) || 0) : 0) + (Number(p.valor_cobertura) || 0), 0);
   const promoLucroTotal = promoHistory.reduce((s, p) => s + (Number(p.lucro) || 0), 0);
   const promoRoisValidos = promoHistory.map((p) => Number(p.roi_pct)).filter((v) => Number.isFinite(v));
   const promoRoiMedio = promoRoisValidos.length ? promoRoisValidos.reduce((a, b) => a + b, 0) / promoRoisValidos.length : 0;
@@ -3064,13 +3072,53 @@ export default function App() {
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
                   Registrar surebet de promoção
                 </div>
+                {/* Tipo da promoção — muda a matemática do lucro/ROI */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Tipo</span>
+                  {(() => {
+                    const chip = (active: boolean) => ({
+                      padding: '5px 12px',
+                      borderRadius: '999px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      border: active ? '1px solid var(--color-primary)' : '1px solid var(--panel-border)',
+                      background: active ? 'var(--color-primary)' : 'rgba(255,255,255,0.03)',
+                      color: active ? '#fff' : 'var(--text-secondary)',
+                      transition: 'all 0.15s ease'
+                    });
+                    return (
+                      <>
+                        <button
+                          style={chip(promoForm.promoTipo === 'FREEBET_SNR')}
+                          onClick={() => setPromoForm((f) => ({ ...f, promoTipo: 'FREEBET_SNR' }))}
+                          title="Aposta Extra/Freebet: a ficha NÃO retorna no ganho (ganho = stake × (odd − 1)) e perdê-la custa R$ 0 — o investimento real é só a cobertura"
+                        >
+                          🎟️ Freebet (SNR)
+                        </button>
+                        <button
+                          style={chip(promoForm.promoTipo === 'QUALIFYING')}
+                          onClick={() => setPromoForm((f) => ({ ...f, promoTipo: 'QUALIFYING' }))}
+                          title="Aposta qualificativa: dinheiro real nas duas pernas (surebet clássica)"
+                        >
+                          💵 Qualificativa (dinheiro real)
+                        </button>
+                        <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                          {promoForm.promoTipo === 'FREEBET_SNR'
+                            ? 'Ficha não retorna no ganho; investimento real = só a cobertura'
+                            : 'Dinheiro real nas duas pernas; investimento = promoção + cobertura'}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
                   <div className="form-group">
                     <label>Casa da Promoção</label>
                     <input className="form-control" placeholder="Ex.: Betano" value={promoForm.casaPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, casaPromocao: e.target.value }))} />
                   </div>
                   <div className="form-group">
-                    <label>Valor da Promoção (R$)</label>
+                    <label>{promoForm.promoTipo === 'FREEBET_SNR' ? 'Valor da Freebet (R$)' : 'Valor da Promoção (R$)'}</label>
                     <input className="form-control" type="number" step="0.01" placeholder="50.00" value={promoForm.valorPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, valorPromocao: e.target.value }))} />
                   </div>
                   <div className="form-group">
@@ -3159,7 +3207,7 @@ export default function App() {
                     <Layers size={16} className="stat-icon" />
                   </div>
                   <div className="stat-value">R$ {promoInvestido.toFixed(2)}</div>
-                  <div className="stat-footer">Soma de promoção + cobertura</div>
+                  <div className="stat-footer">Dinheiro real (freebet não conta como custo)</div>
                 </div>
                 <div className="glass-panel stat-card">
                   <div className="stat-header">
@@ -3211,7 +3259,15 @@ export default function App() {
                             <td style={{ color: 'var(--text-secondary)' }}>
                               {new Date(p.criado_em).toLocaleDateString()} {new Date(p.criado_em).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </td>
-                            <td style={{ fontWeight: 'bold' }}>{p.casa_promocao}</td>
+                            <td style={{ fontWeight: 'bold' }}>
+                              {p.casa_promocao}
+                              <span
+                                title={p.promo_type === 'QUALIFYING' ? 'Aposta qualificativa (dinheiro real nas duas pernas)' : 'Freebet SNR: a ficha não retorna no ganho; investimento real = só a cobertura'}
+                                style={{ marginLeft: '6px', fontSize: '10px', fontWeight: 700, color: p.promo_type === 'QUALIFYING' ? 'var(--color-accent)' : 'var(--color-primary)', border: `1px solid ${p.promo_type === 'QUALIFYING' ? 'var(--color-accent)' : 'var(--color-primary)'}`, borderRadius: '999px', padding: '1px 6px', verticalAlign: 'middle', whiteSpace: 'nowrap' }}
+                              >
+                                {p.promo_type === 'QUALIFYING' ? 'qualificativa' : 'freebet'}
+                              </span>
+                            </td>
                             <td>
                               R$ {(Number(p.valor_promocao) || 0).toFixed(2)}
                               {Number.isFinite(Number(p.odd_promocao)) && p.odd_promocao !== null && <span style={{ color: 'var(--text-muted)' }}> @ {Number(p.odd_promocao).toFixed(2)}</span>}

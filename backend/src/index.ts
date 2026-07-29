@@ -606,16 +606,20 @@ app.get('/api/promocoes', async (_req, res) => {
   }
 });
 
-// POST - registra uma promoção. Lucro: usa o informado; sem ele, deriva das
-// odds das duas pernas (pior cenário: min entre "promoção ganha" e "cobertura
-// ganha"). ROI idem, de lucro / (valor da promoção + cobertura). '' e null
-// contam como ausentes (Number('') é 0 — campo vazio viraria R$ 0,00 válido).
+// POST - registra uma promoção. promo_type define a matemática (refatoracao
+// promocoes.md): FREEBET_SNR (default) = ficha não retorna → custo do lado da
+// promoção é R$ 0 e o investimento real é SÓ a cobertura; QUALIFYING = dinheiro
+// real nas duas pernas. Lucro: usa o informado; sem ele, deriva das odds (pior
+// cenário entre as pernas, na fórmula do tipo). ROI = lucro/investimento do
+// tipo. '' e null contam como ausentes (Number('') é 0 — campo vazio viraria
+// R$ 0,00 válido).
 app.post('/api/promocoes', async (req, res) => {
   const b = req.body || {};
   const num = (v: any) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
   const str = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
   const r2 = (v: number) => Math.round(v * 100) / 100;
 
+  const promoType = b.promo_type === 'QUALIFYING' ? 'QUALIFYING' : 'FREEBET_SNR';
   const casaPromocao = str(b.casa_promocao);
   const valorPromocao = num(b.valor_promocao);
   const evento = str(b.evento);
@@ -636,12 +640,19 @@ app.post('/api/promocoes', async (req, res) => {
     return res.status(400).json({ error: 'Odds devem ser maiores que 1.' });
   }
 
-  const investido = valorPromocao! + valorCobertura!;
+  // Investimento real: freebet não é dinheiro do usuário — só a cobertura conta.
+  const investido = promoType === 'FREEBET_SNR' ? valorCobertura! : valorPromocao! + valorCobertura!;
   if (lucro === null) {
     if (oddPromocao === null || oddCobertura === null) {
       return res.status(400).json({ error: 'Informe o lucro OU as odds das duas pernas (para o cálculo automático).' });
     }
-    lucro = r2(Math.min(valorPromocao! * oddPromocao - investido, valorCobertura! * oddCobertura - investido));
+    const lucroPromoWin = promoType === 'FREEBET_SNR'
+      ? valorPromocao! * (oddPromocao - 1) - valorCobertura!   // ganho SNR (sem a ficha) − custo da cobertura
+      : valorPromocao! * oddPromocao - investido;
+    const lucroCoverWin = promoType === 'FREEBET_SNR'
+      ? valorCobertura! * (oddCobertura - 1)                   // freebet perdida custa R$ 0
+      : valorCobertura! * oddCobertura - investido;
+    lucro = r2(Math.min(lucroPromoWin, lucroCoverWin));
   }
   const roiPct = num(b.roi_pct) ?? (investido > 0 ? r2((lucro / investido) * 100) : null);
 
@@ -649,6 +660,7 @@ app.post('/api/promocoes', async (req, res) => {
     const { data, error } = await supabase
       .from('promo_surebets')
       .insert({
+        promo_type: promoType,
         casa_promocao: casaPromocao,
         valor_promocao: valorPromocao,
         evento,
