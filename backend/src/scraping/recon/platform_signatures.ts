@@ -16,7 +16,15 @@ interface AssinaturaPlataforma {
 }
 
 export const ASSINATURAS_PLATAFORMA: AssinaturaPlataforma[] = [
-  { plataforma: 'Altenar', hosts: ['sptpub.com', 'altenar'], paths: ['/prematch/', '/live/'], confianca: 0.95 },
+  // CORRIGIDO 29/07/2026: `sptpub.com` estava classificado como Altenar, mas é **BetBy**
+  // (o bundle servido é `<marca>.sptpub.com/bt-renderer.min.js`, o renderer do BetBy).
+  // A confusão manda o recon pelo caminho errado: o parser do Altenar (REST biahosted)
+  // não serve pra BetBy. Altenar de verdade = `*-altenar2.biahosted.com`.
+  { plataforma: 'Altenar', hosts: ['altenar', 'biahosted'], paths: ['/prematch/', '/live/'], confianca: 0.95 },
+  { plataforma: 'BetBy', hosts: ['sptpub.com', 'bt-renderer'], confianca: 0.9 },
+  // SoftSwiss: visto na BravoBet (ws-bravo-prd.bravo.bet.br). Só endpoints de cassino
+  // foram observados até agora — o feed de esportes ainda não foi localizado.
+  { plataforma: 'SoftSwiss', hosts: ['softswiss'], confianca: 0.8 },
   { plataforma: 'Kambi', hosts: ['kambi.com', 'kambicdn'], paths: ['/offering/', 'listview', 'betoffer'], confianca: 0.9 },
   { plataforma: 'Digitain', hosts: ['digitain.com', 'dsplatform', 'sportsbook'], confianca: 0.8 },
   { plataforma: 'BetConstruct', hosts: ['betconstruct.com', 'springbme', 'swarm'], confianca: 0.85 },

@@ -12,6 +12,8 @@ export type Transporte = 'xhr' | 'ws' | 'desconhecido';
 /** Plataforma B2B provável (ou própria). */
 export type Plataforma =
   | 'Altenar'
+  | 'BetBy'
+  | 'SoftSwiss'
   | 'Kambi'
   | 'Digitain'
   | 'BetConstruct'
