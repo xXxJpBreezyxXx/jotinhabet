@@ -609,10 +609,11 @@ app.get('/api/promocoes', async (_req, res) => {
 // POST - registra uma promoção. promo_type define a matemática (refatoracao
 // promocoes.md): FREEBET_SNR (default) = ficha não retorna → custo do lado da
 // promoção é R$ 0 e o investimento real é SÓ a cobertura; QUALIFYING = dinheiro
-// real nas duas pernas. Lucro: usa o informado; sem ele, deriva das odds (pior
-// cenário entre as pernas, na fórmula do tipo). ROI = lucro/investimento do
-// tipo. '' e null contam como ausentes (Number('') é 0 — campo vazio viraria
-// R$ 0,00 válido).
+// real nas duas pernas. Derivações quando o campo vem vazio: valor_cobertura =
+// cobertura equalizada (iguala o lucro dos dois cenários) a partir de
+// valor+odd da promoção e odd de cobertura; lucro = pior cenário entre as
+// pernas, na fórmula do tipo. ROI = lucro/investimento do tipo. '' e null
+// contam como ausentes (Number('') é 0 — campo vazio viraria R$ 0,00 válido).
 app.post('/api/promocoes', async (req, res) => {
   const b = req.body || {};
   const num = (v: any) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
@@ -624,20 +625,28 @@ app.post('/api/promocoes', async (req, res) => {
   const valorPromocao = num(b.valor_promocao);
   const evento = str(b.evento);
   const casaCobertura = str(b.casa_cobertura);
-  const valorCobertura = num(b.valor_cobertura);
   const oddPromocao = num(b.odd_promocao);
   const oddCobertura = num(b.odd_cobertura);
   let lucro = num(b.lucro);
+  if ((oddPromocao !== null && oddPromocao <= 1) || (oddCobertura !== null && oddCobertura <= 1)) {
+    return res.status(400).json({ error: 'Odds devem ser maiores que 1.' });
+  }
+  // Cobertura equalizada quando ausente: o valor que iguala o lucro dos dois
+  // cenários — SNR: vp×(op−1)/oc (só o ganho da ficha precisa de hedge);
+  // qualificativa: vp×op/oc (retorno cheio dos dois lados).
+  let valorCobertura = num(b.valor_cobertura);
+  if (valorCobertura === null && valorPromocao !== null && oddPromocao !== null && oddCobertura !== null) {
+    valorCobertura = r2(promoType === 'FREEBET_SNR'
+      ? (valorPromocao * (oddPromocao - 1)) / oddCobertura
+      : (valorPromocao * oddPromocao) / oddCobertura);
+  }
   const faltando = [
     !casaPromocao && 'casa_promocao', valorPromocao === null && 'valor_promocao',
     !evento && 'evento', !casaCobertura && 'casa_cobertura',
-    valorCobertura === null && 'valor_cobertura',
+    valorCobertura === null && 'valor_cobertura (ou odds das duas pernas p/ derivar)',
   ].filter(Boolean);
   if (faltando.length) {
     return res.status(400).json({ error: `Campos obrigatórios ausentes/inválidos: ${faltando.join(', ')}` });
-  }
-  if ((oddPromocao !== null && oddPromocao <= 1) || (oddCobertura !== null && oddCobertura <= 1)) {
-    return res.status(400).json({ error: 'Odds devem ser maiores que 1.' });
   }
 
   // Investimento real: freebet não é dinheiro do usuário — só a cobertura conta.

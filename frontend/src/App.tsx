@@ -977,8 +977,8 @@ export default function App() {
   // Histórico de surebets de PROMOÇÃO (inserção manual — tabela promo_surebets).
   // promoTipo define a matemática: FREEBET_SNR (ficha não retorna → custo da
   // promoção R$ 0, investimento real = só a cobertura) ou QUALIFYING (dinheiro
-  // real nas duas pernas). lucro/ROI se calculam sozinhos a partir de valor+odd;
-  // digitar um valor próprio nos campos desliga a sugestão automática.
+  // real nas duas pernas). Cobertura, lucro e ROI se calculam sozinhos a partir
+  // de valor+odd; digitar um valor próprio nos campos desliga a sugestão.
   const PROMO_FORM_VAZIO = { promoTipo: 'FREEBET_SNR' as 'FREEBET_SNR' | 'QUALIFYING', casaPromocao: '', valorPromocao: '', oddPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', oddCobertura: '', roiPct: '', lucro: '' };
   const [promoHistory, setPromoHistory] = useState<any[]>([]);
   const [promoForm, setPromoForm] = useState({ ...PROMO_FORM_VAZIO });
@@ -1075,10 +1075,23 @@ export default function App() {
   // fórmula do TIPO (refatoracao promocoes.md): freebet SNR não devolve a ficha
   // (ganho = stake×(odd−1)) e a ficha perdida custa R$ 0 — investimento real é
   // só a cobertura. Qualificativa é a surebet clássica com dinheiro real.
+  // Cobertura equalizada sugerida: o valor que iguala o lucro dos dois cenários
+  // — SNR: vp×(op−1)/oc (só o ganho da ficha precisa de hedge); qualificativa:
+  // vp×op/oc (retorno cheio dos dois lados). Vira placeholder do campo e vale
+  // quando ele fica em branco.
+  const promoCoberturaSugerida = (() => {
+    const vp = parseFloat(promoForm.valorPromocao);
+    const op = parseFloat(promoForm.oddPromocao);
+    const oc = parseFloat(promoForm.oddCobertura);
+    if (![vp, op, oc].every(Number.isFinite) || op <= 1 || oc <= 1) return '';
+    const vc = promoForm.promoTipo === 'FREEBET_SNR' ? (vp * (op - 1)) / oc : (vp * op) / oc;
+    return vc.toFixed(2);
+  })();
+
   const promoCalc = (() => {
     const vp = parseFloat(promoForm.valorPromocao);
     const op = parseFloat(promoForm.oddPromocao);
-    const vc = parseFloat(promoForm.valorCobertura);
+    const vc = parseFloat(promoForm.valorCobertura || promoCoberturaSugerida);
     const oc = parseFloat(promoForm.oddCobertura);
     if (![vp, op, vc, oc].every(Number.isFinite) || op <= 1 || oc <= 1) return null;
     const ehFreebet = promoForm.promoTipo === 'FREEBET_SNR';
@@ -1096,7 +1109,7 @@ export default function App() {
   // ROI sugerido: lucro efetivo / investimento real do tipo (freebet: só cobertura).
   const promoRoiSugerido = (() => {
     const promo = parseFloat(promoForm.valorPromocao);
-    const cob = parseFloat(promoForm.valorCobertura);
+    const cob = parseFloat(promoForm.valorCobertura || promoCoberturaSugerida);
     const investido = promoForm.promoTipo === 'FREEBET_SNR'
       ? (Number.isFinite(cob) ? cob : 0)
       : (Number.isFinite(promo) ? promo : 0) + (Number.isFinite(cob) ? cob : 0);
@@ -1105,10 +1118,12 @@ export default function App() {
   })();
 
   const salvarPromocao = () => {
+    // Cobertura efetiva: a digitada ou, em branco, a equalizada sugerida.
+    const valorCoberturaEfetivo = promoForm.valorCobertura.trim() || promoCoberturaSugerida;
     const obrigatorios: Array<[string, string]> = [
       [promoForm.casaPromocao, 'Casa da promoção'], [promoForm.valorPromocao, 'Valor da promoção'],
       [promoForm.evento, 'Evento'], [promoForm.casaCobertura, 'Casa de cobertura'],
-      [promoForm.valorCobertura, 'Valor de cobertura'],
+      [valorCoberturaEfetivo, 'Valor de cobertura (ou odds das duas pernas p/ o cálculo automático)'],
     ];
     const faltando = obrigatorios.filter(([v]) => !String(v).trim()).map(([, nome]) => nome);
     if (faltando.length) {
@@ -1131,7 +1146,7 @@ export default function App() {
         evento: promoForm.evento,
         mercado: promoForm.mercado || null,
         casa_cobertura: promoForm.casaCobertura,
-        valor_cobertura: promoForm.valorCobertura,
+        valor_cobertura: valorCoberturaEfetivo,
         odd_promocao: promoForm.oddPromocao || null,
         odd_cobertura: promoForm.oddCobertura || null,
         // lucro/ROI digitados vão como estão; vazios, o backend deriva das odds
@@ -1142,6 +1157,13 @@ export default function App() {
       .then((res) => res.json())
       .then((data) => {
         if (data.success) {
+          // Banca ativa considera o lucro da promoção lançada (mesma regra das
+          // entradas de surebet; excluir estorna). Usa o lucro FINAL salvo —
+          // pode ter sido derivado das odds no backend.
+          const lucroPromo = Number(data.promocao?.lucro) || 0;
+          const novaBanca = (parseFloat(userBancaRef.current) + lucroPromo).toFixed(2);
+          aplicarBanca(novaBanca, true); // ref + state + localStorage + banco
+          alert(`Promoção registrada! Lucro de R$ ${lucroPromo.toFixed(2)} aplicado à banca ativa (R$ ${novaBanca}).`);
           setPromoForm({ ...PROMO_FORM_VAZIO });
           setPromoRoiEditado(false);
           setPromoLucroEditado(false);
@@ -1155,8 +1177,15 @@ export default function App() {
   };
 
   const excluirPromocao = (p: any) => {
-    if (!confirm(`Excluir a promoção "${p.evento}" (${p.casa_promocao}) do histórico?`)) return;
+    const lucro = Number(p.lucro) || 0;
+    if (!confirm(
+      `Excluir a promoção "${p.evento}" (${p.casa_promocao}) do histórico?\n\n` +
+      `O lucro de R$ ${lucro.toFixed(2)} será estornado da sua banca ativa (R$ ${parseFloat(userBancaRef.current).toFixed(2)}).`
+    )) return;
     setPromoHistory((list) => list.filter((x) => x.id !== p.id));
+    // Estorna o lucro aplicado no registro (inverso exato do lançamento). Lê da
+    // REF (síncrona) — mesma proteção contra stale closure das operações.
+    aplicarBanca((parseFloat(userBancaRef.current) - lucro).toFixed(2), true);
     fetch(`/api/promocoes/${p.id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
   };
 
@@ -3139,7 +3168,15 @@ export default function App() {
                   </div>
                   <div className="form-group">
                     <label>Valor de Cobertura (R$)</label>
-                    <input className="form-control" type="number" step="0.01" placeholder="45.00" value={promoForm.valorCobertura} onChange={(e) => setPromoForm((f) => ({ ...f, valorCobertura: e.target.value }))} />
+                    <input
+                      className="form-control"
+                      type="number"
+                      step="0.01"
+                      placeholder={promoCoberturaSugerida ? `${promoCoberturaSugerida} (auto)` : '45.00'}
+                      value={promoForm.valorCobertura}
+                      onChange={(e) => setPromoForm((f) => ({ ...f, valorCobertura: e.target.value }))}
+                      title="Deixe em branco para usar a cobertura equalizada (calculada de valor+odd da promoção e odd de cobertura) — o valor que iguala o lucro dos dois cenários. Digite para sobrescrever."
+                    />
                   </div>
                   <div className="form-group">
                     <label>Odd de Cobertura</label>
