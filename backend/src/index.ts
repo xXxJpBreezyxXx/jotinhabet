@@ -587,6 +587,87 @@ app.post('/api/saldos', async (req, res) => {
   }
 });
 
+// ===== Surebets de PROMOÇÃO (histórico manual — tabela promo_surebets, migration 018) =====
+// Lucro extraído de promoções (freebet/superodd/cashback): perna da promoção numa
+// casa + cobertura na outra. Não vincula com oportunidades nem mexe na banca ativa.
+
+// GET - lista o histórico de promoções (mais recente primeiro)
+app.get('/api/promocoes', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('promo_surebets')
+      .select('*')
+      .order('criado_em', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error: any) {
+    if (isMissingTable(error)) return res.json([]); // migration 018 não aplicada → lista vazia
+    res.status(500).json({ error: error.message || 'Erro ao listar promoções' });
+  }
+});
+
+// POST - registra uma promoção. ROI: usa o informado; sem ele, deriva de
+// lucro / (valor da promoção + cobertura). '' e null contam como ausentes
+// (Number('') é 0 — sem o guard, campo vazio viraria R$ 0,00 válido).
+app.post('/api/promocoes', async (req, res) => {
+  const b = req.body || {};
+  const num = (v: any) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+  const str = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+  const casaPromocao = str(b.casa_promocao);
+  const valorPromocao = num(b.valor_promocao);
+  const evento = str(b.evento);
+  const casaCobertura = str(b.casa_cobertura);
+  const valorCobertura = num(b.valor_cobertura);
+  const lucro = num(b.lucro);
+  const faltando = [
+    !casaPromocao && 'casa_promocao', valorPromocao === null && 'valor_promocao',
+    !evento && 'evento', !casaCobertura && 'casa_cobertura',
+    valorCobertura === null && 'valor_cobertura', lucro === null && 'lucro',
+  ].filter(Boolean);
+  if (faltando.length) {
+    return res.status(400).json({ error: `Campos obrigatórios ausentes/inválidos: ${faltando.join(', ')}` });
+  }
+
+  const investido = valorPromocao! + valorCobertura!;
+  const roiPct = num(b.roi_pct) ?? (investido > 0 ? Math.round((lucro! / investido) * 10000) / 100 : null);
+
+  try {
+    const { data, error } = await supabase
+      .from('promo_surebets')
+      .insert({
+        casa_promocao: casaPromocao,
+        valor_promocao: valorPromocao,
+        evento,
+        mercado: str(b.mercado),
+        casa_cobertura: casaCobertura,
+        valor_cobertura: valorCobertura,
+        roi_pct: roiPct,
+        lucro,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, promocao: data });
+  } catch (error: any) {
+    if (isMissingTable(error)) {
+      return res.status(500).json({ error: 'Tabela promo_surebets ausente no banco — aplique a migration 018.' });
+    }
+    res.status(500).json({ error: error.message || 'Erro ao salvar promoção' });
+  }
+});
+
+// DELETE - remove uma promoção do histórico
+app.delete('/api/promocoes/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('promo_surebets').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erro ao excluir promoção' });
+  }
+});
+
 // GET last 150 lines of logs/scanner.log
 app.get('/api/logs', (req, res) => {
   try {

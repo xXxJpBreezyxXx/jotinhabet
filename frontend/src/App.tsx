@@ -22,7 +22,8 @@ import {
   BookmarkCheck,
   Wallet,
   Plus,
-  Radar
+  Radar,
+  Gift
 } from 'lucide-react';
 
 interface HealthStatus {
@@ -945,7 +946,7 @@ export default function App() {
     setManualOpen(true);
   };
 
-  const [dashboardSubTab, setDashboardSubTab] = useState<'radar' | 'historico'>('radar');
+  const [dashboardSubTab, setDashboardSubTab] = useState<'radar' | 'historico' | 'promocoes'>('radar');
   const [filterDate, setFilterDate] = useState<string>(''); // YYYY-MM-DD
   // Filtros do HISTÓRICO de entradas (data do lançamento + esporte) — os cards de
   // métricas (lucro, ROI médio) do histórico respondem a este recorte.
@@ -973,6 +974,14 @@ export default function App() {
   const [operationsHistory, setOperationsHistory] = useState<any[]>([]);
   const [loadingOperation, setLoadingOperation] = useState(false);
 
+  // Histórico de surebets de PROMOÇÃO (inserção manual — tabela promo_surebets).
+  // roiEditado: digitar um ROI próprio desliga a sugestão automática (lucro/investido).
+  const PROMO_FORM_VAZIO = { casaPromocao: '', valorPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', roiPct: '', lucro: '' };
+  const [promoHistory, setPromoHistory] = useState<any[]>([]);
+  const [promoForm, setPromoForm] = useState({ ...PROMO_FORM_VAZIO });
+  const [promoRoiEditado, setPromoRoiEditado] = useState(false);
+  const [promoSalvando, setPromoSalvando] = useState(false);
+
   // Fetch health status from backend on mount
   useEffect(() => {
     fetch('/api/health')
@@ -984,6 +993,7 @@ export default function App() {
     
     fetchOpportunities();
     fetchOperations();
+    fetchPromocoes();
 
     // Sincronização inicial da banca com o banco:
     //  - Se um save anterior falhou (flag dirty), o valor LOCAL é o mais novo →
@@ -1045,6 +1055,80 @@ export default function App() {
         console.error('Erro ao buscar operacoes:', err);
       });
   };
+
+  const fetchPromocoes = () => {
+    fetch('/api/promocoes')
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) setPromoHistory(data);
+      })
+      .catch((err) => {
+        console.error('Erro ao buscar promoções:', err);
+      });
+  };
+
+  // ROI sugerido da promoção: lucro / (valor da promoção + cobertura). Vira o
+  // placeholder do campo ROI e é usado no salvamento se o usuário não digitar outro.
+  const promoRoiSugerido = (() => {
+    const promo = parseFloat(promoForm.valorPromocao);
+    const cob = parseFloat(promoForm.valorCobertura);
+    const lucro = parseFloat(promoForm.lucro);
+    const investido = (Number.isFinite(promo) ? promo : 0) + (Number.isFinite(cob) ? cob : 0);
+    if (!Number.isFinite(lucro) || investido <= 0) return '';
+    return ((lucro / investido) * 100).toFixed(2);
+  })();
+
+  const salvarPromocao = () => {
+    const obrigatorios: Array<[string, string]> = [
+      [promoForm.casaPromocao, 'Casa da promoção'], [promoForm.valorPromocao, 'Valor da promoção'],
+      [promoForm.evento, 'Evento'], [promoForm.casaCobertura, 'Casa de cobertura'],
+      [promoForm.valorCobertura, 'Valor de cobertura'], [promoForm.lucro, 'Lucro'],
+    ];
+    const faltando = obrigatorios.filter(([v]) => !String(v).trim()).map(([, nome]) => nome);
+    if (faltando.length) {
+      alert(`Preencha os campos obrigatórios: ${faltando.join(', ')}.`);
+      return;
+    }
+    setPromoSalvando(true);
+    fetch('/api/promocoes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        casa_promocao: promoForm.casaPromocao,
+        valor_promocao: promoForm.valorPromocao,
+        evento: promoForm.evento,
+        mercado: promoForm.mercado || null,
+        casa_cobertura: promoForm.casaCobertura,
+        valor_cobertura: promoForm.valorCobertura,
+        roi_pct: (promoRoiEditado && promoForm.roiPct.trim()) ? promoForm.roiPct : (promoRoiSugerido || null),
+        lucro: promoForm.lucro,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success) {
+          setPromoForm({ ...PROMO_FORM_VAZIO });
+          setPromoRoiEditado(false);
+          fetchPromocoes();
+        } else {
+          alert(data.error || 'Erro ao salvar promoção.');
+        }
+      })
+      .catch(() => alert('Erro de conexão ao salvar promoção.'))
+      .finally(() => setPromoSalvando(false));
+  };
+
+  const excluirPromocao = (p: any) => {
+    if (!confirm(`Excluir a promoção "${p.evento}" (${p.casa_promocao}) do histórico?`)) return;
+    setPromoHistory((list) => list.filter((x) => x.id !== p.id));
+    fetch(`/api/promocoes/${p.id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
+  };
+
+  // Métricas dos cards do histórico de promoções
+  const promoInvestido = promoHistory.reduce((s, p) => s + (Number(p.valor_promocao) || 0) + (Number(p.valor_cobertura) || 0), 0);
+  const promoLucroTotal = promoHistory.reduce((s, p) => s + (Number(p.lucro) || 0), 0);
+  const promoRoisValidos = promoHistory.map((p) => Number(p.roi_pct)).filter((v) => Number.isFinite(v));
+  const promoRoiMedio = promoRoisValidos.length ? promoRoisValidos.reduce((a, b) => a + b, 0) / promoRoisValidos.length : 0;
 
   // Fetch live logs from server
   const fetchLogs = () => {
@@ -2088,6 +2172,23 @@ export default function App() {
               >
                 Histórico de Entradas
               </button>
+              <button
+                onClick={() => setDashboardSubTab('promocoes')}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: dashboardSubTab === 'promocoes' ? 'var(--color-primary)' : 'var(--text-secondary)',
+                  fontSize: '15px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  borderBottom: dashboardSubTab === 'promocoes' ? '2.5px solid var(--color-primary)' : 'none',
+                  paddingBottom: '8px',
+                  outline: 'none',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                Histórico Surebet Promoções
+              </button>
             </div>
 
             {dashboardSubTab === 'radar' && (
@@ -2905,6 +3006,185 @@ export default function App() {
                                   transition: 'all 0.15s ease'
                                 }}
                                 title="Excluir entrada e reverter a banca"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Histórico de Surebets de PROMOÇÃO (inserção manual) */}
+          {dashboardSubTab === 'promocoes' && (
+            <div className="glass-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column', border: '1px solid rgba(16, 185, 129, 0.2)', width: '100%' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <h3 className="card-title" style={{ margin: 0, fontSize: '15px', color: '#10b981', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Gift size={16} style={{ color: '#10b981' }} />
+                  Histórico Surebet Promoções
+                </h3>
+              </div>
+
+              {/* Formulário de inserção manual */}
+              <div style={{ padding: '14px 16px', marginBottom: '16px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--panel-border)', borderRadius: '10px' }}>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
+                  Registrar surebet de promoção
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
+                  <div className="form-group">
+                    <label>Casa da Promoção</label>
+                    <input className="form-control" placeholder="Ex.: Betano" value={promoForm.casaPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, casaPromocao: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Valor da Promoção (R$)</label>
+                    <input className="form-control" type="number" step="0.01" placeholder="50.00" value={promoForm.valorPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, valorPromocao: e.target.value }))} />
+                  </div>
+                  <div className="form-group" style={{ gridColumn: 'span 2', minWidth: '200px' }}>
+                    <label>Evento</label>
+                    <input className="form-control" placeholder="Ex.: Flamengo vs Palmeiras" value={promoForm.evento} onChange={(e) => setPromoForm((f) => ({ ...f, evento: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Mercado</label>
+                    <input className="form-control" placeholder="Ex.: Resultado Final" value={promoForm.mercado} onChange={(e) => setPromoForm((f) => ({ ...f, mercado: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Casa de Cobertura</label>
+                    <input className="form-control" placeholder="Ex.: KTO" value={promoForm.casaCobertura} onChange={(e) => setPromoForm((f) => ({ ...f, casaCobertura: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Valor de Cobertura (R$)</label>
+                    <input className="form-control" type="number" step="0.01" placeholder="45.00" value={promoForm.valorCobertura} onChange={(e) => setPromoForm((f) => ({ ...f, valorCobertura: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
+                    <label>Lucro (R$)</label>
+                    <input className="form-control" type="number" step="0.01" placeholder="12.50" value={promoForm.lucro} onChange={(e) => setPromoForm((f) => ({ ...f, lucro: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
+                    <label>ROI (%)</label>
+                    <input
+                      className="form-control"
+                      type="number"
+                      step="0.01"
+                      placeholder={promoRoiSugerido ? `${promoRoiSugerido} (auto)` : 'auto: lucro/investido'}
+                      value={promoForm.roiPct}
+                      onChange={(e) => { setPromoRoiEditado(true); setPromoForm((f) => ({ ...f, roiPct: e.target.value })); }}
+                      title="Deixe em branco para calcular automaticamente: lucro ÷ (valor da promoção + cobertura)"
+                    />
+                  </div>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
+                  <button
+                    className="btn"
+                    onClick={salvarPromocao}
+                    disabled={promoSalvando}
+                    style={{ padding: '7px 14px', fontSize: '12px', display: 'flex', gap: '6px', alignItems: 'center', background: 'var(--color-primary)', color: '#fff', border: 'none', fontWeight: 'bold', opacity: promoSalvando ? 0.6 : 1 }}
+                  >
+                    <Plus size={12} />
+                    {promoSalvando ? 'Salvando...' : 'Registrar Promoção'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Métricas do histórico de promoções */}
+              <div className="stats-grid" style={{ marginBottom: '16px' }}>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>Promoções</span>
+                    <Gift size={16} className="stat-icon" />
+                  </div>
+                  <div className="stat-value">{promoHistory.length}</div>
+                  <div className="stat-footer">Surebets de promoção registradas</div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>Investido</span>
+                    <Layers size={16} className="stat-icon" />
+                  </div>
+                  <div className="stat-value">R$ {promoInvestido.toFixed(2)}</div>
+                  <div className="stat-footer">Soma de promoção + cobertura</div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>Lucro Total</span>
+                    <TrendingUp size={16} className="stat-icon" style={{ color: promoLucroTotal >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }} />
+                  </div>
+                  <div className="stat-value" style={{ color: promoLucroTotal >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                    {promoLucroTotal < 0 ? '−' : ''}R$ {Math.abs(promoLucroTotal).toFixed(2)}
+                  </div>
+                  <div className="stat-footer">Lucro líquido extraído das promoções</div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-header">
+                    <span>ROI Médio</span>
+                    <Percent size={16} className="stat-icon" style={{ color: 'var(--color-accent)' }} />
+                  </div>
+                  <div className="stat-value" style={{ color: 'var(--color-accent)' }}>{promoRoiMedio.toFixed(2)}%</div>
+                  <div className="stat-footer">Média simples por promoção</div>
+                </div>
+              </div>
+
+              <div className="table-container" style={{ width: '100%' }}>
+                {promoHistory.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-secondary)', fontSize: '13px' }}>
+                    Nenhuma surebet de promoção registrada ainda. Preencha o formulário acima para registrar a primeira!
+                  </div>
+                ) : (
+                  <table className="custom-table" style={{ fontSize: '12px' }}>
+                    <thead>
+                      <tr>
+                        <th>Data</th>
+                        <th>Casa Promoção</th>
+                        <th>Valor Promoção</th>
+                        <th>Evento</th>
+                        <th>Mercado</th>
+                        <th>Casa Cobertura</th>
+                        <th>Valor Cobertura</th>
+                        <th>ROI</th>
+                        <th>Lucro</th>
+                        <th style={{ textAlign: 'center' }}>Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {promoHistory.map((p) => {
+                        const lucroP = Number(p.lucro) || 0;
+                        const roiP = Number(p.roi_pct);
+                        return (
+                          <tr key={p.id}>
+                            <td style={{ color: 'var(--text-secondary)' }}>
+                              {new Date(p.criado_em).toLocaleDateString()} {new Date(p.criado_em).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </td>
+                            <td style={{ fontWeight: 'bold' }}>{p.casa_promocao}</td>
+                            <td>R$ {(Number(p.valor_promocao) || 0).toFixed(2)}</td>
+                            <td style={{ fontWeight: 'bold' }}>{p.evento}</td>
+                            <td>{p.mercado || '—'}</td>
+                            <td>{p.casa_cobertura}</td>
+                            <td>R$ {(Number(p.valor_cobertura) || 0).toFixed(2)}</td>
+                            <td style={{ color: 'var(--color-accent)', fontWeight: 'bold' }}>{Number.isFinite(roiP) ? `${roiP.toFixed(2)}%` : '—'}</td>
+                            <td style={{ color: lucroP >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 'bold' }}>
+                              {lucroP >= 0 ? '+' : '−'} R$ {Math.abs(lucroP).toFixed(2)}
+                            </td>
+                            <td style={{ textAlign: 'center' }}>
+                              <button
+                                onClick={() => excluirPromocao(p)}
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.1)',
+                                  border: '1px solid rgba(239, 68, 68, 0.2)',
+                                  borderRadius: '6px',
+                                  width: '26px',
+                                  height: '26px',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  cursor: 'pointer',
+                                  color: '#ef4444',
+                                  transition: 'all 0.15s ease'
+                                }}
+                                title="Excluir promoção do histórico"
                               >
                                 <Trash2 size={13} />
                               </button>
