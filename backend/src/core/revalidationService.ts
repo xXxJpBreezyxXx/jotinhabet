@@ -10,7 +10,7 @@ import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
-import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper, FourPlayScraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper, FourPlayScraper, LuvabetScraper } from '../scraping/casa_altenar';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
@@ -37,6 +37,7 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   estrelabet: () => new EstrelaBetScraper(), // Altenar (fonte do scanner + revalidação)
   '4play': () => new FourPlayScraper(), // Altenar "4play" (fonte do scanner + revalidação)
   mcgames: () => new MCGamesScraper(), // Altenar "mcgames2" (só revalidação; não é fonte do scanner)
+  luvabet: () => new LuvabetScraper(), // Altenar "luvabet" (fonte do scanner + revalidação)
   // Casas de BROWSER (Playwright) — só mercado principal (Resultado Final). oddsDoEvento
   // sobe um chromium por revalidação (memo 60s dedup a; contrato de falha = throw p/ infra).
   betano: () => new BetanoScraper(),

@@ -50,6 +50,20 @@ export const CASAS_ALVO: CasaAlvo[] = [
   { nome: 'Betsson', dominio: 'https://www.betsson.bet.br', pathsPrematch: ['/apostas-esportivas', '/esportes', '/'], pathsAoVivo: ['/apostas-esportivas/ao-vivo'], pesoCobertura: 2 },
   { nome: 'JogaJunto', dominio: 'https://jogajunto.bet', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
   { nome: '4Play', dominio: 'https://4play.bet.br', pathsPrematch: ['/esportes', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 1 },
+  // Lote 29/07/2026 (pedido do usuário). Domínios CONFERIDOS por DNS + <title>, porque
+  // vários não seguem o padrão <marca>.bet.br:
+  //  - Brazino777 → www.brazino777.bet.br (brazino777.bet.br redireciona pra www)
+  //  - Luvabet    → luva.bet.br  (luvabet.bet.br NÃO existe; manifest confirma "luva.bet")
+  //  - BravoBet   → bravo.bet.br (bravobet.bet.br NÃO existe; título "Bravo Bet")
+  //  - PokerStars → NÃO tem .bet.br. No feed do SureRadar vem sem o sufixo "(BR)" que as
+  //    regulamentadas têm, ou seja é o PokerStars internacional (pokerstars.bet).
+  //    Provável geobloqueio do Brasil — o recon confirma.
+  { nome: 'Brazino777', dominio: 'https://www.brazino777.bet.br', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 2 },
+  { nome: 'PokerStars', dominio: 'https://www.pokerstars.bet', pathsPrematch: ['/sports/', '/pt-br/sports/', '/'], pathsAoVivo: ['/sports/live/'], pesoCobertura: 2 },
+  { nome: 'Rivalo', dominio: 'https://www.rivalo.bet.br', pathsPrematch: ['/esportes', '/apostas-esportivas', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 2 },
+  { nome: 'Luvabet', dominio: 'https://luva.bet.br', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 2 },
+  { nome: 'BetVip', dominio: 'https://betvip.bet.br', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 2 },
+  { nome: 'BravoBet', dominio: 'https://bravo.bet.br', pathsPrematch: ['/esportes', '/sports', '/'], pathsAoVivo: ['/esportes/ao-vivo'], pesoCobertura: 2 },
 ];
 
 /** Busca uma casa pelo nome (case-insensitive), para o runner de casa única. */

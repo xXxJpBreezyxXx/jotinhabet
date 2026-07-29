@@ -9,7 +9,7 @@ import { SuperbetScraper } from '../scraping/casa_superbet';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
-import { Aposta1Scraper, EstrelaBetScraper, FourPlayScraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, EstrelaBetScraper, FourPlayScraper, LuvabetScraper } from '../scraping/casa_altenar';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
@@ -129,6 +129,7 @@ export class ArbitrageScannerV2 {
     new Aposta1Scraper(),
     new EstrelaBetScraper(),
     new FourPlayScraper(),
+    new LuvabetScraper(),
     new BetBoomScraper(),
     new SeuBetScraper(),
     new VbetScraper(),

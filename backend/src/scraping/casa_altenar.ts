@@ -206,7 +206,22 @@ export class AltenarWidgetScraper implements OddsScraper {
         const base = (m.name || '').replace(/\s*\(incluindo (?:prorroga[cç][aã]o|innings? extras?)\)\s*/i, '').trim();
 
         // --- Resultado Final (1x2 3-way / Vencedor 2-way; e-sports: "Vencedor da partida") ---
-        if (base === '1x2' || base === 'Vencedor' || base === 'Vencedor da partida') {
+        // "Vencedor do encontro": rótulo do futebol na integration da Luvabet.
+        // ATENÇÃO: a comparação é por nome EXATO de propósito. Dois mercados desta
+        // integration têm a MESMA FORMA de um 1x2 (odds com competitorId + uma terceira
+        // opção sem competitorId) e entrariam por engano num match frouxo:
+        //   • "Primeiro gol"  → é o time que abre o placar (3ª opção "Nenhum"), NÃO o
+        //     resultado da partida. Casar isso com o Resultado Final de outra casa seria
+        //     arbitragem entre mercados diferentes = prejuízo.
+        //   • "Vencedor do encontro - Odds Aumentadas" → mercado PROMOCIONAL de odd
+        //     turbinada, com limite de aposta; fica fora por não ser liquidável no volume
+        //     que a calculadora sugere.
+        if (
+          base === '1x2' ||
+          base === 'Vencedor' ||
+          base === 'Vencedor da partida' ||
+          base === 'Vencedor do encontro'
+        ) {
           const oHome = oddsM.find((o) => o.competitorId === cids[0]);
           const oAway = oddsM.find((o) => o.competitorId === cids[1]);
           const oDraw = oddsM.find((o) => !o.competitorId || /empate|draw|^x$/i.test(o.name || ''));
@@ -214,10 +229,18 @@ export class AltenarWidgetScraper implements OddsScraper {
           if (oDraw && ativa(oDraw)) {
             // Diretrizes §5: e-sports não admite 1X2/3-vias (empate de BO2) → descarta.
             if (esporte === 'Esports') continue;
+            // Dupla chance SINTÉTICA (dividir a mão entre empate e fora). Quando a
+            // probabilidade implícita de empate+fora passa de 100% — mandante zebra
+            // extrema + margem alta — a odd combinada cai ABAIXO de 1.0, ou seja
+            // apostar nos dois custa mais do que retorna. Odd <=1 é impossível e nunca
+            // compõe arbitragem: descarta (visto na Luvabet 29/07 em Estrela Amadora x
+            // Sporting, oddA=9.0 → oddB=0.994; vale para TODA casa Altenar).
+            const oddDC = 1 / (1 / oDraw!.price + 1 / oAway!.price);
+            if (!(oddDC > 1)) continue;
             out.push({
               esporte, evento, dataHora, mercado: 'Resultado Final',
               opcaoA: `Vitória ${home}`, opcaoB: `${away} ou Empate`,
-              oddA: oHome!.price, oddB: 1 / (1 / oDraw!.price + 1 / oAway!.price),
+              oddA: oHome!.price, oddB: oddDC,
             });
           } else {
             out.push({
@@ -230,7 +253,9 @@ export class AltenarWidgetScraper implements OddsScraper {
         // --- Total DA PARTIDA (Over/Under), linha em sv. "base" exatamente "Total"
         //     exclui "Total de escanteios", "X total" (por-time), "Nº tempo - total".
         //     Vôlei/mesa usam "Total pontos" (rótulo final vem de TOTAL_LABEL). ---
-        else if ((base === 'Total' || base === 'Total pontos') && m.sv) {
+        // "Total de gols": rótulo do futebol na integration da Luvabet (as demais usam
+        // "Total"). NÃO incluir "Primeiro gol", que também traz `sv` (=1) mas é outro mercado.
+        else if ((base === 'Total' || base === 'Total pontos' || base === 'Total de gols') && m.sv) {
           const linha = parseFloat(m.sv);
           if (!Number.isFinite(linha) || !ehLinhaOk(linha)) continue;
           const over = oddsM.find((o) => /mais/i.test(o.name || ''));
@@ -284,6 +309,28 @@ export class AltenarWidgetScraper implements OddsScraper {
         }
       }
     }
+  }
+}
+
+/**
+ * Luvabet — Altenar widget, integration "luvabet".
+ *
+ * Recon 29/07/2026: o domínio NÃO é luvabet.bet.br (não existe) e sim **luva.bet.br**;
+ * o nome da integration saiu da config da própria página
+ * (`"sportsbookIntegrator":{"altenarIntegrationName":"luvabet"}`). Feed confirmado:
+ * menu de 58KB / 355 campeonatos / 7 esportes (66,67,68,69,76,77,145) e GetEvents com
+ * 125 eventos e 1821 odds decimais só nas 5 maiores ligas de futebol.
+ *
+ * Vocabulário de mercado DIFERE das outras integrations Altenar: no futebol usa
+ * "Vencedor do encontro" e "Total de gols" (as outras usam "1x2" e "Total"); nos demais
+ * esportes usa os mesmos "Vencedor"/"Total pontos"/"Handicap pontos". Ver as ressalvas
+ * de nome exato no parseResposta (Primeiro gol / Odds Aumentadas).
+ *
+ * Operador distinto (preço próprio) → entra como FONTE do scanner e no SCRAPER_FACTORY.
+ */
+export class LuvabetScraper extends AltenarWidgetScraper {
+  constructor() {
+    super({ nome: 'Luvabet', integration: 'luvabet', referer: 'https://luva.bet.br/' });
   }
 }
 
