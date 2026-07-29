@@ -39,6 +39,10 @@ const ALIAS_PARA_CANONICO: Record<string, string> = {
   luva: 'Luvabet',          // domínio é luva.bet.br — o feed às vezes rotula só "Luva"
   stake: 'Stake',           // browser-intercept (Futebol 1X2)
   rivalo: 'Rivalo',         // plataforma própria (matchserv); browser headed + Xvfb
+  brazino777: 'Brazino777',  // NSoft AIO (API pública)
+  brazino: 'Brazino777',     // o SureRadar rotula "Brazino 777" -> chave "brazino777"
+  apostaganha: 'ApostaGanha', // NSoft AIO (mesmo parser)
+  apostaganhasportsbook: 'ApostaGanha',
   // Casas sem scraper (alertadas com tag ⚠️ NÃO REVALIDADO)
   betsson: 'Betsson',
   bet365: 'Bet365',
