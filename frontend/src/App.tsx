@@ -23,7 +23,8 @@ import {
   Wallet,
   Plus,
   Radar,
-  Gift
+  Gift,
+  Menu
 } from 'lucide-react';
 
 interface HealthStatus {
@@ -435,6 +436,9 @@ function CashoutGapBadge({ gapPct }: { gapPct: number }) {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'valor' | 'calibracao' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
+  // Menu hambúrguer do mobile: navegar fecha o menu (no desktop a classe não tem efeito).
+  const [navOpen, setNavOpen] = useState(false);
+  const irPara = (tab: typeof activeTab) => { setActiveTab(tab); setNavOpen(false); };
   const [systemStatus, setSystemStatus] = useState<HealthStatus | null>(null);
 
   // Value bets (+EV vs Pinnacle) + middles — radar-only (polling só quando a aba está aberta).
@@ -961,6 +965,11 @@ export default function App() {
       document.documentElement.classList.remove('light');
     }
     localStorage.setItem('jotinhabet_theme', theme);
+    // Barra de status/URL do Chrome Android acompanha o tema (senão fica escura no
+    // modo claro e destoa). Valores = --bg-main de cada tema no index.css.
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute('content', theme === 'light' ? '#f8fafc' : '#070b13');
   }, [theme]);
 
   // Live System Logs State
@@ -1965,66 +1974,76 @@ export default function App() {
   return (
     <div className="app-container">
       {/* Sidebar */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${navOpen ? 'nav-open' : ''}`}>
         <div>
-          <div className="logo-container">
-            <div className="logo-icon">J</div>
-            <span className="logo-text">JotinhaBet</span>
+          <div className="sidebar-topbar">
+            <div className="logo-container">
+              <div className="logo-icon">J</div>
+              <span className="logo-text">JotinhaBet</span>
+            </div>
+            <button
+              className="nav-toggle"
+              aria-label={navOpen ? 'Fechar menu' : 'Abrir menu'}
+              aria-expanded={navOpen}
+              onClick={() => setNavOpen((o) => !o)}
+            >
+              {navOpen ? <X size={22} /> : <Menu size={22} />}
+            </button>
           </div>
 
           <nav className="nav-list">
             <a
               className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setActiveTab('dashboard')}
+              onClick={() => irPara('dashboard')}
             >
               <Layers size={18} />
               Radar Surebets
             </a>
             <a
               className={`nav-item ${activeTab === 'radar-cashout' ? 'active' : ''}`}
-              onClick={() => setActiveTab('radar-cashout')}
+              onClick={() => irPara('radar-cashout')}
             >
               <Radar size={18} />
               Radar Cashout
             </a>
             <a
               className={`nav-item ${activeTab === 'valor' ? 'active' : ''}`}
-              onClick={() => setActiveTab('valor')}
+              onClick={() => irPara('valor')}
             >
               <TrendingUp size={18} />
               Value Bets
             </a>
             <a
               className={`nav-item ${activeTab === 'calibracao' ? 'active' : ''}`}
-              onClick={() => setActiveTab('calibracao')}
+              onClick={() => irPara('calibracao')}
             >
               <Activity size={18} />
               Calibração
             </a>
             <a
               className={`nav-item ${activeTab === 'calculadora' ? 'active' : ''}`}
-              onClick={() => setActiveTab('calculadora')}
+              onClick={() => irPara('calculadora')}
             >
               <Calculator size={18} />
               Calculadora
             </a>
             <a
               className={`nav-item ${activeTab === 'juros-compostos' ? 'active' : ''}`}
-              onClick={() => setActiveTab('juros-compostos')}
+              onClick={() => irPara('juros-compostos')}
             >
               <Percent size={18} />
               Juros Compostos
             </a>
             <a
               className={`nav-item ${activeTab === 'saldos' ? 'active' : ''}`}
-              onClick={() => setActiveTab('saldos')}
+              onClick={() => irPara('saldos')}
             >
               <Wallet size={18} />
               Saldo nas Casas
             </a>
             <a
               className={`nav-item ${activeTab === 'ai-test' ? 'active' : ''}`}
-              onClick={() => setActiveTab('ai-test')}
+              onClick={() => irPara('ai-test')}
             >
               <Cpu size={18} />
               IA & Automação
@@ -2032,21 +2051,21 @@ export default function App() {
           </nav>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+        <div className="sidebar-footer">
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span className={`indicator ${isDbConnected ? 'indicator-active' : 'indicator-error'}`}></span>
             Database: {isDbConnected ? 'Conectado' : 'Offline'}
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
             <span>Versão 1.0.0 (TypeScript)</span>
-            <button 
+            <button
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
               style={{
                 background: 'rgba(255, 255, 255, 0.05)',
                 border: '1px solid var(--panel-border)',
                 borderRadius: '8px',
-                width: '32px',
-                height: '32px',
+                width: '42px',
+                height: '42px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -2056,7 +2075,7 @@ export default function App() {
               }}
               title={theme === 'dark' ? 'Ativar Modo Claro' : 'Ativar Modo Escuro'}
             >
-              {theme === 'dark' ? <Sun size={14} style={{ color: '#f59e0b' }} /> : <Moon size={14} style={{ color: '#34d399' }} />}
+              {theme === 'dark' ? <Sun size={15} style={{ color: '#f59e0b' }} /> : <Moon size={15} style={{ color: '#34d399' }} />}
             </button>
           </div>
         </div>
@@ -2193,8 +2212,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* Sub-Tabs Navigation */}
-            <div style={{ display: 'flex', gap: '16px', marginBottom: '24px', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px' }}>
+            {/* Sub-Tabs Navigation — flexWrap: em 400px as 3 abas não cabem numa linha */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px', marginBottom: '24px', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>
               <button
                 onClick={() => setDashboardSubTab('radar')}
                 style={{
@@ -2205,7 +2224,7 @@ export default function App() {
                   fontWeight: 'bold',
                   cursor: 'pointer',
                   borderBottom: dashboardSubTab === 'radar' ? '2.5px solid var(--color-primary)' : 'none',
-                  paddingBottom: '8px',
+                  padding: '8px 0',
                   outline: 'none',
                   transition: 'all 0.15s ease'
                 }}
@@ -2222,7 +2241,7 @@ export default function App() {
                   fontWeight: 'bold',
                   cursor: 'pointer',
                   borderBottom: dashboardSubTab === 'historico' ? '2.5px solid var(--color-primary)' : 'none',
-                  paddingBottom: '8px',
+                  padding: '8px 0',
                   outline: 'none',
                   transition: 'all 0.15s ease'
                 }}
@@ -2239,7 +2258,7 @@ export default function App() {
                   fontWeight: 'bold',
                   cursor: 'pointer',
                   borderBottom: dashboardSubTab === 'promocoes' ? '2.5px solid var(--color-primary)' : 'none',
-                  paddingBottom: '8px',
+                  padding: '8px 0',
                   outline: 'none',
                   transition: 'all 0.15s ease'
                 }}
@@ -2266,7 +2285,7 @@ export default function App() {
                 {selectedBookmakers.length > 0 && (
                   <button 
                     className="btn" 
-                    style={{ padding: '5px 10px', fontSize: '11px', border: 'none', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', width: '100%' }}
+                    style={{ padding: '5px 10px', minHeight: '36px', fontSize: '11px', border: 'none', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', width: '100%' }}
                     onClick={() => setSelectedBookmakers([])}
                   >
                     Limpar Filtros ({selectedBookmakers.length})
@@ -2276,7 +2295,7 @@ export default function App() {
                 {availableBookmakers.length === 0 ? (
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Aguardando carregar casas...</div>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div className="casas-filtro">
                     {availableBookmakers.map(bookmaker => {
                       const isSelected = selectedBookmakers.includes(bookmaker);
                       
@@ -2306,9 +2325,11 @@ export default function App() {
                             }
                           }}
                           style={{
-                            width: '100%',
+                            /* largura/direção vêm de .casas-filtro (chips no mobile,
+                               coluna no desktop) — não setar width inline aqui. */
                             textAlign: 'left',
                             padding: '8px 12px',
+                            minHeight: '36px',
                             borderRadius: '8px',
                             fontSize: '11px',
                             fontWeight: 'bold',
@@ -2383,9 +2404,13 @@ export default function App() {
                             fontSize: '11px',
                             fontWeight: 'bold',
                             cursor: 'pointer',
-                            padding: '0 4px',
+                            padding: '8px',
+                            margin: '-6px -4px',
+                            minWidth: '28px',
+                            minHeight: '28px',
                             display: 'flex',
-                            alignItems: 'center'
+                            alignItems: 'center',
+                            justifyContent: 'center'
                           }}
                           title="Limpar data"
                         >
@@ -2502,7 +2527,7 @@ export default function App() {
                           })}
                           {(vipCount > 0 || vipOnly) && (
                             <>
-                              <span style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
+                              <span className="sep-v" style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
                               <button
                                 title="Mostrar apenas surebets VIP (ocultas no painel do SureRadar, capturadas via API)"
                                 onClick={() => setVipOnly((v) => !v)}
@@ -2530,7 +2555,7 @@ export default function App() {
                                 : { ...chip(false), color: cor, border: `1px solid ${cor}80` };
                             return (
                               <>
-                                <span style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
+                                <span className="sep-v" style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
                                 <button title="Só oportunidades do SureRadar (agregador)" onClick={() => toggle('sureradar')} style={chipFonte(fonteFiltro === 'sureradar', '#60a5fa')}>
                                   📡 SureRadar{nSR ? ` (${nSR})` : ''}
                                 </button>
@@ -2917,7 +2942,7 @@ export default function App() {
                   });
                   return (
                     <>
-                      <span style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
+                      <span className="sep-v" style={{ width: '1px', alignSelf: 'stretch', background: 'var(--panel-border)', margin: '0 4px' }} />
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Esporte</span>
                       <button style={chip(!histFiltroEsporte)} onClick={() => setHistFiltroEsporte('')}>Todos</button>
                       {esportesDoHistorico.map((sport) => (
@@ -3004,11 +3029,13 @@ export default function App() {
                   <table className="custom-table" style={{ fontSize: '12px' }}>
                     <thead>
                       <tr>
+                        {/* hide-mobile: colunas de detalhe somem no celular p/ encurtar o
+                            scroll horizontal (o investimento sai da soma das stakes ao lado). */}
                         <th>Data</th>
                         <th>Evento</th>
-                        <th>Mercado</th>
+                        <th className="hide-mobile">Mercado</th>
                         <th>Casas & Odds</th>
-                        <th>Investimento</th>
+                        <th className="hide-mobile">Investimento</th>
                         <th>Lucro Líquido</th>
                         <th>ROI</th>
                         <th style={{ textAlign: 'center' }}>Ações</th>
@@ -3034,14 +3061,14 @@ export default function App() {
                                 {ESPORTE_EMOJI[esporteOp] || '🏆'} {esporteOp}
                               </div>
                             </td>
-                            <td>{d.mercado || 'Mercado'}</td>
+                            <td className="hide-mobile">{d.mercado || 'Mercado'}</td>
                             <td>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                                 <span>{d.casaA}: <strong>R$ {op.stake_real_1.toFixed(2)}</strong> @ {d.oddA?.toFixed(2)}</span>
                                 <span>{d.casaB}: <strong>R$ {op.stake_real_2.toFixed(2)}</strong> @ {d.oddB?.toFixed(2)}</span>
                               </div>
                             </td>
-                            <td>R$ {(op.stake_real_1 + op.stake_real_2).toFixed(2)}</td>
+                            <td className="hide-mobile">R$ {(op.stake_real_1 + op.stake_real_2).toFixed(2)}</td>
                             <td style={{ color: op.lucro_real >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 'bold' }}>
                               {op.lucro_real >= 0 ? '+' : '−'} R$ {Math.abs(op.lucro_real).toFixed(2)}
                             </td>
@@ -3132,7 +3159,7 @@ export default function App() {
                     );
                   })()}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
+                <div className="resp-grid-form">
                   <div className="form-group">
                     <label>Casa da Promoção</label>
                     <input className="form-control" placeholder="Ex.: Betano" value={promoForm.casaPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, casaPromocao: e.target.value }))} />
@@ -3266,13 +3293,15 @@ export default function App() {
                   <table className="custom-table" style={{ fontSize: '12px' }}>
                     <thead>
                       <tr>
+                        {/* hide-mobile: 10 colunas não cabem no celular. Sobram as de decisão
+                            (promoção, evento, ROI, lucro); o detalhe da cobertura fica no desktop. */}
                         <th>Data</th>
                         <th>Casa Promoção</th>
                         <th>Valor Promoção</th>
                         <th>Evento</th>
-                        <th>Mercado</th>
-                        <th>Casa Cobertura</th>
-                        <th>Valor Cobertura</th>
+                        <th className="hide-mobile">Mercado</th>
+                        <th className="hide-mobile">Casa Cobertura</th>
+                        <th className="hide-mobile">Valor Cobertura</th>
                         <th>ROI</th>
                         <th>Lucro</th>
                         <th style={{ textAlign: 'center' }}>Ações</th>
@@ -3301,9 +3330,9 @@ export default function App() {
                               {Number.isFinite(Number(p.odd_promocao)) && p.odd_promocao !== null && <span style={{ color: 'var(--text-muted)' }}> @ {Number(p.odd_promocao).toFixed(2)}</span>}
                             </td>
                             <td style={{ fontWeight: 'bold' }}>{p.evento}</td>
-                            <td>{p.mercado || '—'}</td>
-                            <td>{p.casa_cobertura}</td>
-                            <td>
+                            <td className="hide-mobile">{p.mercado || '—'}</td>
+                            <td className="hide-mobile">{p.casa_cobertura}</td>
+                            <td className="hide-mobile">
                               R$ {(Number(p.valor_cobertura) || 0).toFixed(2)}
                               {Number.isFinite(Number(p.odd_cobertura)) && p.odd_cobertura !== null && <span style={{ color: 'var(--text-muted)' }}> @ {Number(p.odd_cobertura).toFixed(2)}</span>}
                             </td>
@@ -3415,7 +3444,7 @@ export default function App() {
                 <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>rastreio AO VIVO — quanto vale e quando sacar</span>
               </div>
 
-              <form onSubmit={criarBet} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px', alignItems: 'end' }}>
+              <form onSubmit={criarBet} className="resp-grid-form">
                 <div className="form-group">
                   <label>Casa</label>
                   <select className="form-control" value={betForm.casa} onChange={(e) => setBetForm((f) => ({ ...f, casa: e.target.value }))}>
@@ -3483,9 +3512,10 @@ export default function App() {
                 Futebol 1X2 (3 vias) não tem cálculo — use 2 vias (tênis/basquete/e-sports) ou Total.
               </p>
 
-              {/* Cards das apostas */}
+              {/* Cards das apostas. min(300px,100%) no minmax: sem o min() a trilha fica maior
+                  que a viewport em telas estreitas e a página ganha scroll horizontal. */}
               {cashoutBets.length > 0 && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '14px', marginTop: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(300px, 100%), 1fr))', gap: '14px', marginTop: '16px' }}>
                   {cashoutBets.map((bet) => {
                     const oddEnt = num(bet.odd_entrada);
                     const stake = num(bet.stake);
@@ -3577,7 +3607,7 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(320px, 100%), 1fr))', gap: '16px' }}>
                 {[...cashoutOpps]
                   .sort((a, b) => b.gap_pct - a.gap_pct)
                   .map((opp) => {
@@ -3729,7 +3759,7 @@ export default function App() {
                 Nenhuma aposta de valor no momento. O radar atualiza a cada varredura.
               </div>
             ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(320px, 100%), 1fr))', gap: '16px' }}>
                 {valorOpps.map((o) => (
                   <div key={o.id} className="glass-panel" style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px', position: 'relative' }}>
                     <button onClick={() => excluirValor(o.id)} title="Excluir do radar"
@@ -3776,7 +3806,7 @@ export default function App() {
                   Nenhum middle no momento.
                 </div>
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(320px, 100%), 1fr))', gap: '16px' }}>
                   {middlesOpps.map((m) => {
                     const garantido = m.pior_caso_roi_pct >= 0;
                     return (
@@ -3834,7 +3864,7 @@ export default function App() {
             ) : (
               <>
                 {/* Stat tiles */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(180px, 100%), 1fr))', gap: '16px' }}>
                   <div className="glass-panel" style={{ padding: '18px' }}>
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Sobrevivência (geral)</div>
                     <div style={{ fontSize: '28px', fontWeight: 700, color: '#34d399' }}>
@@ -4073,9 +4103,10 @@ export default function App() {
                         <th>Dia</th>
                         <th>Banca Inicial</th>
                         <th>Mão / Turno ({parseFloat(projMaxStakePct) || 50}%)</th>
-                        <th>Lucro T1</th>
-                        <th>Lucro T2</th>
-                        <th>Lucro T3+</th>
+                        {/* hide-mobile: o detalhe por turno some no celular; fica o lucro do dia. */}
+                        <th className="hide-mobile">Lucro T1</th>
+                        <th className="hide-mobile">Lucro T2</th>
+                        <th className="hide-mobile">Lucro T3+</th>
                         <th>Lucro Diário</th>
                         <th>Banca Final</th>
                       </tr>
@@ -4097,9 +4128,9 @@ export default function App() {
                           </td>
                           <td>R$ {day.bancaInicial.toFixed(2)}</td>
                           <td>R$ {day.maoPorTurno.toFixed(2)}</td>
-                          <td style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno1.toFixed(2)}</td>
-                          <td style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno2.toFixed(2)}</td>
-                          <td style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno3.toFixed(2)}</td>
+                          <td className="hide-mobile" style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno1.toFixed(2)}</td>
+                          <td className="hide-mobile" style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno2.toFixed(2)}</td>
+                          <td className="hide-mobile" style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno3.toFixed(2)}</td>
                           <td style={{ color: 'var(--color-success)', fontWeight: 600 }}>R$ {day.lucroTotalDia.toFixed(2)}</td>
                           <td style={{ fontWeight: 'bold' }}>R$ {day.bancaFinal.toFixed(2)}</td>
                         </tr>
@@ -4211,7 +4242,7 @@ export default function App() {
         )}
 
         {activeTab === 'ai-test' && (
-          <div className="glass-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 220px)', minHeight: '480px' }}>
+          <div className="glass-panel chat-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column' }}>
             <h3 className="card-title" style={{ marginBottom: '4px' }}>
               <Cpu size={18} style={{ color: 'var(--color-primary)' }} />
               Copiloto de Arbitragem (IA)

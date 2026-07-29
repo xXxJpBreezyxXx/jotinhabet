@@ -3,7 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪙</text></svg>" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover: o app pinta até as bordas (recorte da câmera / barra de
+         gestos) e o CSS recua com env(safe-area-inset-*). Sem maximum-scale, para não
+         bloquear o zoom por pinça. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Colore a barra de status/URL do Chrome Android com o fundo do app (o valor
+         real é reescrito pelo React ao trocar de tema). -->
+    <meta name="theme-color" content="#070b13" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>JotinhaBet — Painel de Arbitragem</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

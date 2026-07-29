@@ -125,15 +125,27 @@
   padding: 0;
 }
 
+html {
+  /* Chrome Android infla a fonte de blocos de texto por conta própria; o app já é
+     denso (tabelas/chips) e isso estourava as larguras calculadas. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   font-family: var(--font-sans);
   background: var(--bg-gradient);
   background-attachment: fixed;
   color: var(--text-primary);
   min-height: 100vh;
+  min-height: 100dvh; /* Chrome Android: 100vh conta a barra de URL que some no scroll */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow-x: hidden;
+  /* Nomes de evento/casa longos quebram em vez de esticar o layout no celular. */
+  overflow-wrap: break-word;
+  /* Sem o flash cinza do Chrome ao tocar em chips/cards (o :active já dá o feedback). */
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Scrollbar styling */
@@ -200,11 +212,41 @@ h1, h2, h3, h4 {
   transition: all var(--transition-normal);
 }
 
+/* Topo da sidebar: logo + botão hambúrguer (o botão só aparece no mobile) */
+.sidebar-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 40px;
+}
+
 .logo-container {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 40px;
+}
+
+.nav-toggle {
+  display: none; /* desktop: escondido; mobile: vira o gatilho do menu */
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+/* Rodapé da sidebar (status do banco / versão / tema) */
+.sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .logo-icon {
@@ -306,7 +348,7 @@ h1, h2, h3, h4 {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  height: 120px;
+  min-height: 120px; /* min-, não height fixa: no mobile o footer quebra em 2 linhas */
   transition: all var(--transition-normal);
 }
 
@@ -369,9 +411,20 @@ h1, h2, h3, h4 {
    vira grid de 2 colunas normalmente. O JSX NÃO define display (a classe controla). */
 .resp-grid-2 { display: flex; flex-direction: column; }
 .resp-grid-08 { display: flex; flex-direction: column; gap: 32px; }
+/* Grids de formulário densos (promoção, minhas apostas do cashout): empilham no
+   mobile, auto-fit no desktop. O JSX NÃO seta display/gridTemplateColumns inline. */
+.resp-grid-form { display: flex; flex-direction: column; gap: 10px; }
+/* Filtro "Minhas Contas": no celular o painel ocupa a largura toda, então as casas
+   viram chips que quebram linha (empilhadas, 10+ casas empurravam o radar pra fora
+   da tela). Na sidebar estreita do desktop volta a ser lista em coluna. */
+.casas-filtro { display: flex; flex-wrap: wrap; gap: 6px; }
+.casas-filtro > button { flex: 1 1 calc(50% - 3px); min-width: 0; }
 @media (min-width: 769px) {
   .resp-grid-2 { display: grid; grid-template-columns: 1fr 1fr; }
   .resp-grid-08 { display: grid; grid-template-columns: 0.8fr 2fr; }
+  .resp-grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; }
+  .casas-filtro { flex-direction: column; flex-wrap: nowrap; }
+  .casas-filtro > button { flex: 0 0 auto; width: 100%; }
 }
 
 /* Cards do radar de surebets: 3 colunas SÓ em tela larga (>=1400px), 2 no desktop
@@ -387,62 +440,80 @@ h1, h2, h3, h4 {
 }
 
 @media (max-width: 768px) {
-  /* App vira coluna: nav no topo, conteúdo abaixo */
+  /* App vira coluna: barra compacta no topo com menu hambúrguer EXPANSIVO */
   .app-container { flex-direction: column; }
 
   .sidebar {
     width: 100%;
     height: auto;
-    position: static;               /* rola junto (não fica fixa comendo tela) */
+    position: sticky;               /* barra compacta (~64px) fica à mão p/ trocar de aba */
+    top: 0;
     flex-direction: column;
-    gap: 12px;
-    padding: 12px 16px;
+    gap: 0;
+    /* env(safe-area-inset-*) casa com o viewport-fit=cover do index.html: instalado
+       como PWA (tela cheia), a barra recua do recorte da câmera em vez de ficar
+       embaixo dele. No Chrome normal os insets são 0 e nada muda. */
+    padding: calc(10px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+             10px calc(16px + env(safe-area-inset-left));
     border-right: none;
     border-bottom: 1px solid var(--panel-border);
+    /* o menu expandido pode passar da tela — rola dentro da própria barra */
+    max-height: 100dvh;
+    overflow-y: auto;
   }
-  .logo-container { margin-bottom: 0; }
-  .nav-list {
-    flex-direction: row;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    gap: 6px;
-    -webkit-overflow-scrolling: touch;
-  }
+  .sidebar-topbar { margin-bottom: 0; }
+  .nav-toggle { display: flex; }
+  /* Menu colapsado por padrão; .nav-open expande em coluna com alvos de toque confortáveis */
+  .nav-list { display: none; flex-direction: column; gap: 4px; padding-top: 12px; }
+  .sidebar.nav-open .nav-list { display: flex; animation: fadeIn 0.18s ease; }
   .nav-item {
-    padding: 8px 12px;
-    font-size: 13px;
-    white-space: nowrap;
+    padding: 12px 14px;
+    min-height: 44px;
+    font-size: 15px;
     border-radius: 10px;
   }
-  .nav-item.active {
-    border-left: none;
-    border-bottom: 2px solid var(--color-primary);
-    padding-left: 12px;
-  }
-  /* Rodapé da sidebar (status/versão/tema) em linha compacta */
-  .sidebar > div:last-child {
-    flex-direction: row !important;
+  /* Rodapé (status/versão/tema) só aparece com o menu expandido, em linha compacta */
+  .sidebar-footer { display: none; }
+  .sidebar.nav-open .sidebar-footer {
+    display: flex;
+    flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--panel-border);
+    animation: fadeIn 0.18s ease;
   }
 
-  /* Conteúdo principal */
-  .main-content { padding: 16px; }
+  /* Conteúdo principal (bottom inset = barra de gestos do Android) */
+  .main-content {
+    padding: 16px calc(16px + env(safe-area-inset-right))
+             calc(24px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  }
   .header { flex-direction: column; align-items: flex-start; gap: 12px; }
   .header-title h1 { font-size: 22px; }
 
+  .nav-toggle { width: 44px; height: 44px; }
+
   /* Grids */
   .stats-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .surebets-grid { grid-template-columns: 1fr; }
 
   /* Tabelas: rolam na horizontal em vez de estourar a página */
-  .table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-container { -webkit-overflow-scrolling: touch; }
   .custom-table { min-width: 560px; }
+  /* colunas secundárias somem no celular (th/td marcados no JSX) */
+  .hide-mobile { display: none !important; }
+  /* separadores verticais decorativos viram ruído quando os chips quebram linha */
+  .sep-v { display: none; }
 
-  /* Modal quase full-screen */
-  .modal-content { width: 94%; max-width: 94%; }
-  .modal-body { padding: 16px; }
+  .modal-overlay { padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+
+  /* ATENÇÃO: overrides que colidem com .btn/.form-control/.custom-table th|td/.modal-content
+     /.modal-body NÃO cabem aqui — esses componentes são definidos MAIS ABAIXO no arquivo e,
+     com a mesma especificidade, a regra posterior vence. Eles ficam no bloco mobile do FIM
+     do arquivo ("Overrides mobile de componente"). */
 
   /* Utilitários p/ containers com estilo inline (JSX) */
   .resp-stack { flex-direction: column !important; }
@@ -451,10 +522,19 @@ h1, h2, h3, h4 {
 }
 
 @media (max-width: 480px) {
-  .stats-grid { grid-template-columns: 1fr; }
   .header-title h1 { font-size: 20px; }
-  .main-content { padding: 12px; }
-  .nav-item { font-size: 12px; padding: 7px 10px; }
+  .main-content {
+    padding: 12px calc(12px + env(safe-area-inset-right))
+             calc(20px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
+  }
+  /* NÃO reduzir .nav-item aqui: o menu hambúrguer depende dos 44px de alvo de toque
+     definidos no bloco de 768px (o POCO F8 Ultra reporta ~480px de viewport CSS). */
+}
+
+/* Só em telas realmente estreitas os stat cards viram 1 coluna. Em 480px (F8 Ultra)
+   duas colunas de ~220px cabem e evitam um scroll vertical enorme no topo. */
+@media (max-width: 380px) {
+  .stats-grid { grid-template-columns: 1fr; }
 }
 
 /* Table Card & Content */
@@ -893,6 +973,20 @@ h1, h2, h3, h4 {
   to { transform: translateY(0); opacity: 1; }
 }
 
+/* Painel do chat do copiloto: dvh acompanha teclado virtual/barra de URL no mobile
+   (100vh fica de fallback p/ browsers antigos). */
+.chat-panel {
+  height: calc(100vh - 220px);
+  height: calc(100dvh - 220px);
+  min-height: 480px;
+}
+@media (max-width: 768px) {
+  .chat-panel {
+    height: calc(100dvh - 200px);
+    min-height: 380px;
+  }
+}
+
 /* Spinner de "carregando" (botão de scan/revalidação/salvar saldos). */
 .spin-anim {
   animation: spin 0.8s linear infinite;
@@ -901,4 +995,33 @@ h1, h2, h3, h4 {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+/* ============================================================================
+   Overrides mobile de componente — PRECISAM FICAR NO FIM DO ARQUIVO.
+   O bloco @media (max-width: 768px) lá de cima roda ANTES das definições de
+   .btn/.form-control/.custom-table/.modal-*; como a especificidade é a mesma, quem
+   vence é a regra que aparece por último. Colocado aqui, o mobile ganha de fato.
+   ========================================================================== */
+@media (max-width: 768px) {
+  /* Alvo de toque: 33px (padding 8px + fonte 13px) erra muito no dedo.
+     Regra ampla em `button` porque quase todo botão do app é estilizado inline no
+     JSX, sem classe — `min-height` só cresce o que está pequeno, nada encolhe. */
+  button { min-height: 40px; }
+  /* Botões de ícone dentro de tabela ficam quadrados, não altos e finos */
+  .custom-table td button, .custom-table th button { min-width: 40px; }
+  .btn { min-height: 42px; padding: 10px 16px; font-size: 14px; }
+  .modal-close { min-width: 40px; min-height: 40px; }
+
+  /* font-size 16px: abaixo disso o browser mobile dá zoom sozinho ao focar o campo. */
+  .form-control { min-height: 44px; padding: 11px 12px; font-size: 16px; }
+  input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; }
+
+  /* Células mais enxutas p/ reduzir o quanto se rola na horizontal */
+  .custom-table th { padding: 10px; }
+  .custom-table td { padding: 12px 10px; }
+
+  /* Modal quase full-screen (dvh: com o teclado virtual aberto, 90vh estoura a tela) */
+  .modal-content { width: 94%; max-width: 94%; max-height: 88dvh; }
+  .modal-body { padding: 16px; }
 }
