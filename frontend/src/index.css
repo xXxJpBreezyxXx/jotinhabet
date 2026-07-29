@@ -411,20 +411,25 @@ h1, h2, h3, h4 {
    vira grid de 2 colunas normalmente. O JSX NÃO define display (a classe controla). */
 .resp-grid-2 { display: flex; flex-direction: column; }
 .resp-grid-08 { display: flex; flex-direction: column; gap: 32px; }
+/* Radar: filtro + lista. `align-items: stretch` é ESSENCIAL no mobile — com
+   flex-start (o que o JSX fazia inline) os filhos de um flex COLUNA passam a usar
+   largura de conteúdo (~700px) e a lista corta ~234px na horizontal. */
+.resp-stack { display: flex; flex-direction: column; align-items: stretch; }
 /* Grids de formulário densos (promoção, minhas apostas do cashout): empilham no
    mobile, auto-fit no desktop. O JSX NÃO seta display/gridTemplateColumns inline. */
 .resp-grid-form { display: flex; flex-direction: column; gap: 10px; }
 /* Filtro "Minhas Contas": no celular o painel ocupa a largura toda, então as casas
    viram chips que quebram linha (empilhadas, 10+ casas empurravam o radar pra fora
    da tela). Na sidebar estreita do desktop volta a ser lista em coluna. */
-.casas-filtro { display: flex; flex-wrap: wrap; gap: 6px; }
-.casas-filtro > button { flex: 1 1 calc(50% - 3px); min-width: 0; }
+.casas-filtro { display: flex; flex-wrap: wrap; gap: 4px; }
+.casas-filtro > button { flex: 1 1 calc(33.333% - 3px); min-width: 0; }
 @media (min-width: 769px) {
   .resp-grid-2 { display: grid; grid-template-columns: 1fr 1fr; }
   .resp-grid-08 { display: grid; grid-template-columns: 0.8fr 2fr; }
   .resp-grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: end; }
   .casas-filtro { flex-direction: column; flex-wrap: nowrap; }
   .casas-filtro > button { flex: 0 0 auto; width: 100%; }
+  .resp-stack { flex-direction: row; align-items: flex-start; }
 }
 
 /* Cards do radar de surebets: 3 colunas SÓ em tela larga (>=1400px), 2 no desktop
@@ -500,9 +505,10 @@ h1, h2, h3, h4 {
   /* Grids */
   .stats-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
 
-  /* Tabelas: rolam na horizontal em vez de estourar a página */
+  /* Tabelas: rolam na horizontal se precisarem (o min-width foi zerado no bloco de
+     overrides do fim do arquivo — com fonte 11px e colunas .hide-mobile ocultas elas
+     passaram a caber na tela, sem arrasto lateral). */
   .table-container { -webkit-overflow-scrolling: touch; }
-  .custom-table { min-width: 560px; }
   /* colunas secundárias somem no celular (th/td marcados no JSX) */
   .hide-mobile { display: none !important; }
   /* separadores verticais decorativos viram ruído quando os chips quebram linha */
@@ -516,9 +522,8 @@ h1, h2, h3, h4 {
      do arquivo ("Overrides mobile de componente"). */
 
   /* Utilitários p/ containers com estilo inline (JSX) */
-  .resp-stack { flex-direction: column !important; }
   .resp-full { width: 100% !important; position: static !important; }
-  /* (grids resolvidos via mobile-first acima — nada a fazer aqui) */
+  /* (grids e .resp-stack resolvidos via mobile-first acima — nada a fazer aqui) */
 }
 
 @media (max-width: 480px) {
@@ -529,6 +534,11 @@ h1, h2, h3, h4 {
   }
   /* NÃO reduzir .nav-item aqui: o menu hambúrguer depende dos 44px de alvo de toque
      definidos no bloco de 768px (o POCO F8 Ultra reporta ~480px de viewport CSS). */
+}
+
+/* Coluna extra que só some em tela bem estreita (a 480px do F8 Ultra ela cabe). */
+@media (max-width: 430px) {
+  .hide-xs { display: none !important; }
 }
 
 /* Só em telas realmente estreitas os stat cards viram 1 coluna. Em 480px (F8 Ultra)
@@ -869,6 +879,12 @@ h1, h2, h3, h4 {
   gap: 8px;
 }
 
+/* Num flex COLUNA com align-items:center os filhos usam largura de CONTEÚDO, não a do
+   container. O texto da "Análise de Risco (IA)" tem min-content ~668px e era CLIPADO
+   pelo overflow:hidden do .surebet-card (no celular sumiam até 107px de texto).
+   min-width:0 + max-width:100% obrigam o texto a quebrar dentro do card. */
+.surebet-footer > * { min-width: 0; max-width: 100%; }
+
 .roi-badge {
   background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   color: white;
@@ -1004,24 +1020,56 @@ h1, h2, h3, h4 {
    vence é a regra que aparece por último. Colocado aqui, o mobile ganha de fato.
    ========================================================================== */
 @media (max-width: 768px) {
-  /* Alvo de toque: 33px (padding 8px + fonte 13px) erra muito no dedo.
-     Regra ampla em `button` porque quase todo botão do app é estilizado inline no
-     JSX, sem classe — `min-height` só cresce o que está pequeno, nada encolhe. */
-  button { min-height: 40px; }
-  /* Botões de ícone dentro de tabela ficam quadrados, não altos e finos */
-  .custom-table td button, .custom-table th button { min-width: 40px; }
-  .btn { min-height: 42px; padding: 10px 16px; font-size: 14px; }
-  .modal-close { min-width: 40px; min-height: 40px; }
+  /* --- BOTÕES ---
+     Um `button { min-height: 40px }` global inflava em ~60% os chips de filtro (que
+     têm altura natural ~25px) e era o motivo de "filtros e botões grandes". 28px é o
+     piso: mantém o dedo confortável sem esticar chip nenhum. */
+  button { min-height: 28px; }
+  .btn { min-height: 30px; padding: 5px 10px !important; font-size: 12px !important; gap: 6px; }
+  /* Botões de ícone (excluir/editar) ficam quadrados, não altos e finos */
+  .custom-table td button, .custom-table th button { min-width: 28px; }
+  .modal-close { min-width: 32px; min-height: 32px; }
 
-  /* font-size 16px: abaixo disso o browser mobile dá zoom sozinho ao focar o campo. */
-  .form-control { min-height: 44px; padding: 11px 12px; font-size: 16px; }
-  input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; }
+  /* --- CAMPOS ---
+     Chrome Android não dá zoom ao focar input (isso é Safari iOS), então 14px é seguro. */
+  .form-control { min-height: 32px; padding: 6px 9px !important; font-size: 14px !important; }
+  input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; }
 
-  /* Células mais enxutas p/ reduzir o quanto se rola na horizontal */
-  .custom-table th { padding: 10px; }
-  .custom-table td { padding: 12px 10px; }
+  /* --- CARDS ---
+     !important porque quase todo painel traz padding inline no JSX (18/20/24px). */
+  .glass-panel { padding: 12px !important; border-radius: 12px; }
+  .stat-card { min-height: 0 !important; gap: 2px !important; }
+  .stat-header { font-size: 11px; }
+  .stat-value { font-size: 19px; margin-top: 2px; }
+  .stat-footer { font-size: 10px; margin-top: 2px; line-height: 1.3; }
+  /* o campo da banca ativa é estilizado inline com 22px */
+  .stat-card input[type="number"] { font-size: 16px !important; padding: 3px 6px !important; }
+  .card-title { font-size: 13px; margin-bottom: 10px; }
+  .stats-grid { gap: 8px; margin-bottom: 16px; }
+
+  /* Cards do radar: ~570px cada era quase uma tela inteira por oportunidade. */
+  .surebet-card { border-radius: 12px; }
+  .surebet-header { padding: 8px 10px; gap: 5px; font-size: 10px; }
+  .surebet-content { padding: 10px; gap: 8px; }
+  .surebet-title { font-size: 13px; line-height: 1.3; }
+  .surebet-market { font-size: 11px; }
+  .odd-box { padding: 7px 9px; }
+  .odd-outcome { font-size: 11px; }
+  .odd-bookmaker { font-size: 10px; }
+  .odd-value { font-size: 15px; }
+  .surebet-footer { padding: 9px 10px; gap: 6px; }
+  .roi-badge { padding: 6px 10px; font-size: 11px; }
+
+  /* Filtro de casas: 3 por linha e chip baixo (o JSX traz minHeight/padding inline).
+     Derruba o painel "Minhas Contas" de ~750px (70% da tela!) para ~1/3 disso. */
+  .casas-filtro > button { min-height: 26px !important; padding: 4px 6px !important; font-size: 10px !important; }
+
+  /* --- TABELAS --- fonte e células enxutas encurtam o arrasto lateral */
+  .custom-table { font-size: 11px !important; min-width: 0; }
+  .custom-table th { padding: 6px 7px; font-size: 10px; }
+  .custom-table td { padding: 7px; }
 
   /* Modal quase full-screen (dvh: com o teclado virtual aberto, 90vh estoura a tela) */
   .modal-content { width: 94%; max-width: 94%; max-height: 88dvh; }
-  .modal-body { padding: 16px; }
+  .modal-body { padding: 14px !important; gap: 10px; }
 }

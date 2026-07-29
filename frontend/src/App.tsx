@@ -2125,7 +2125,7 @@ export default function App() {
                   <span>Sua Banca Ativa</span>
                   <DollarSign size={16} className="stat-icon" style={{ color: 'var(--color-primary)' }} />
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', margin: '4px 0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', margin: '4px 0', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: '20px', fontWeight: 'bold', color: 'var(--text-secondary)' }}>R$</span>
                   <input
                     type="number"
@@ -2141,6 +2141,9 @@ export default function App() {
                       fontSize: '22px',
                       fontWeight: 'bold',
                       width: '100%',
+                      /* minWidth: sem ele o flex-shrink do container esmagava o campo
+                         para ~68px e "352.65" ficava cortado dentro da própria caixa. */
+                      minWidth: '92px',
                       maxWidth: '120px',
                       padding: '4px 8px',
                       outline: 'none',
@@ -2268,8 +2271,11 @@ export default function App() {
             </div>
 
             {dashboardSubTab === 'radar' && (
-              /* Dashboard main layout - Two Column Layout (Sidebar filter + 3-col Cards Grid) */
-              <div className="resp-stack" style={{ display: 'flex', gap: '24px', width: '100%', alignItems: 'flex-start' }}>
+              /* Dashboard main layout - Two Column Layout (Sidebar filter + 3-col Cards Grid).
+                 .resp-stack controla display/direção/alinhamento (coluna no mobile, linha no
+                 desktop). NÃO voltar com alignItems inline: em coluna, flex-start faz os
+                 filhos usarem largura de CONTEÚDO (~700px) e o radar passa a cortar 234px. */
+              <div className="resp-stack" style={{ gap: '24px', width: '100%' }}>
 
               {/* Lateral Sidebar Filter */}
               <div className="glass-panel resp-full" style={{ width: '260px', padding: '20px', position: 'sticky', top: '24px', display: 'flex', flexDirection: 'column', gap: '16px', flexShrink: 0 }}>
@@ -4101,7 +4107,9 @@ export default function App() {
                     <thead>
                       <tr>
                         <th>Dia</th>
-                        <th>Banca Inicial</th>
+                        {/* hide-xs: em tela <=430px a tabela ainda pedia arrasto lateral;
+                            a banca inicial do dia sai (dá pra inferir da banca final do dia anterior). */}
+                        <th className="hide-xs">Banca Inicial</th>
                         <th>Mão / Turno ({parseFloat(projMaxStakePct) || 50}%)</th>
                         {/* hide-mobile: o detalhe por turno some no celular; fica o lucro do dia. */}
                         <th className="hide-mobile">Lucro T1</th>
@@ -4126,7 +4134,7 @@ export default function App() {
                               {day.isToday ? 'hoje' : day.isReal ? 'real' : 'proj'}
                             </span>
                           </td>
-                          <td>R$ {day.bancaInicial.toFixed(2)}</td>
+                          <td className="hide-xs">R$ {day.bancaInicial.toFixed(2)}</td>
                           <td>R$ {day.maoPorTurno.toFixed(2)}</td>
                           <td className="hide-mobile" style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno1.toFixed(2)}</td>
                           <td className="hide-mobile" style={{ color: 'var(--text-secondary)' }}>R$ {day.lucroTurno2.toFixed(2)}</td>
