@@ -658,12 +658,14 @@ export default function App() {
   const [calcError, setCalcError] = useState('');
 
   // Daily Evolution Projections State (Planilha)
-  const [userBanca, setUserBanca] = useState(() => {
-    return localStorage.getItem('jotinhabet_user_banca') || '50.00';
-  });
-  const [projBancaInicial, setProjBancaInicial] = useState(localStorage.getItem('jotinhabet_user_banca') || '50.00');
+  // A banca ativa vive no BANCO (app_config['banca_ativa']) — ÚNICA fonte da
+  // verdade; o mount busca de lá e '50.00' é só o valor até a resposta chegar.
+  // Sem cache em localStorage: uma aba com valor velho sobrescrevia crédito
+  // feito por fora (e o backend também lê do banco p/ stakes/copiloto/digest).
+  const [userBanca, setUserBanca] = useState('50.00');
+  const [projBancaInicial, setProjBancaInicial] = useState('50.00');
 
-  // Persistência da banca no BANCO (app_config) — o localStorage vira cache local.
+  // Persistência da banca no BANCO (app_config).
   // 'saving'/'saved'/'error' alimentam o feedback do botão Salvar do card.
   const [bancaSaveState, setBancaSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   // Fonte SÍNCRONA da verdade da banca: evita stale closure em read-modify-write
@@ -676,13 +678,12 @@ export default function App() {
   // um 'saving' de um clique mais novo.
   const bancaSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Escrita canônica da banca: ref (síncrono) + state + localStorage; opcionalmente
-  // persiste no banco (silencioso). Todos os fluxos que mudam a banca passam aqui.
+  // Escrita canônica da banca: ref (síncrono) + state; opcionalmente persiste no
+  // banco (silencioso). Todos os fluxos que mudam a banca passam aqui.
   const aplicarBanca = (v: string, persistirNoBanco = false) => {
     userBancaRef.current = v;
     bancaTocadaRef.current = true;
     setUserBanca(v);
-    localStorage.setItem('jotinhabet_user_banca', v);
     if (persistirNoBanco) salvarBancaNoBanco(v, true);
   };
 
@@ -691,15 +692,14 @@ export default function App() {
     bancaSaveTimerRef.current = setTimeout(() => setBancaSaveState('idle'), 2500);
   };
 
-  // Salva a banca no banco. `silencioso` = sem feedback visual (usado nos salvamentos
-  // automáticos após lançar/excluir entrada, que já têm alert próprio). Em falha,
-  // marca 'jotinhabet_banca_dirty' — o próximo mount re-sincroniza em vez de
-  // deixar o valor antigo do banco sobrescrever o local mais novo.
+  // Salva a banca no banco. `silencioso` = sem feedback de botão (usado nos
+  // salvamentos automáticos após lançar/excluir entrada/promoção). Sem cache
+  // local, valor não salvo NÃO sobrevive ao reload — falha em modo silencioso
+  // avisa por alert para o usuário salvar de novo (no botão do card é o 'error').
   const salvarBancaNoBanco = (valor: string | number, silencioso = false) => {
     const banca = parseFloat(String(valor));
     if (!Number.isFinite(banca) || banca <= 0) {
       console.warn('[banca] Valor inválido, não sincronizado com o banco:', valor);
-      localStorage.setItem('jotinhabet_banca_dirty', '1'); // local é mais novo que o banco
       if (!silencioso) {
         setBancaSaveState('error');
         agendarResetBotao();
@@ -710,6 +710,15 @@ export default function App() {
       if (bancaSaveTimerRef.current) clearTimeout(bancaSaveTimerRef.current);
       setBancaSaveState('saving');
     }
+    const avisarFalha = (motivo?: string) => {
+      console.warn('Falha ao salvar banca no banco:', motivo);
+      if (silencioso) {
+        alert(`Atenção: não consegui salvar a banca (R$ ${banca.toFixed(2)}) no banco — o valor se perde ao recarregar a página. Confira a conexão e salve de novo no campo Banca Ativa.`);
+      } else {
+        setBancaSaveState('error');
+        agendarResetBotao();
+      }
+    };
     fetch('/api/banca', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -717,24 +726,13 @@ export default function App() {
     })
       .then((r) => r.json())
       .then((d) => {
-        if (d.success) localStorage.removeItem('jotinhabet_banca_dirty');
-        else {
-          localStorage.setItem('jotinhabet_banca_dirty', '1');
-          console.warn('Falha ao salvar banca no banco:', d.error);
-        }
+        if (!d.success) return avisarFalha(d.error);
         if (!silencioso) {
-          setBancaSaveState(d.success ? 'saved' : 'error');
+          setBancaSaveState('saved');
           agendarResetBotao();
         }
       })
-      .catch((err) => {
-        localStorage.setItem('jotinhabet_banca_dirty', '1');
-        console.error('Erro ao salvar banca no banco:', err);
-        if (!silencioso) {
-          setBancaSaveState('error');
-          agendarResetBotao();
-        }
-      });
+      .catch((err) => avisarFalha(err?.message || String(err)));
   };
   const [projDias, setProjDias] = useState('30');
   const [projMaxStakePct, setProjMaxStakePct] = useState('50'); // 50%
@@ -902,9 +900,8 @@ export default function App() {
 
   // Calculator Modal State
   const [selectedOpp, setSelectedOpp] = useState<OpportunityItem | null>(null);
-  const [modalTotalInvestment, setModalTotalInvestment] = useState(() => {
-    return localStorage.getItem('jotinhabet_user_banca') || '50.00';
-  });
+  // Re-preenchido com a banca vigente sempre que um modal abre (useEffect abaixo).
+  const [modalTotalInvestment, setModalTotalInvestment] = useState(userBanca);
   const [modalOdd1, setModalOdd1] = useState('');
   const [modalOdd2, setModalOdd2] = useState('');
   const [revalResult, setRevalResult] = useState<OpportunityItem['revalidacao'] | null>(null);
@@ -999,29 +996,23 @@ export default function App() {
     fetchOperations();
     fetchPromocoes();
 
-    // Sincronização inicial da banca com o banco:
-    //  - Se um save anterior falhou (flag dirty), o valor LOCAL é o mais novo →
-    //    re-envia pro banco em vez de deixar o banco sobrescrever o local.
-    //  - Senão o banco é a fonte da verdade, mas só aplica se o usuário ainda não
-    //    editou nada neste pageload (um GET tardio não pode sobrescrever edição).
-    if (localStorage.getItem('jotinhabet_banca_dirty') === '1') {
-      salvarBancaNoBanco(localStorage.getItem('jotinhabet_user_banca') || '', true);
-    } else {
-      fetch('/api/banca')
-        .then((r) => r.json())
-        .then((d) => {
-          if (bancaTocadaRef.current) return; // usuário já mexeu — não sobrescreve
-          if (d && typeof d.banca === 'number' && Number.isFinite(d.banca) && d.banca > 0) {
-            const v = d.banca.toFixed(2);
-            userBancaRef.current = v;
-            setUserBanca(v);
-            localStorage.setItem('jotinhabet_user_banca', v);
-          }
-        })
-        .catch(() => {
-          console.warn('Não foi possível carregar a banca salva do banco (usando localStorage).');
-        });
-    }
+    // Banca ativa: o banco é a ÚNICA fonte da verdade — busca no mount e aplica,
+    // a menos que o usuário já tenha editado neste pageload (um GET tardio não
+    // pode sobrescrever edição). Alimenta também o padrão da planilha.
+    fetch('/api/banca')
+      .then((r) => r.json())
+      .then((d) => {
+        if (bancaTocadaRef.current) return; // usuário já mexeu — não sobrescreve
+        if (d && typeof d.banca === 'number' && Number.isFinite(d.banca) && d.banca > 0) {
+          const v = d.banca.toFixed(2);
+          userBancaRef.current = v;
+          setUserBanca(v);
+          setProjBancaInicial(v);
+        }
+      })
+      .catch(() => {
+        console.warn('Não foi possível carregar a banca do banco (exibindo o padrão até recarregar).');
+      });
 
     const interval = setInterval(fetchOpportunities, 8000);
     return () => clearInterval(interval);
