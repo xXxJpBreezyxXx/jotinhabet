@@ -606,31 +606,44 @@ app.get('/api/promocoes', async (_req, res) => {
   }
 });
 
-// POST - registra uma promoção. ROI: usa o informado; sem ele, deriva de
-// lucro / (valor da promoção + cobertura). '' e null contam como ausentes
-// (Number('') é 0 — sem o guard, campo vazio viraria R$ 0,00 válido).
+// POST - registra uma promoção. Lucro: usa o informado; sem ele, deriva das
+// odds das duas pernas (pior cenário: min entre "promoção ganha" e "cobertura
+// ganha"). ROI idem, de lucro / (valor da promoção + cobertura). '' e null
+// contam como ausentes (Number('') é 0 — campo vazio viraria R$ 0,00 válido).
 app.post('/api/promocoes', async (req, res) => {
   const b = req.body || {};
   const num = (v: any) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
   const str = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const r2 = (v: number) => Math.round(v * 100) / 100;
 
   const casaPromocao = str(b.casa_promocao);
   const valorPromocao = num(b.valor_promocao);
   const evento = str(b.evento);
   const casaCobertura = str(b.casa_cobertura);
   const valorCobertura = num(b.valor_cobertura);
-  const lucro = num(b.lucro);
+  const oddPromocao = num(b.odd_promocao);
+  const oddCobertura = num(b.odd_cobertura);
+  let lucro = num(b.lucro);
   const faltando = [
     !casaPromocao && 'casa_promocao', valorPromocao === null && 'valor_promocao',
     !evento && 'evento', !casaCobertura && 'casa_cobertura',
-    valorCobertura === null && 'valor_cobertura', lucro === null && 'lucro',
+    valorCobertura === null && 'valor_cobertura',
   ].filter(Boolean);
   if (faltando.length) {
     return res.status(400).json({ error: `Campos obrigatórios ausentes/inválidos: ${faltando.join(', ')}` });
   }
+  if ((oddPromocao !== null && oddPromocao <= 1) || (oddCobertura !== null && oddCobertura <= 1)) {
+    return res.status(400).json({ error: 'Odds devem ser maiores que 1.' });
+  }
 
   const investido = valorPromocao! + valorCobertura!;
-  const roiPct = num(b.roi_pct) ?? (investido > 0 ? Math.round((lucro! / investido) * 10000) / 100 : null);
+  if (lucro === null) {
+    if (oddPromocao === null || oddCobertura === null) {
+      return res.status(400).json({ error: 'Informe o lucro OU as odds das duas pernas (para o cálculo automático).' });
+    }
+    lucro = r2(Math.min(valorPromocao! * oddPromocao - investido, valorCobertura! * oddCobertura - investido));
+  }
+  const roiPct = num(b.roi_pct) ?? (investido > 0 ? r2((lucro / investido) * 100) : null);
 
   try {
     const { data, error } = await supabase
@@ -642,6 +655,8 @@ app.post('/api/promocoes', async (req, res) => {
         mercado: str(b.mercado),
         casa_cobertura: casaCobertura,
         valor_cobertura: valorCobertura,
+        odd_promocao: oddPromocao,
+        odd_cobertura: oddCobertura,
         roi_pct: roiPct,
         lucro,
       })

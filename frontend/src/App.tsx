@@ -975,11 +975,14 @@ export default function App() {
   const [loadingOperation, setLoadingOperation] = useState(false);
 
   // Histórico de surebets de PROMOÇÃO (inserção manual — tabela promo_surebets).
-  // roiEditado: digitar um ROI próprio desliga a sugestão automática (lucro/investido).
-  const PROMO_FORM_VAZIO = { casaPromocao: '', valorPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', roiPct: '', lucro: '' };
+  // lucro/ROI se calculam sozinhos a partir de valor+odd das duas pernas; digitar
+  // um valor próprio nos campos desliga a sugestão automática (ex.: freebet que
+  // não devolve a stake tem lucro diferente do cálculo padrão).
+  const PROMO_FORM_VAZIO = { casaPromocao: '', valorPromocao: '', oddPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', oddCobertura: '', roiPct: '', lucro: '' };
   const [promoHistory, setPromoHistory] = useState<any[]>([]);
   const [promoForm, setPromoForm] = useState({ ...PROMO_FORM_VAZIO });
   const [promoRoiEditado, setPromoRoiEditado] = useState(false);
+  const [promoLucroEditado, setPromoLucroEditado] = useState(false);
   const [promoSalvando, setPromoSalvando] = useState(false);
 
   // Fetch health status from backend on mount
@@ -1067,26 +1070,48 @@ export default function App() {
       });
   };
 
-  // ROI sugerido da promoção: lucro / (valor da promoção + cobertura). Vira o
-  // placeholder do campo ROI e é usado no salvamento se o usuário não digitar outro.
+  // Cálculo automático da promoção a partir de valor+odd das duas pernas:
+  // lucro de cada cenário (promoção ganha / cobertura ganha) e o garantido (min).
+  const promoCalc = (() => {
+    const vp = parseFloat(promoForm.valorPromocao);
+    const op = parseFloat(promoForm.oddPromocao);
+    const vc = parseFloat(promoForm.valorCobertura);
+    const oc = parseFloat(promoForm.oddCobertura);
+    if (![vp, op, vc, oc].every(Number.isFinite) || op <= 1 || oc <= 1) return null;
+    const investido = vp + vc;
+    const seGanhaPromo = vp * op - investido;
+    const seGanhaCobertura = vc * oc - investido;
+    return { investido, seGanhaPromo, seGanhaCobertura, lucro: Math.min(seGanhaPromo, seGanhaCobertura) };
+  })();
+
+  // Lucro efetivo: o digitado (se o usuário editou) ou o garantido do cálculo.
+  const promoLucroEfetivo = (promoLucroEditado && promoForm.lucro.trim())
+    ? parseFloat(promoForm.lucro)
+    : (promoCalc ? promoCalc.lucro : (promoForm.lucro.trim() ? parseFloat(promoForm.lucro) : NaN));
+
+  // ROI sugerido: lucro efetivo / (valor da promoção + cobertura).
   const promoRoiSugerido = (() => {
     const promo = parseFloat(promoForm.valorPromocao);
     const cob = parseFloat(promoForm.valorCobertura);
-    const lucro = parseFloat(promoForm.lucro);
     const investido = (Number.isFinite(promo) ? promo : 0) + (Number.isFinite(cob) ? cob : 0);
-    if (!Number.isFinite(lucro) || investido <= 0) return '';
-    return ((lucro / investido) * 100).toFixed(2);
+    if (!Number.isFinite(promoLucroEfetivo) || investido <= 0) return '';
+    return ((promoLucroEfetivo / investido) * 100).toFixed(2);
   })();
 
   const salvarPromocao = () => {
     const obrigatorios: Array<[string, string]> = [
       [promoForm.casaPromocao, 'Casa da promoção'], [promoForm.valorPromocao, 'Valor da promoção'],
       [promoForm.evento, 'Evento'], [promoForm.casaCobertura, 'Casa de cobertura'],
-      [promoForm.valorCobertura, 'Valor de cobertura'], [promoForm.lucro, 'Lucro'],
+      [promoForm.valorCobertura, 'Valor de cobertura'],
     ];
     const faltando = obrigatorios.filter(([v]) => !String(v).trim()).map(([, nome]) => nome);
     if (faltando.length) {
       alert(`Preencha os campos obrigatórios: ${faltando.join(', ')}.`);
+      return;
+    }
+    const lucroDigitado = promoLucroEditado && promoForm.lucro.trim();
+    if (!lucroDigitado && !promoCalc) {
+      alert('Informe as odds das duas pernas (para o cálculo automático) OU digite o lucro manualmente.');
       return;
     }
     setPromoSalvando(true);
@@ -1100,8 +1125,11 @@ export default function App() {
         mercado: promoForm.mercado || null,
         casa_cobertura: promoForm.casaCobertura,
         valor_cobertura: promoForm.valorCobertura,
-        roi_pct: (promoRoiEditado && promoForm.roiPct.trim()) ? promoForm.roiPct : (promoRoiSugerido || null),
-        lucro: promoForm.lucro,
+        odd_promocao: promoForm.oddPromocao || null,
+        odd_cobertura: promoForm.oddCobertura || null,
+        // lucro/ROI digitados vão como estão; vazios, o backend deriva das odds
+        lucro: lucroDigitado ? promoForm.lucro : null,
+        roi_pct: (promoRoiEditado && promoForm.roiPct.trim()) ? promoForm.roiPct : null,
       }),
     })
       .then((res) => res.json())
@@ -1109,6 +1137,7 @@ export default function App() {
         if (data.success) {
           setPromoForm({ ...PROMO_FORM_VAZIO });
           setPromoRoiEditado(false);
+          setPromoLucroEditado(false);
           fetchPromocoes();
         } else {
           alert(data.error || 'Erro ao salvar promoção.');
@@ -3044,6 +3073,10 @@ export default function App() {
                     <label>Valor da Promoção (R$)</label>
                     <input className="form-control" type="number" step="0.01" placeholder="50.00" value={promoForm.valorPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, valorPromocao: e.target.value }))} />
                   </div>
+                  <div className="form-group">
+                    <label>Odd da Promoção</label>
+                    <input className="form-control" type="number" step="0.01" placeholder="2.10" value={promoForm.oddPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, oddPromocao: e.target.value }))} />
+                  </div>
                   <div className="form-group" style={{ gridColumn: 'span 2', minWidth: '200px' }}>
                     <label>Evento</label>
                     <input className="form-control" placeholder="Ex.: Flamengo vs Palmeiras" value={promoForm.evento} onChange={(e) => setPromoForm((f) => ({ ...f, evento: e.target.value }))} />
@@ -3061,8 +3094,20 @@ export default function App() {
                     <input className="form-control" type="number" step="0.01" placeholder="45.00" value={promoForm.valorCobertura} onChange={(e) => setPromoForm((f) => ({ ...f, valorCobertura: e.target.value }))} />
                   </div>
                   <div className="form-group">
+                    <label>Odd de Cobertura</label>
+                    <input className="form-control" type="number" step="0.01" placeholder="1.95" value={promoForm.oddCobertura} onChange={(e) => setPromoForm((f) => ({ ...f, oddCobertura: e.target.value }))} />
+                  </div>
+                  <div className="form-group">
                     <label>Lucro (R$)</label>
-                    <input className="form-control" type="number" step="0.01" placeholder="12.50" value={promoForm.lucro} onChange={(e) => setPromoForm((f) => ({ ...f, lucro: e.target.value }))} />
+                    <input
+                      className="form-control"
+                      type="number"
+                      step="0.01"
+                      placeholder={promoCalc ? `${promoCalc.lucro.toFixed(2)} (auto)` : 'auto pelas odds'}
+                      value={promoForm.lucro}
+                      onChange={(e) => { setPromoLucroEditado(true); setPromoForm((f) => ({ ...f, lucro: e.target.value })); }}
+                      title="Deixe em branco para calcular pelas odds (pior cenário entre as duas pernas). Digite para sobrescrever — ex.: freebet que não devolve a stake."
+                    />
                   </div>
                   <div className="form-group">
                     <label>ROI (%)</label>
@@ -3077,6 +3122,14 @@ export default function App() {
                     />
                   </div>
                 </div>
+                {promoCalc && (
+                  <div style={{ marginTop: '10px', padding: '8px 12px', background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                    <span>Se a <strong>promoção</strong> ganhar: <strong style={{ color: promoCalc.seGanhaPromo >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{promoCalc.seGanhaPromo >= 0 ? '+' : '−'}R$ {Math.abs(promoCalc.seGanhaPromo).toFixed(2)}</strong></span>
+                    <span>Se a <strong>cobertura</strong> ganhar: <strong style={{ color: promoCalc.seGanhaCobertura >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{promoCalc.seGanhaCobertura >= 0 ? '+' : '−'}R$ {Math.abs(promoCalc.seGanhaCobertura).toFixed(2)}</strong></span>
+                    <span>Garantido (pior caso): <strong style={{ color: promoCalc.lucro >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{promoCalc.lucro >= 0 ? '+' : '−'}R$ {Math.abs(promoCalc.lucro).toFixed(2)}</strong></span>
+                    {promoRoiSugerido && <span>ROI: <strong style={{ color: 'var(--color-accent)' }}>{promoRoiSugerido}%</strong></span>}
+                  </div>
+                )}
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
                   <button
                     className="btn"
@@ -3159,11 +3212,17 @@ export default function App() {
                               {new Date(p.criado_em).toLocaleDateString()} {new Date(p.criado_em).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </td>
                             <td style={{ fontWeight: 'bold' }}>{p.casa_promocao}</td>
-                            <td>R$ {(Number(p.valor_promocao) || 0).toFixed(2)}</td>
+                            <td>
+                              R$ {(Number(p.valor_promocao) || 0).toFixed(2)}
+                              {Number.isFinite(Number(p.odd_promocao)) && p.odd_promocao !== null && <span style={{ color: 'var(--text-muted)' }}> @ {Number(p.odd_promocao).toFixed(2)}</span>}
+                            </td>
                             <td style={{ fontWeight: 'bold' }}>{p.evento}</td>
                             <td>{p.mercado || '—'}</td>
                             <td>{p.casa_cobertura}</td>
-                            <td>R$ {(Number(p.valor_cobertura) || 0).toFixed(2)}</td>
+                            <td>
+                              R$ {(Number(p.valor_cobertura) || 0).toFixed(2)}
+                              {Number.isFinite(Number(p.odd_cobertura)) && p.odd_cobertura !== null && <span style={{ color: 'var(--text-muted)' }}> @ {Number(p.odd_cobertura).toFixed(2)}</span>}
+                            </td>
                             <td style={{ color: 'var(--color-accent)', fontWeight: 'bold' }}>{Number.isFinite(roiP) ? `${roiP.toFixed(2)}%` : '—'}</td>
                             <td style={{ color: lucroP >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 'bold' }}>
                               {lucroP >= 0 ? '+' : '−'} R$ {Math.abs(lucroP).toFixed(2)}
