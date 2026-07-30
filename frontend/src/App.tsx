@@ -2821,8 +2821,22 @@ export default function App() {
                                 <div className="roi-badge" style={{ justifyContent: 'flex-start' }}>
                                   📈 {opp.roi_pct}% RETORNO CERTO
                                 </div>
+                                {/* Projeção sobre a BANCA ATIVA (era fixa em R$ 1.000, que não
+                                    dizia nada de útil com banca de outra ordem de grandeza).
+                                    Formata em pt-BR (vírgula decimal, ponto de milhar). */}
                                 <div className="roi-example">
-                                  R$ 1.000 → lucro de <strong>R$ {((opp.roi_pct / 100) * 1000).toFixed(2)}</strong>
+                                  {(() => {
+                                    const banca = parseFloat(userBanca);
+                                    const base = Number.isFinite(banca) && banca > 0 ? banca : 0;
+                                    const brl = (v: number) =>
+                                      v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                                    if (base <= 0) return <>Defina sua banca ativa para ver o lucro</>;
+                                    return (
+                                      <>
+                                        R$ {brl(base)} → Lucro: <strong>R$ {brl((opp.roi_pct / 100) * base)}</strong>
+                                      </>
+                                    );
+                                  })()}
                                 </div>
                               </div>
                               
