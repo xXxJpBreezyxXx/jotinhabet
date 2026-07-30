@@ -96,3 +96,34 @@ Reclassificações aplicadas em `regras.ts` + KTO.md (whitelist) + Diretrizes §
 
 Ressalva permanente (lição KTO): monitorar a primeira liquidação real de abandono das
 casas reclassificadas (Betano, Stake, BolsaDeAposta, Rei do Pitaco, 1xbet).
+
+---
+
+## Lote 29/07/2026 — casas novas (Luvabet, Rivalo, Brazino777, Aposta Ganha)
+
+Auditoria feita ao integrar as casas novas. Metodologia igual à de 17/07: só o documento
+oficial da própria casa, citação literal + URL; sem regra acessível = **?** (nunca chutar).
+
+| Casa | Documento | Regra publicada (abandono no Vencedor) | **Sugestão** | Confiança | Fonte |
+|---|---|---|:---:|:---:|---|
+| Brazino777 | acessível | **AUTOCONTRADITÓRIA.** A mesma seção "Tênis" diz "No caso de uma aposentadoria e de passar por cima de qualquer jogador, todas as apostas indecisas são consideradas nulas" E TAMBÉM "se a partida tiver começado e pelo menos **um ponto** tiver sido jogado e depois disso o jogador se aposentar, **todas as apostas são consideradas válidas**" | **?** 🚨 | alta (no texto, não na interpretação) | [brazino777.bet.br/blog/betting-terms](https://www.brazino777.bet.br/blog/betting-terms) |
+| Luvabet | acessível | **NÃO PUBLICADA.** `/page/terms-and-conditions` (95k chars, 534 linhas) é T&C genérico, sem nenhuma seção por esporte; todas as ocorrências de "retirada" são de SAQUE de valores. `/page/termos-de-apostas` é stub de 270 chars | **?** ⚠️ | alta | [luva.bet.br/page/terms-and-conditions](https://luva.bet.br/page/terms-and-conditions) |
+| Aposta Ganha | acessível | **NÃO PUBLICADA.** `/regras-de-apostas` (25k chars) não tem UMA menção a desistência/aposentadoria/abandono/walkover | **remover de A** 🚨 | alta | [apostaganha.bet.br/regras-de-apostas](https://apostaganha.bet.br/regras-de-apostas) |
+| Rivalo | não localizado | O rodapé de `/pt/` não expõe link de regras (só links de aposta ao vivo) | **?** ⚠️ | — | — |
+
+### Decisões aplicadas
+
+- **Luvabet, Rivalo, Brazino777**: ficam FORA de A e de B → `grupoTenis()` = `null` → todo
+  cruzamento de tênis/tênis de mesa delas é rejeitado. Nenhuma pôde ser promovida.
+- **Brazino777** merece destaque: o texto dela não é nem A nem B. Liquidar como válido após
+  **1 ponto** é ainda mais agressivo que o Grupo B (que exige 1 SET completo). Logo, cruzá-la
+  com uma casa B *também* daria red quando a desistência acontece antes do 1º set fechar.
+- **Aposta Ganha: REMOVIDA do Grupo A.** Ela estava em A "por status quo" com confiança
+  **baixa**, e o único fundamento registrado em 17/07 era *"sportsbook BETBY = mesma
+  plataforma da Alfa/Blaze, ambas void"*. **Esse fundamento é falso**: o recon de 29/07
+  provou que ela roda **NSoft** (tenant `aposta_ganha_sportsbook`), não BetBy. Como ela
+  passou a ser FONTE de odds em 29/07 (antes era só alvo de recon), a classificação deixou
+  de ser inócua e passou a gerar cruzamento real de tênis com regra não verificada — mesma
+  situação que motivou remover a Novibet. Doutrina: desconhecida bloqueia.
+- **Bet7k** continua em A pelo mesmo "status quo" frágil, mas NÃO é fonte de odds hoje —
+  fica no radar para quando/se for integrada.

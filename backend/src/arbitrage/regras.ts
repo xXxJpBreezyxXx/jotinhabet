@@ -29,8 +29,20 @@ import { normalizarMercado } from './markets';
 //    ITF/UTR: void) nunca dá red por abandono — em B perderia em ITF/UTR×B;
 //  - apostaganha e bet7k mantidas em A por status quo, mas a regra de tênis delas não está
 //    publicada acessível (só sinal de plataforma/regra genérica) — confirmar se ganharem volume.
+// Auditoria de W.O. das casas novas em 29/07/2026 (GRUPOS_WO_CASAS.md §lote 29/07):
+//  - luvabet, rivalo, brazino777: NÃO classificadas → grupoTenis() = null → tênis
+//    bloqueado (fail-safe). Brazino777 é o caso mais perigoso: a MESMA seção de tênis diz
+//    "aposentadoria → apostas nulas" e depois "se pelo menos UM PONTO foi jogado e o
+//    jogador se aposenta, todas as apostas são válidas" — não é A nem B (é mais agressivo
+//    que B, que exige 1 SET), então cruzá-la com B também daria red.
+//  - apostaganha REMOVIDA de A: estava aqui "por status quo" com confiança BAIXA, e o
+//    único fundamento registrado era "sportsbook BETBY = mesma plataforma da Alfa/Blaze,
+//    ambas void". Esse fundamento é FALSO — o recon de 29/07 provou que ela é **NSoft**
+//    (tenant aposta_ganha_sportsbook). O doc /regras-de-apostas (25k chars) não tem
+//    UMA menção a desistência/abandono/W.O. Como ela passou a ser FONTE de odds em
+//    29/07, valia a mesma doutrina da Novibet: regra inacessível → desconhecida bloqueia.
 const GRUPO_A = new Set([
-  'alfabet', 'aposta1', 'apostaganha', 'bet365', 'bet7k', 'betano', 'betao', 'betboom',
+  'alfabet', 'aposta1', 'bet365', 'bet7k', 'betano', 'betao', 'betboom',
   'betnacional', 'betsul', 'blaze', 'pixbet', 'seubet', 'superbet', 'vbet',
 ]);
 const GRUPO_B = new Set(['pinnacle', 'betwarrior', 'kto', 'stake', 'bolsadeaposta', 'reidopitaco', '1xbet']);
