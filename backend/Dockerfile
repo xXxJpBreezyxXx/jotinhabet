@@ -21,9 +21,21 @@ RUN npm run build
 ENV NODE_ENV=production
 EXPOSE 4000
 
-# Healthcheck simples via Node (a imagem não garante curl/wget)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:'+(process.env.PORT||4000)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+# Healthcheck via Node (a imagem não garante curl/wget). Aponta para
+# /api/health/live — LIVENESS puro, sem tocar no banco.
+#
+# Por que não o /api/health: ele faz um select no Supabase, então uma lentidão ou blip do
+# banco reprovava o probe e, com 3 falhas seguidas, o Swarm matava a task (exit 137
+# "unhealthy container"). Probe de liveness não pode depender de serviço externo.
+#
+# Tolerâncias folgadas de propósito: a VPS tem 1 CORE e o mesmo core roda Chromium dos
+# scrapers e o `docker build` de todo deploy. Com timeout=5s/retries=3 uma janela de ~90s
+# de CPU saturada bastava para matar um backend saudável.
+#   start-period=90s : boot faz DB + scheduler + Telegram + monitor de GREEN
+#   timeout=10s      : p99 medido é ~1,9s em repouso; 10s cobre CPU saturada
+#   retries=5        : só desiste após ~2,5min de falha contínua (era ~1,5min)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
+  CMD node -e "require('http').get('http://localhost:'+(process.env.PORT||4000)+'/api/health/live',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 # X virtual (Xvfb) para os scrapers poderem subir o Chromium em modo HEADED: casas atrás
 # de Cloudflare (Rivalo, Brazino777, Betsul) barram o fingerprint headless mesmo com

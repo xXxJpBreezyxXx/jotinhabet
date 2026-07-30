@@ -67,12 +67,35 @@ const geminiProvider = new GeminiProvider();
 const openaiProvider = new OpenAIProvider();
 
 // Health Check Endpoint
+/**
+ * LIVENESS puro — é isto que o HEALTHCHECK do Docker consulta.
+ *
+ * Responde na hora, sem tocar no banco e sem nenhum await: o único que ele responde
+ * "estou vivo" é o event loop conseguir atender. Um probe de liveness NÃO pode depender
+ * de serviço externo — com o /api/health (que faz select no Supabase) uma lentidão ou
+ * blip do banco derrubava um backend perfeitamente saudável, porque 3 falhas seguidas
+ * fazem o Swarm matar a task com SIGKILL (exit 137).
+ *
+ * O /api/health continua existindo com o status rico (banco + IA) para o painel.
+ */
+app.get('/api/health/live', (_req, res) => {
+  res.json({ status: 'ok', uptime_s: Math.round(process.uptime()) });
+});
+
 app.get('/api/health', async (req, res) => {
   let dbStatus = 'disconnected';
   try {
     // Check if we can perform a simple select (even if it returns empty, it verifies client connection status)
-    const { error } = await supabase.from('casas_apostas').select('id').limit(1);
-    if (!error || error.code !== 'PGRST116') { // PGRST116 is just "no rows returned" in some cases or similar, but if connection failed it would be a network error
+    // TIMEOUT: sem ele a consulta pode pendurar indefinidamente (o client não impõe limite)
+    // e o /api/health nunca responde — o painel fica com o indicador girando pra sempre.
+    const consulta = supabase.from('casas_apostas').select('id').limit(1);
+    const limite = new Promise<{ error: { code: string } }>((r) =>
+      setTimeout(() => r({ error: { code: 'TIMEOUT_LOCAL' } }), 4000)
+    );
+    const { error } = (await Promise.race([consulta, limite])) as { error: { code: string } | null };
+    if (error?.code === 'TIMEOUT_LOCAL') {
+      dbStatus = 'timeout';
+    } else if (!error || error.code !== 'PGRST116') { // PGRST116 is just "no rows returned" in some cases or similar, but if connection failed it would be a network error
       dbStatus = 'connected';
     }
   } catch (err) {
