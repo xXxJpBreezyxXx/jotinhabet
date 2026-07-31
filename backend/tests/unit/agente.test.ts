@@ -249,8 +249,12 @@ describe('catálogo de casas', () => {
 
   it('resumo do prompt é compacto e sem flag ambígua (cota de tokens/minuto da Groq)', () => {
     const resumo = resumoCasasParaPrompt();
-    expect(resumo.length).toBeLessThan(2600);
-    expect(resumo).toMatch(/CASAS INTEGRADAS \(\d+\)/);
+    expect(resumo.length).toBeLessThan(3200);
+    expect(resumo).toMatch(/CASAS INTEGRADAS: \d+/);
+    // Contagem tem que vir PRONTA (o modelo erra ao contar flags numa linha densa).
+    expect(resumo).toMatch(/odd AO VIVO \(in-play\): .*KTO/);
+    expect(resumo).toMatch(/exigem browser/);
+    expect(resumo).toMatch(/t[êe]nis BLOQUEADO/);
     expect(resumo).toContain('KTO[kto |');
     // "browser" e o grupo de W.O. "B" não podem se confundir (antes era "SVB").
     expect(resumo).toContain('wo:B');

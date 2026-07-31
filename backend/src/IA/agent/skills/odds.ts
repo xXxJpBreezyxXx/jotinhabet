@@ -51,13 +51,26 @@ export const skillListarCasas: Skill = {
   parametros: { type: 'object', properties: {}, additionalProperties: false },
   async executar() {
     const casas = catalogoCasas();
+    // Agregados PRONTOS antes da lista: pedir para o modelo contar flags em 22 objetos dá
+    // erro de leitura (num teste em produção ele listou 7 casas com odd ao vivo quando
+    // são 3). Com as listas já filtradas, a resposta é determinística.
     return {
       total_integradas: casas.length,
+      resumo: {
+        casas_com_odd_ao_vivo: casas.filter((c) => c.odd_ao_vivo).map((c) => c.nome),
+        casas_fonte_da_varredura: casas.filter((c) => c.fonte_scanner).map((c) => c.nome),
+        casas_so_revalidacao: casas.filter((c) => !c.fonte_scanner).map((c) => c.nome),
+        casas_que_exigem_browser: casas.filter((c) => ehBrowser(c)).map((c) => c.nome),
+        casas_com_tenis_bloqueado: casas.filter((c) => c.grupo_wo_tenis === null).map((c) => c.nome),
+        grupo_wo_A: casas.filter((c) => c.grupo_wo_tenis === 'A').map((c) => c.nome),
+        grupo_wo_B: casas.filter((c) => c.grupo_wo_tenis === 'B').map((c) => c.nome),
+      },
       integradas: casas,
       sem_integracao_de_odds: casasSemIntegracao(),
       nota:
-        'Casas com transporte "browser"/"browser-headed" sobem Chromium: consulta lenta (~10-30s). ' +
-        'Em comparar_odds_casas elas só entram com incluir_browser=true.',
+        'Use as listas de `resumo` para responder contagens — não recontar a lista `integradas`. ' +
+        'Casas de browser sobem Chromium (consulta de 10-30s) e em comparar_odds_casas só entram com incluir_browser=true. ' +
+        'Tênis só cruza casas do MESMO grupo de W.O.',
     };
   },
 };

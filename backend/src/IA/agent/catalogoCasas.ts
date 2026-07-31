@@ -281,11 +281,19 @@ export function resumoCasasParaPrompt(): string {
       .join(' ');
     return `${c.nome}[${c.chave} | ${flags}]`;
   });
+  // Listas AGREGADAS explícitas antes da lista densa: pedir para o modelo contar flags
+  // numa linha com 22 casas dá resposta errada (em teste real ele disse "9 casas com odd
+  // ao vivo" quando são 3). Contagem tem que vir pronta, não ser deduzida.
+  const casas = catalogoCasas();
+  const nomes = (f: (c: CasaCatalogada) => boolean) => casas.filter(f).map((c) => c.nome).join(', ');
   return (
-    `CASAS INTEGRADAS (${linhas.length}) — a chave antes do "|" é o que as skills aceitam. ` +
-    `Flags: scan=fonte da varredura, live=odd ao vivo, browser=consulta lenta, wo=grupo de W.O. do tênis (? = tênis BLOQUEADO nessa casa):\n` +
+    `CASAS INTEGRADAS: ${linhas.length}. Use ESTAS listas para qualquer contagem (não reconte a lista detalhada):\n` +
+    `- odd AO VIVO (in-play): ${nomes((c) => c.odd_ao_vivo)}\n` +
+    `- exigem browser (consulta lenta): ${nomes((c) => c.transporte === 'browser' || c.transporte === 'browser-headed')}\n` +
+    `- tênis BLOQUEADO (grupo de W.O. desconhecido): ${nomes((c) => c.grupo_wo_tenis === null)}\n` +
+    `Detalhe por casa (chave antes do "|" é o que as skills aceitam; scan=fonte da varredura, live=ao vivo, browser=lenta, wo=grupo de W.O. do tênis):\n` +
     `${linhas.join('; ')}\n` +
-    `Detalhes (plataforma, mercados, limitações) na skill listar_casas. Sem integração de odds: ${casasSemIntegracao()
+    `Plataforma/mercados/limitações na skill listar_casas. Sem integração de odds: ${casasSemIntegracao()
       .map((c) => c.nome)
       .join(', ')}.`
   );
