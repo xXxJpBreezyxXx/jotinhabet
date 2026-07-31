@@ -171,6 +171,26 @@ export class ArbitrageScannerV2 {
   /** Teto de scrapers de API coletados em paralelo. I/O-bound; o limite protege a VPS 1-core. */
   private static readonly LIMITE_PARALELO = 5;
 
+  /**
+   * Fontes REAIS da varredura, para quem precisa listar as casas sem instanciar o
+   * scanner (catálogo de casas do Agente — IA/agent/catalogoCasas.ts). Lê as mesmas
+   * allowlists usadas na varredura, então não existe versão paralela para desatualizar.
+   */
+  private static fontesCache: { api: string[]; browser: string[]; todas: string[] } | null = null;
+
+  static fontesDaVarredura(): { api: string[]; browser: string[]; todas: string[] } {
+    if (ArbitrageScannerV2.fontesCache) return ArbitrageScannerV2.fontesCache;
+    // INTERSEÇÃO com os scrapers realmente instanciados: as allowlists contêm nomes que
+    // não estão em `this.scrapers` (BetPix365, MC Games, Stake são só revalidação), e
+    // devolver a allowlist crua fazia o catálogo do Agente anunciar essas casas como
+    // fonte da varredura — informação errada para o modelo.
+    const instanciados = new Set(new ArbitrageScannerV2().scrapers.map((s) => s.getNome()));
+    const api = Array.from(ArbitrageScannerV2.SCRAPERS_API).filter((n) => instanciados.has(n));
+    const browser = Array.from(ArbitrageScannerV2.SCRAPERS_BROWSER).filter((n) => instanciados.has(n));
+    ArbitrageScannerV2.fontesCache = { api, browser, todas: Array.from(new Set([...api, ...browser])) };
+    return ArbitrageScannerV2.fontesCache;
+  }
+
   /** Idade máxima aceita p/ odds de browser vindas do cache do BrowserScrapeWorker (25min). */
   private static readonly BROWSER_CACHE_MAX_AGE_MS = 25 * 60 * 1000;
 

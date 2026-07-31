@@ -16,7 +16,12 @@ import { RevalidationService } from './core/revalidationService';
 import { getValorAtivas, deleteValor, getMiddlesAtivos, deleteMiddle } from './core/valorRepo';
 import { getResumoCalibracao, getAlertasRecentes } from './core/calibracaoRepo';
 import { requireApiToken } from './auth/apiToken';
-import { generateWithFallback } from './IA/aiProvider';
+import { generateWithFallback, statusProvedores, cadeiaTexto } from './IA/aiProvider';
+import { rodarAgente, pediuEscritaExplicita } from './IA/agent/agentLoop';
+import { skillsParaUI } from './IA/agent/registry';
+import { catalogoCasas, casasSemIntegracao } from './IA/agent/catalogoCasas';
+import { cadeiaAgente, criarMotor } from './IA/agent/chatModels';
+import { calcularPromocao } from './core/promocoes';
 import { WhatsAppNotifier } from './notify/whatsapp';
 import { avisarDeployWhatsApp } from './notify/deployNotice';
 import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
@@ -110,6 +115,10 @@ app.get('/api/health', async (req, res) => {
       ai: {
         gemini: process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY.includes('your-') ? 'configured' : 'mock-mode',
         openai: process.env.OPENAI_API_KEY && !process.env.OPENAI_API_KEY.includes('your-') ? 'configured' : 'mock-mode',
+        groq: process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.includes('your-') ? 'configured' : 'mock-mode',
+        // Cadeia efetiva + quem está em cooldown por cota esgotada (ver IA/aiProvider.ts).
+        cadeia: cadeiaTexto(),
+        provedores: statusProvedores(),
       }
     }
   });
@@ -152,6 +161,34 @@ const COPILOT_SYSTEM =
   'sobre as entradas/operações do usuário, a banca ou as oportunidades atuais, responda COM BASE NESSES DADOS, citando ' +
   'números exatos. Se a informação não estiver no contexto, diga que não tem acesso a ela (não invente).';
 
+// Catálogo de SKILLS do agente + estado dos provedores de IA (a aba "IA & Automação"
+// mostra isso para o usuário saber o que o agente consegue fazer e com qual motor).
+app.get('/api/ai/skills', (_req, res) => {
+  const skills = skillsParaUI();
+  res.json({
+    total: skills.length,
+    skills,
+    grupos: Array.from(new Set(skills.map((s) => s.grupo))),
+    casas_integradas: catalogoCasas().length,
+    casas: catalogoCasas().map((c) => ({
+      nome: c.nome,
+      chave: c.chave,
+      plataforma: c.plataforma,
+      fonte_scanner: c.fonte_scanner,
+      odd_ao_vivo: c.odd_ao_vivo,
+      grupo_wo_tenis: c.grupo_wo_tenis,
+    })),
+    casas_sem_integracao: casasSemIntegracao().map((c) => c.nome),
+    provedores: statusProvedores(),
+    cadeia_agente: cadeiaAgente(),
+    cadeia_texto: cadeiaTexto(),
+    // O agente pode usar um modelo diferente do de texto (GROQ_MODEL_AGENTE): é ESTE
+    // que o painel deve mostrar como motor ativo.
+    modelo_agente: criarMotor(cadeiaAgente()[0]).modelo,
+    agente_ativo: process.env.AGENT_DESATIVADO !== '1',
+  });
+});
+
 app.post('/api/ai/chat', requireApiToken, async (req, res) => {
   const { messages } = req.body;
   // Mantém só mensagens com conteúdo textual real e limita o histórico enviado ao LLM.
@@ -161,6 +198,34 @@ app.post('/api/ai/chat', requireApiToken, async (req, res) => {
   if (validas.length === 0) {
     return res.status(400).json({ error: 'Envie ao menos uma mensagem com conteúdo.' });
   }
+
+  // MODO AGENTE (default): tool-calling com as skills de scraper/odds/radar/banca/
+  // regras/cálculo/conhecimento. `modo:'simples'` no corpo (ou AGENT_DESATIVADO=1)
+  // cai no chat de turno único abaixo — válvula de escape se um provedor quebrar
+  // function calling.
+  const modoSimples = req.body?.modo === 'simples' || process.env.AGENT_DESATIVADO === '1';
+  if (!modoSimples) {
+    try {
+      const r = await rodarAgente(
+        validas.map((m: any) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content.trim() })),
+        revalidation
+      );
+      const usadas = r.passos.map((p) => p.skill).join(', ');
+      console.log(`🤖 [Agente] ${r.provider}/${r.modelo} — ${r.passos.length} skill(s)${usadas ? `: ${usadas}` : ''}`);
+      return res.json({
+        reply: r.reply,
+        provider: r.provider,
+        modelo: r.modelo,
+        passos: r.passos,
+        avisos: r.avisos,
+        ...(r.acao ? { acao: r.acao } : {}),
+      });
+    } catch (error: any) {
+      console.error('[ai/chat agente] erro:', error?.message || error);
+      // Cai no modo simples em vez de devolver 500 — melhor uma resposta sem skills.
+    }
+  }
+
   try {
     // Monta o histórico multi-turno em um prompt textual (a interface IAProvider é single-prompt).
     const historico = validas
@@ -183,6 +248,18 @@ app.post('/api/ai/chat', requireApiToken, async (req, res) => {
     if (acao.erro || !acao.dados) {
       return res.json({
         reply: `${acao.replySemBloco}\n\n❌ A ação de criação veio malformada (${acao.erro}). Reformule o pedido com evento, esporte, mercado, opções, odds e casas.`,
+        provider,
+      });
+    }
+    // MESMO gate de escrita do modo agente: o modo simples é escolhido pelo CLIENTE, e sem
+    // isto era um caminho para criar oportunidade (que pode disparar alerta no grupo) sem
+    // pedido explícito do usuário.
+    const ultimaDoUsuario = [...validas].reverse().find((m: any) => m.role !== 'assistant')?.content || '';
+    if (!pediuEscritaExplicita(ultimaDoUsuario)) {
+      return res.json({
+        reply:
+          `${acao.replySemBloco}\n\n🛡️ Não criei nada: a criação de oportunidade só roda quando você pede explicitamente ` +
+          '(ex.: "crie essa oportunidade no radar"). Confirme e eu lanço.',
         provider,
       });
     }
@@ -654,15 +731,35 @@ app.post('/api/promocoes', async (req, res) => {
   if ((oddPromocao !== null && oddPromocao <= 1) || (oddCobertura !== null && oddCobertura <= 1)) {
     return res.status(400).json({ error: 'Odds devem ser maiores que 1.' });
   }
-  // Cobertura equalizada quando ausente: o valor que iguala o lucro dos dois
-  // cenários — SNR: vp×(op−1)/oc (só o ganho da ficha precisa de hedge);
-  // qualificativa: vp×op/oc (retorno cheio dos dois lados).
-  let valorCobertura = num(b.valor_cobertura);
-  if (valorCobertura === null && valorPromocao !== null && oddPromocao !== null && oddCobertura !== null) {
-    valorCobertura = r2(promoType === 'FREEBET_SNR'
-      ? (valorPromocao * (oddPromocao - 1)) / oddCobertura
-      : (valorPromocao * oddPromocao) / oddCobertura);
+  // Valor <= 0 precisa falhar APONTANDO para si: sem isto o cálculo devolvia null e o
+  // erro reclamava de valor_cobertura, mandando o usuário mexer no campo errado.
+  if (valorPromocao !== null && valorPromocao <= 0) {
+    return res.status(400).json({ error: 'valor_promocao deve ser maior que zero.' });
   }
+  // Cobertura equalizada e lucro/ROI vêm de core/promocoes.ts — MESMA matemática que o
+  // Agente usa na skill calcular_cobertura_promocao (antes havia duas cópias da
+  // fórmula, e duas cópias divergem no primeiro ajuste). As CASAS entram no cálculo para
+  // a comissão de exchange (Bolsa de Aposta 1,5%) valer aqui também, como na skill.
+  const tipoPromo = promoType === 'QUALIFYING' ? ('QUALIFICATIVA' as const) : ('FREEBET_SNR' as const);
+  // Aporte 0/negativo = ausente (0 não é uma cobertura válida): antes ele era gravado
+  // como 0 mas o lucro vinha do aporte equalizado — número que nunca existiu na mesa.
+  const aporteInformado = (num(b.valor_cobertura) ?? 0) > 0 ? num(b.valor_cobertura) : null;
+  const calcular = (coverStake: number | null) =>
+    valorPromocao !== null && oddPromocao !== null && oddCobertura !== null
+      ? calcularPromocao({
+          tipo: tipoPromo,
+          promoStake: valorPromocao,
+          promoOdd: oddPromocao,
+          coverOdd: oddCobertura,
+          coverStake,
+          casaPromo: casaPromocao,
+          casaCobertura,
+        })
+      : null;
+
+  const calc = calcular(aporteInformado);
+  let valorCobertura = aporteInformado;
+  if (valorCobertura === null && calc) valorCobertura = calc.coverStakeEqualizado;
   const faltando = [
     !casaPromocao && 'casa_promocao', valorPromocao === null && 'valor_promocao',
     !evento && 'evento', !casaCobertura && 'casa_cobertura',
@@ -678,13 +775,10 @@ app.post('/api/promocoes', async (req, res) => {
     if (oddPromocao === null || oddCobertura === null) {
       return res.status(400).json({ error: 'Informe o lucro OU as odds das duas pernas (para o cálculo automático).' });
     }
-    const lucroPromoWin = promoType === 'FREEBET_SNR'
-      ? valorPromocao! * (oddPromocao - 1) - valorCobertura!   // ganho SNR (sem a ficha) − custo da cobertura
-      : valorPromocao! * oddPromocao - investido;
-    const lucroCoverWin = promoType === 'FREEBET_SNR'
-      ? valorCobertura! * (oddCobertura - 1)                   // freebet perdida custa R$ 0
-      : valorCobertura! * oddCobertura - investido;
-    lucro = r2(Math.min(lucroPromoWin, lucroCoverWin));
+    // Recalcula com o aporte efetivamente gravado (pode ter vindo do corpo, não do equalizado).
+    const comAporte = calcular(valorCobertura);
+    if (!comAporte) return res.status(400).json({ error: 'Valores inválidos para o cálculo do lucro (valor > 0 e odds > 1).' });
+    lucro = comAporte.lucroGarantido;
   }
   const roiPct = num(b.roi_pct) ?? (investido > 0 ? r2((lucro / investido) * 100) : null);
 

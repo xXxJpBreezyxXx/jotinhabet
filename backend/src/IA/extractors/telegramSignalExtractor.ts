@@ -1,4 +1,4 @@
-import { generateFromImageWithFallback } from '../aiProvider';
+import { generateFromImageWithFallback, ProviderName } from '../aiProvider';
 import { extrairJsonDeLLM } from '../jsonUtils';
 
 /**
@@ -43,7 +43,8 @@ export interface ResultadoExtracao {
   sinal: SinalExtraido | null;
   /** Preenchido quando a imagem é um print de casa (tipo='print_casa'). */
   contexto?: ContextoCasa | null;
-  provider?: 'gemini' | 'openai';
+  /** Qual provedor da cadeia respondeu (ver IA/aiProvider.ts — inclui 'groq'). */
+  provider?: ProviderName;
   motivoDescarte?: string; // 'nao_e_sinal' | 'print_casa' | 'mock_mode' | 'json_invalido' | 'validacao: ...'
 }
 

@@ -124,6 +124,50 @@ export async function montarContextoApp(): Promise<string> {
   return `===== CONTEXTO_APP (dados AO VIVO do JotinhaBet; use-os nas respostas) =====\n${secoes.join('\n')}\n===== FIM DO CONTEXTO_APP =====`;
 }
 
+/**
+ * Retrato COMPACTO para o system prompt do AGENTE (IA/agent/agentLoop.ts).
+ *
+ * O CONTEXTO_APP completo custa ~2-3k tokens e é reenviado em TODA rodada do loop de
+ * ferramentas — com o teto de tokens/minuto do free tier da Groq (8k-12k), ele sozinho
+ * estourava o limite (HTTP 413). Aqui vão só os números que orientam a conversa
+ * (banca, saldos, contagens, 3 melhores do radar); o detalhe o agente busca por skill
+ * (surebets_no_radar, banca_e_saldos, historico_entradas, value_bets_e_middles).
+ */
+export async function montarContextoAgente(): Promise<string> {
+  const partes: string[] = [];
+  const agora = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date());
+  partes.push(`agora: ${agora} (America/Sao_Paulo)`);
+
+  try {
+    partes.push(`banca_ativa: R$ ${(await bancaParaAlertas()).toFixed(2)}`);
+  } catch { partes.push('banca_ativa: indisponível'); }
+
+  try {
+    const { data } = await supabase.from('app_config').select('valor').eq('chave', 'saldos_casas').maybeSingle();
+    const saldos = data?.valor ? JSON.parse(data.valor) : [];
+    const comSaldo = (Array.isArray(saldos) ? saldos : [])
+      .filter((s: any) => num(s.valor) && Number(s.valor) > 0)
+      .map((s: any) => `${s.casa || s.nome}:${r2(s.valor)}`);
+    partes.push(`saldos_por_casa: ${comSaldo.length ? comSaldo.join(', ') : 'nenhum declarado'}`);
+  } catch { partes.push('saldos_por_casa: indisponível'); }
+
+  try {
+    const { data } = await supabase
+      .from('oportunidades')
+      .select('evento, esporte, mercado, casa_a_nome, casa_b_nome, roi_pct')
+      .eq('status', 'detectada')
+      .order('roi_pct', { ascending: false })
+      .limit(3);
+    const top = (data || []).map((o: any) => `${o.evento} (${o.esporte}) ${o.casa_a_nome}×${o.casa_b_nome} ROI ${r2(o.roi_pct)}%`);
+    partes.push(`radar_top3: ${top.length ? top.join(' | ') : 'vazio'}`);
+  } catch { partes.push('radar_top3: indisponível'); }
+
+  return `===== CONTEXTO (dados ao vivo; use skills para o detalhe) =====\n${partes.join('\n')}\n=====`;
+}
+
 /** Protocolo de ação anexado ao system prompt do chat. */
 export const PROTOCOLO_ACAO_COPILOT = `
 FERRAMENTA DISPONÍVEL — criar_oportunidade:

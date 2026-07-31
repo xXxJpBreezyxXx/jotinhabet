@@ -57,6 +57,13 @@ export function casaTemScraper(casa: string): boolean {
   return !!SCRAPER_FACTORY[normalizarCasa(canonizarCasa(casa || ''))];
 }
 
+/** Chaves de TODAS as casas com busca dirigida (oddsDoEvento) — fonte única para o
+ *  catálogo de casas do Agente (IA/agent/catalogoCasas.ts), que assim nunca desatualiza
+ *  quando uma casa nova entra no SCRAPER_FACTORY. */
+export function casasComScraper(): string[] {
+  return Object.keys(SCRAPER_FACTORY);
+}
+
 /** Resultado da checagem ao vivo das duas pernas (gate pré-alerta). */
 export interface PernasFrescas {
   ok: boolean;            // surebet segue de pé (ROI > 0) com odds atuais

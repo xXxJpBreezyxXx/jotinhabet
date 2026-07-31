@@ -24,7 +24,9 @@ import {
   Plus,
   Radar,
   Gift,
-  Menu
+  Menu,
+  Wrench,
+  ChevronDown
 } from 'lucide-react';
 
 interface HealthStatus {
@@ -814,15 +816,38 @@ export default function App() {
 
 
   // AI Test Form State
-  // Chat do Copiloto de IA (aba "IA & Automação")
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  // Chat do AGENTE de IA (aba "IA & Automação").
+  // A mensagem do assistente carrega o TRACE das skills usadas (passos) e qual motor
+  // respondeu — é o que dá para o usuário auditar de onde veio cada número.
+  type PassoSkill = { skill: string; ok: boolean; ms: number; resumo: string; erro?: string };
+  type ChatMsg = {
+    role: 'user' | 'assistant';
+    content: string;
+    passos?: PassoSkill[];
+    provider?: string;
+    modelo?: string;
+    avisos?: string[];
+  };
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatSkills, setChatSkills] = useState<{
+    total: number;
+    skills: { nome: string; grupo: string; descricao: string; custosa: boolean; escrita: boolean }[];
+    casas_integradas: number;
+    provedores: { provider: string; configurado: boolean; em_cooldown: boolean; modelo: string | null }[];
+    cadeia_agente: string[];
+    modelo_agente?: string;
+    agente_ativo: boolean;
+  } | null>(null);
+  const [chatSkillsAbertas, setChatSkillsAbertas] = useState(false);
+  const [chatTraceAberto, setChatTraceAberto] = useState<Record<number, boolean>>({});
+  const chatFimRef = useRef<HTMLDivElement | null>(null);
   const chatQuickPrompts = [
-    'Como foi meu desempenho? Resuma minhas últimas entradas (lucro e ROI).',
-    'Qual a melhor surebet ativa no radar agora pra minha banca e meus saldos?',
-    'Tenho uma odd promocional — me ajude a montar e lançar uma surebet no radar.',
-    'Quais regras de tênis quebram uma arbitragem?'
+    'Compare as odds de um jogo entre as casas e veja se dá surebet.',
+    'Tenho uma freebet de R$ 50 — qual odd usar e quanto cubro?',
+    'Qual a melhor surebet ativa no radar agora pra minha banca?',
+    'Monte a cobertura sequencial de uma múltipla qualificadora de R$ 50.'
   ];
   const [simulationMode, setSimulationMode] = useState(true);
   const [opportunities, setOpportunities] = useState<OpportunityItem[]>([]);
@@ -1785,7 +1810,7 @@ export default function App() {
     const content = (text ?? chatInput).trim();
     if (!content || chatLoading) return;
 
-    const nextMessages = [...chatMessages, { role: 'user' as const, content }];
+    const nextMessages: ChatMsg[] = [...chatMessages, { role: 'user' as const, content }];
     setChatMessages(nextMessages);
     setChatInput('');
     setChatLoading(true);
@@ -1793,17 +1818,57 @@ export default function App() {
       const response = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: nextMessages }),
+        // Só role/content vão para o backend: o trace (passos/provider) é metadado de
+        // exibição e reenviá-lo inflaria o histórico que o agente reprocessa a cada turno.
+        body: JSON.stringify({ messages: nextMessages.map(m => ({ role: m.role, content: m.content })) }),
       });
       const data = await response.json();
       const reply = data.reply || (data.error ? `Erro: ${data.error}` : 'Resposta vazia do servidor.');
-      setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+      setChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: reply,
+        passos: Array.isArray(data.passos) ? data.passos : undefined,
+        provider: data.provider,
+        modelo: data.modelo,
+        avisos: Array.isArray(data.avisos) && data.avisos.length ? data.avisos : undefined,
+      }]);
+      // Uma ação de escrita (criar oportunidade / registrar promoção) mexeu no banco:
+      // recarrega o radar para o painel não ficar mostrando estado velho.
+      if (data.acao) fetchOpportunities();
     } catch (err: any) {
       setChatMessages(prev => [...prev, { role: 'assistant', content: `Falha de conexão com o backend: ${err.message || err}` }]);
     } finally {
       setChatLoading(false);
     }
   };
+
+  // Catálogo de skills do agente (o que ele consegue fazer) — carregado ao abrir a aba.
+  useEffect(() => {
+    if (activeTab !== 'ai-test' || chatSkills) return;
+    fetch('/api/ai/skills')
+      .then(r => r.json())
+      .then(d => {
+        if (!d || !Array.isArray(d.skills)) return;
+        // Normaliza os campos que o painel desreferencia: um backend mais antigo pode
+        // responder só `skills`, e um .find()/[0] em undefined derruba a aba inteira.
+        setChatSkills({
+          ...d,
+          provedores: Array.isArray(d.provedores) ? d.provedores : [],
+          cadeia_agente: Array.isArray(d.cadeia_agente) ? d.cadeia_agente : [],
+          casas_integradas: Number(d.casas_integradas) || 0,
+          total: Number(d.total) || d.skills.length,
+        });
+      })
+      .catch(() => { /* painel de skills é informativo: falha não bloqueia o chat */ });
+  }, [activeTab, chatSkills]);
+
+  // Auto-scroll da LISTA de mensagens (não da página): scrollIntoView rola todos os
+  // ancestrais roláveis e, no mobile, empurrava a página inteira a cada resposta.
+  useEffect(() => {
+    const fim = chatFimRef.current;
+    const lista = fim?.parentElement;
+    if (lista) lista.scrollTop = lista.scrollHeight;
+  }, [chatMessages, chatLoading]);
 
   const isDbConnected = systemStatus?.services?.database === 'connected';
 
@@ -4267,14 +4332,77 @@ export default function App() {
           <div className="glass-panel chat-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column' }}>
             <h3 className="card-title" style={{ marginBottom: '4px' }}>
               <Cpu size={18} style={{ color: 'var(--color-primary)' }} />
-              Copiloto de Arbitragem (IA)
+              Agente de Arbitragem (IA)
             </h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-              Tire dúvidas sobre surebets, gestão de banca e regras das casas. As respostas são assistivas — a decisão e a aposta são sempre suas.
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '10px' }}>
+              O agente consulta odds ao vivo nas casas, o radar, sua banca, as regras e as calculadoras antes de responder.
+              A decisão e a aposta continuam sendo suas.
             </p>
 
+            {/* Skills do agente + motor ativo */}
+            {chatSkills && (
+              <div style={{ marginBottom: '14px', border: '1px solid var(--panel-border)', borderRadius: '10px', background: 'rgba(255,255,255,0.03)' }}>
+                <button
+                  onClick={() => setChatSkillsAbertas(v => !v)}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px',
+                    background: 'transparent', border: 'none', color: 'var(--text-primary)', cursor: 'pointer',
+                    fontSize: '12px', textAlign: 'left'
+                  }}
+                >
+                  <Wrench size={14} style={{ color: 'var(--color-primary)', flexShrink: 0 }} />
+                  <span style={{ fontWeight: 700 }}>{chatSkills.total} skills</span>
+                  <span style={{ color: 'var(--text-muted)' }}>· {chatSkills.casas_integradas} casas integradas</span>
+                  {(() => {
+                    const ativo = (chatSkills.provedores || []).find(p => p.provider === (chatSkills.cadeia_agente || [])[0]);
+                    return ativo ? (
+                      <span style={{ color: ativo.configurado && !ativo.em_cooldown ? 'var(--color-success)' : 'var(--color-warning)', marginLeft: 'auto', marginRight: '4px' }}>
+                        {ativo.provider}{chatSkills.modelo_agente || ativo.modelo ? ` · ${chatSkills.modelo_agente || ativo.modelo}` : ''}{ativo.em_cooldown ? ' (cota)' : ''}
+                      </span>
+                    ) : null;
+                  })()}
+                  <ChevronDown size={14} style={{ transform: chatSkillsAbertas ? 'rotate(180deg)' : 'none', transition: 'transform .15s', flexShrink: 0 }} />
+                </button>
+                {chatSkillsAbertas && (
+                  // maxHeight + scroll próprio: sem isso o accordion aberto roubava toda a
+                  // altura do .chat-panel (que é fixa) e a lista de mensagens colapsava no mobile.
+                  <div style={{ padding: '0 12px 12px 12px', display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '38vh', overflowY: 'auto' }}>
+                    {(chatSkills.provedores || []).some(p => !p.configurado || p.em_cooldown) && (
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        Provedores: {(chatSkills.provedores || []).map(p =>
+                          `${p.provider}${p.configurado ? '' : ' (sem chave)'}${p.em_cooldown ? ' (cota esgotada)' : ''}`
+                        ).join(' · ')}
+                      </div>
+                    )}
+                    {Array.from(new Set(chatSkills.skills.map(s => s.grupo))).map(grupo => (
+                      <div key={grupo}>
+                        <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.5px', color: 'var(--text-muted)', marginBottom: '5px' }}>{grupo}</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {chatSkills.skills.filter(s => s.grupo === grupo).map(s => (
+                            <span
+                              key={s.nome}
+                              title={s.descricao}
+                              style={{
+                                fontSize: '11px', padding: '3px 8px', borderRadius: '999px',
+                                border: '1px solid var(--panel-border)',
+                                background: s.escrita ? 'rgba(245,158,11,0.12)' : 'rgba(255,255,255,0.04)',
+                                color: 'var(--text-secondary)', cursor: 'help'
+                              }}
+                            >
+                              {s.nome}{s.custosa ? ' ⏳' : ''}{s.escrita ? ' ✍️' : ''}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>⏳ consulta lenta (busca odds na casa) · ✍️ altera dados (só com pedido explícito)</div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Área de mensagens */}
-            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px', paddingRight: '6px' }}>
+            <div style={{ flex: 1, minHeight: '140px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px', paddingRight: '6px' }}>
               {chatMessages.length === 0 ? (
                 <div style={{ margin: 'auto', textAlign: 'center', maxWidth: '540px' }}>
                   <div style={{ fontSize: '16px', color: 'var(--text-primary)', fontWeight: 700, marginBottom: '6px' }}>Como posso ajudar?</div>
@@ -4289,7 +4417,7 @@ export default function App() {
                 </div>
               ) : (
                 chatMessages.map((m, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
                     <div style={{
                       maxWidth: '78%',
                       padding: '10px 14px',
@@ -4303,16 +4431,54 @@ export default function App() {
                     }}>
                       {m.content}
                     </div>
+
+                    {/* TRACE: quais skills o agente usou para produzir esta resposta. */}
+                    {m.role === 'assistant' && (m.passos?.length || m.avisos?.length) && (
+                      <div style={{ maxWidth: '78%', marginTop: '5px' }}>
+                        <button
+                          onClick={() => setChatTraceAberto(prev => ({ ...prev, [i]: !prev[i] }))}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: '5px', padding: '2px 0',
+                            background: 'transparent', border: 'none', cursor: 'pointer',
+                            color: 'var(--text-muted)', fontSize: '11px'
+                          }}
+                        >
+                          <Wrench size={11} />
+                          {m.passos?.length
+                            ? `${m.passos.length} skill${m.passos.length > 1 ? 's' : ''}: ${m.passos.map(p => p.skill).join(', ').slice(0, 60)}`
+                            : 'detalhes'}
+                          {m.provider ? ` · ${m.provider}` : ''}
+                          <ChevronDown size={11} style={{ transform: chatTraceAberto[i] ? 'rotate(180deg)' : 'none' }} />
+                        </button>
+                        {chatTraceAberto[i] && (
+                          <div style={{ marginTop: '4px', padding: '8px 10px', border: '1px solid var(--panel-border)', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                            {(m.passos || []).map((p, j) => (
+                              <div key={j} style={{ display: 'flex', gap: '6px', marginBottom: '3px' }}>
+                                <span style={{ color: p.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>{p.ok ? '✓' : '✕'}</span>
+                                <span style={{ fontWeight: 600 }}>{p.skill}</span>
+                                <span style={{ color: 'var(--text-muted)' }}>({(p.ms / 1000).toFixed(1)}s)</span>
+                                <span style={{ flex: 1 }}>{p.resumo}</span>
+                              </div>
+                            ))}
+                            {m.modelo && <div style={{ color: 'var(--text-muted)', marginTop: '4px' }}>motor: {m.provider} · {m.modelo}</div>}
+                            {m.avisos?.map((a, j) => (
+                              <div key={`a${j}`} style={{ color: 'var(--color-warning)', marginTop: '3px' }}>⚠️ {a}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))
               )}
               {chatLoading && (
                 <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
                   <div style={{ padding: '10px 14px', borderRadius: '14px 14px 14px 4px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--panel-border)', color: 'var(--text-secondary)', fontSize: '13px' }}>
-                    Digitando…
+                    Consultando skills…
                   </div>
                 </div>
               )}
+              <div ref={chatFimRef} />
             </div>
 
             {/* Entrada */}
