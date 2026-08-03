@@ -43,8 +43,14 @@ function periodo(s: string): string {
   if (ea) return `E${ea[1]}`;
   const e1 = s.match(/entradas?\s*(\d+)|(\d+)ª?\s*entrada|innings?\s*(\d+)|turnos?\s*(\d+)/);
   if (e1) return `I${e1[1] || e1[2] || e1[3] || e1[4]}`;
-  if (/1[º°]?\s*tempo|primeiro tempo|1st half|\b1t\b/.test(s)) return '1T';
-  if (/2[º°]?\s*tempo|segundo tempo|2nd half|\b2t\b/.test(s)) return '2T';
+  // O ordinal aceita ª/º/°/o porque os feeds erram o gênero: o Altenar publica
+  // "1ª tempo - Total de gols" (feminino) e, sem o "ª" aqui, esse mercado caía em FT —
+  // `mesmaOferta('1ª tempo - Total de gols', 1.5, 'Total de Gols', 1.5)` devolvia TRUE.
+  // Ou seja, o over 1.5 do PRIMEIRO TEMPO pareava com o over 1.5 da PARTIDA INTEIRA: uma
+  // "surebet" que perde sempre, porque as duas pernas não são complementares. Verificado no
+  // GetEventDetails do Altenar em 03/08/2026 (o feed em lote não traz mercado de tempo).
+  if (/1[ºª°o]?\s*tempo|primeiro tempo|1st half|\b1t\b/.test(s)) return '1T';
+  if (/2[ºª°o]?\s*tempo|segundo tempo|2nd half|\b2t\b/.test(s)) return '2T';
   return 'FT';
 }
 
@@ -81,6 +87,14 @@ function assunto(s: string): string {
   if (/escanteio|corner/.test(s)) return 'ESCANTEIOS';
   if (/cart[aã]o|card|cart[oõ]es/.test(s)) return 'CARTOES';
   if (/\bace/.test(s)) return 'ACES';
+  // Tênis: desempates (tie-breaks) e quebras de saque (breaks) NÃO podem cair em GERAL.
+  // Os dois vinham do Kambi como "Total de desempates" e "Total de quebras de saque" e
+  // colapsavam no MESMO canônico TOTAIS_GERAL_FT — medido no jogo Taylor Fritz x Rafael
+  // Jodar, que publica os dois ao mesmo tempo. Bastava a linha coincidir (a de quebras
+  // veio 3.5 e a de desempates 1.5/0.5) para o motor pareá-los como se fossem a mesma
+  // aposta e fabricar uma surebet falsa entre KTO e BetWarrior.
+  if (/desempate|tie[\s-]?break/.test(s)) return 'TIEBREAKS';
+  if (/quebra[s]? de saque|break de servi|break of serve/.test(s)) return 'QUEBRAS_SAQUE';
   // Chutes ANTES de gols: "total de chutes a gol" contém "gol" e colidia com
   // TOTAIS_GOLS (pareava chutes com gols/escanteios de outra casa).
   if (/chute|shot|finaliza/.test(s)) return 'CHUTES';

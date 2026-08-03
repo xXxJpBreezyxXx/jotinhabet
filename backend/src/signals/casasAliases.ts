@@ -37,14 +37,21 @@ const ALIAS_PARA_CANONICO: Record<string, string> = {
   mcgames: 'MC Games',      // Altenar "mcgames2" (revalidação; não é fonte do scanner)
   luvabet: 'Luvabet',       // Altenar "luvabet" (fonte do scanner + revalidação)
   luva: 'Luvabet',          // domínio é luva.bet.br — o feed às vezes rotula só "Luva"
+  onabet: 'Onabet',         // Altenar "onabet"; domínio ona.bet.br (onabet.bet.br não existe)
+  ona: 'Onabet',            // o feed/SureRadar pode rotular só "Ona" (pelo domínio)
+  brbet: 'BrBET',           // Altenar "brbet"
+  brbetbr: 'BrBET',         // variação com sufixo do domínio
+  betesporte: 'BetEsporte', // plataforma própria "SA Esportes" (feed Sportradar)
+  marjosports: 'MarjoSports', // NGX/BetPlus; licença LOTERJ (não federal)
+  marjo: 'MarjoSports',     // o feed/SureRadar pode rotular só "Marjo"
   stake: 'Stake',           // browser-intercept (Futebol 1X2)
   rivalo: 'Rivalo',         // plataforma própria (matchserv); browser headed + Xvfb
   brazino777: 'Brazino777',  // NSoft AIO (API pública)
   brazino: 'Brazino777',     // o SureRadar rotula "Brazino 777" -> chave "brazino777"
   apostaganha: 'ApostaGanha', // NSoft AIO (mesmo parser)
   apostaganhasportsbook: 'ApostaGanha',
+  betsson: 'Betsson',       // sportsbook próprio do Betsson Group (/api/sb/v1)
   // Casas sem scraper (alertadas com tag ⚠️ NÃO REVALIDADO)
-  betsson: 'Betsson',
   bet365: 'Bet365',
   pixbet: 'Pixbet',
   sportingbet: 'Sportingbet',

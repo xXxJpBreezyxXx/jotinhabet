@@ -15,7 +15,7 @@
  * em vez de sumir por esquecimento, que é o modo de falha caro.
  */
 
-import { casasComScraper } from '../../core/revalidationService';
+import { casasComScraper, casaColetaAoVivo, casaVarreAoVivo } from '../../core/revalidationService';
 import { ArbitrageScannerV2 } from '../../core/scanner_v2';
 import { casasComFonteLive } from '../../cashout/cashoutSources';
 import { grupoTenis } from '../../arbitrage/regras';
@@ -84,6 +84,40 @@ const META: Record<string, MetaCasa> = {
     limitacoes: 'grupo de W.O. do tênis NÃO classificado → tênis bloqueado (fail-safe)',
     url: 'https://luva.bet.br',
   },
+  onabet: {
+    nome: 'Onabet', plataforma: 'Altenar', transporte: 'api',
+    esportes: ['Futebol', 'Basquete', 'Tênis'], mercados: 'catálogo Altenar completo',
+    limitacoes:
+      'domínio é ona.bet.br (onabet.bet.br não existe). TÊNIS BLOQUEADO: a casa não publica NENHUMA regra de ' +
+      'apostas (o CMS lista 10 páginas e nenhuma é de regras; o T&C não tem a palavra "desistência") — e o ' +
+      'sportsbook é Altenar, que tem operador em A e em B. Mesmo operador da EsportesDaSorte (Grupo EGB).',
+    url: 'https://ona.bet.br',
+  },
+  brbet: {
+    nome: 'BrBET', plataforma: 'Altenar', transporte: 'api',
+    esportes: ['Futebol', 'Basquete', 'Tênis'], mercados: 'catálogo Altenar completo',
+    limitacoes: 'site com WAF do Cloudflare (irrelevante: o feed é o host da Altenar). W.O. do tênis: Grupo A (void), auditado em 31/07 no PDF oficial da casa',
+    url: 'https://www.brbet.bet.br',
+  },
+  betesporte: {
+    nome: 'BetEsporte', plataforma: 'própria "SA Esportes"/SA Online (feed Sportradar)', transporte: 'api',
+    esportes: ['Futebol', 'Basquete', 'Tênis', 'Tênis de Mesa', 'Beisebol', 'Vôlei', 'E-sports'],
+    mercados: 'lista traz Resultado Final de tudo; handicap/totais vêm do detalhe (1 request por evento)',
+    limitacoes:
+      'a casa devolve 429 com concorrência 4 → coleta sequencial com pacer; só os 20 eventos de maior catálogo ' +
+      'por esporte recebem detalhe. TÊNIS BLOQUEADO: o regulamento oficial define os mercados de tênis mas NÃO ' +
+      'publica regra de abandono/W.O. (ausência verificada em 31/07) — fail-safe.',
+    url: 'https://betesporte.bet.br',
+  },
+  marjosports: {
+    nome: 'MarjoSports', plataforma: 'NGX/BetPlus (sb-loterias.ngbras.com)', transporte: 'api',
+    esportes: ['Futebol', 'Basquete', 'Tênis', 'Tênis de Mesa', 'Beisebol', 'Vôlei'],
+    mercados: 'lista já traz Resultado Final + dupla chance; total/handicap vêm do detalhe (~350 KB por evento)',
+    limitacoes:
+      'licença LOTERJ, não federal (marjosports.bet.br não existe) — aprovado pelo usuário em 31/07. ' +
+      'Detalhe é caro: coleta limitada por liga/quantidade. W.O. do tênis: Grupo A (void), auditado em 31/07 no PDF de regras de tênis da casa.',
+    url: 'https://www.marjosports.com.br',
+  },
   betpix365: {
     nome: 'BetPix365', plataforma: 'Altenar', transporte: 'api',
     esportes: ['Futebol', 'Basquete', 'Tênis'], mercados: 'catálogo Altenar completo',
@@ -112,8 +146,9 @@ const META: Record<string, MetaCasa> = {
     url: 'https://vbet.bet.br',
   },
   esportesdasorte: {
-    nome: 'EsportesDaSorte', plataforma: 'própria (API)', transporte: 'api',
+    nome: 'EsportesDaSorte', plataforma: 'Sportingtech / TraderX (feed api-v2)', transporte: 'api',
     esportes: ['Futebol', 'Basquete', 'Tênis'], mercados: 'catálogo amplo',
+    limitacoes: 'W.O. do tênis: Grupo A (void), auditado em 01/08 no rulebook "support-rules" da casa',
     url: 'https://esportesdasorte.bet.br',
   },
   betnacional: {
@@ -139,6 +174,17 @@ const META: Record<string, MetaCasa> = {
     esportes: ['Futebol', 'Basquete', 'Tênis'], mercados: 'mesmo parser da Brazino777',
     limitacoes: 'removida do Grupo A em 29/07 (regra de W.O. inacessível) → tênis bloqueado',
     url: 'https://apostaganha.bet.br',
+  },
+  betsson: {
+    nome: 'Betsson', plataforma: 'própria do Betsson Group ("OBG", /api/sb/v1)', transporte: 'api',
+    esportes: ['Futebol', 'Basquete', 'Tênis', 'Vôlei', 'Beisebol'],
+    mercados: 'Totais, BTTS, Total de gols do 1º tempo, Handicap 2-vias e vencedor 2-vias (basquete/beisebol incluem prorrogação) + AO VIVO',
+    limitacoes:
+      'NÃO oferta tênis de mesa nem e-sports. Handicap de 3 vias, dupla chance e vencedor de ' +
+      'set ficam fora de propósito. Tênis LIBERADO em 03/08/2026: classificada no Grupo B de ' +
+      'W.O. (regra de "1 set concluído", §17.57 do rulebook — mesma redação da Pinnacle), ' +
+      'então cruza tênis só com casas do Grupo B.',
+    url: 'https://www.betsson.bet.br',
   },
   betano: {
     nome: 'Betano', plataforma: 'própria (browser)', transporte: 'browser',
@@ -172,7 +218,6 @@ const SEM_INTEGRACAO: Array<{ nome: string; nota: string }> = [
   { nome: 'Bolsa de Aposta', nota: 'exchange com comissão de 1,5% já descontada via odd efetiva quando aparece em oportunidade' },
   { nome: 'Novibet', nota: 'regra de W.O. inacessível → tênis bloqueado; sem scraper' },
   { nome: 'Sportingbet', nota: 'recon: viável mas pesada (browser)' },
-  { nome: 'Betsson', nota: 'Digitain (odds por GraphQL WS) — integração pendente' },
   { nome: 'BetMGM', nota: 'Digitain (odds por GraphQL WS) — integração pendente' },
   { nome: 'Betsul', nota: 'API própria destravada por túnel residencial; corpo do POST /web/v2/eventos a capturar' },
   { nome: 'Pixbet', nota: 'sem scraper' },
@@ -190,6 +235,11 @@ export interface CasaCatalogada {
   busca_dirigida: boolean;
   /** Entrega odd AO VIVO (in-play) para o Radar Cashout. */
   odd_ao_vivo: boolean;
+  /** O scraper sabe VARRER partida em andamento (feed live) — é o que habilita
+   *  varrer_jogos_casa/varrer_surebets_casas com situacao="ao_vivo". */
+  varredura_ao_vivo: boolean;
+  /** A busca POR EVENTO (consultar_odds_casa) aceita partida em andamento. */
+  consulta_ao_vivo: boolean;
   esportes: string[];
   mercados: string;
   grupo_wo_tenis: 'A' | 'B' | null;
@@ -226,6 +276,8 @@ export function catalogoCasas(): CasaCatalogada[] {
         fonte_scanner: fontesChaves.has(chave),
         busca_dirigida: true,
         odd_ao_vivo: liveChaves.has(chave),
+        varredura_ao_vivo: casaVarreAoVivo(nome),
+        consulta_ao_vivo: casaColetaAoVivo(nome),
         esportes: meta?.esportes || [],
         mercados: meta?.mercados || 'não catalogado',
         grupo_wo_tenis: grupo,
@@ -274,6 +326,7 @@ export function resumoCasasParaPrompt(): string {
     const flags = [
       c.fonte_scanner ? 'scan' : '',
       c.odd_ao_vivo ? 'live' : '',
+      c.varredura_ao_vivo ? 'varre-live' : '',
       c.transporte === 'browser' || c.transporte === 'browser-headed' ? 'browser' : '',
       `wo:${c.grupo_wo_tenis || '?'}`,
     ]
@@ -289,9 +342,10 @@ export function resumoCasasParaPrompt(): string {
   return (
     `CASAS INTEGRADAS: ${linhas.length}. Use ESTAS listas para qualquer contagem (não reconte a lista detalhada):\n` +
     `- odd AO VIVO (in-play): ${nomes((c) => c.odd_ao_vivo)}\n` +
+    `- VARREM jogo em andamento (varrer_jogos_casa/varrer_surebets_casas com situacao=ao_vivo): ${nomes((c) => c.varredura_ao_vivo)}\n` +
     `- exigem browser (consulta lenta): ${nomes((c) => c.transporte === 'browser' || c.transporte === 'browser-headed')}\n` +
     `- tênis BLOQUEADO (grupo de W.O. desconhecido): ${nomes((c) => c.grupo_wo_tenis === null)}\n` +
-    `Detalhe por casa (chave antes do "|" é o que as skills aceitam; scan=fonte da varredura, live=ao vivo, browser=lenta, wo=grupo de W.O. do tênis):\n` +
+    `Detalhe por casa (chave antes do "|" é o que as skills aceitam; scan=fonte da varredura, live=odd ao vivo no cashout, varre-live=varre jogo em andamento, browser=lenta, wo=grupo de W.O. do tênis):\n` +
     `${linhas.join('; ')}\n` +
     `Plataforma/mercados/limitações na skill listar_casas. Sem integração de odds: ${casasSemIntegracao()
       .map((c) => c.nome)

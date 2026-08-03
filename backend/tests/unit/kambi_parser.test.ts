@@ -73,3 +73,68 @@ describe('markets — períodos de beisebol não colidem com o jogo completo', (
     expect(mesmaOferta('Total de runs', 8.5, 'Total de Corridas (incl. entradas extras)', 8.5)).toBe(true);
   });
 });
+
+/**
+ * Lote 03/08/2026 — o Kambi repassa o `criterion` CRU como nome de mercado, então ele
+ * escapa da convenção de nomes do projeto e passa a cruzar SÓ com o outro Kambi.
+ * Medido: 468 ofertas/varredura de "Handicap de Game" (tênis) presas em
+ * HANDICAP_GAMES_FT enquanto Pinnacle/NSoft/BetBoom/Altenar/Betsson publicam o MESMO
+ * mercado como 'Handicap' → HANDICAP_GERAL_FT.
+ */
+describe('Kambi — convenção de nome do handicap de tênis', () => {
+  const evT = { id: 9, name: 'A - B', homeName: 'Fritz, T', awayName: 'Jodar, R', start: '2026-08-03T14:00:00Z' };
+  const parseT = (bo: any) => ((new KtoScraper()) as any).parseBetOffer(bo, evT, 'tennis');
+  const hcp = (label: string, line: number) => ({
+    eventId: 9,
+    criterion: { label },
+    outcomes: [
+      { type: 'OT_ONE', odds: 1850, label: '1', line },
+      { type: 'OT_TWO', odds: 1950, label: '2', line },
+    ],
+  });
+
+  it('"Handicap de Game" é emitido como "Handicap" (canônico das outras casas)', () => {
+    const odd = parseT(hcp('Handicap de Game', -3500));
+    expect(odd?.mercado).toBe('Handicap');
+    expect(normalizarMercado(odd!.mercado)).toBe('HANDICAP_GERAL_FT');
+  });
+
+  it('cruza com o handicap de tênis da Betsson/Pinnacle (era o bug: nunca cruzava)', () => {
+    const odd = parseT(hcp('Handicap de Game', -3500));
+    // 'Handicap' é o rótulo que Betsson/Pinnacle/NSoft/BetBoom emitem para o mesmo mercado.
+    expect(mesmaOferta(odd!.mercado, odd!.linha, 'Handicap', -3.5)).toBe(true);
+    // E o canônico antigo (HANDICAP_GAMES_FT) não é mais produzido.
+    expect(normalizarMercado(odd!.mercado)).not.toBe('HANDICAP_GAMES_FT');
+  });
+
+  it('"Handicap de Set" NÃO é traduzido — já bate com "Handicap de Sets" das outras', () => {
+    const odd = parseT(hcp('Handicap de Set', -1500));
+    expect(odd?.mercado).toBe('Handicap de Set');
+    expect(mesmaOferta(odd!.mercado, odd!.linha, 'Handicap de Sets', -1.5)).toBe(true);
+    // …e nunca com o handicap de games, que é outro mercado.
+    expect(mesmaOferta(odd!.mercado, odd!.linha, 'Handicap', -1.5)).toBe(false);
+  });
+});
+
+/**
+ * Desempates (tie-breaks) e quebras de saque caíam os DOIS em TOTAIS_GERAL_FT. O jogo
+ * Taylor Fritz x Rafael Jodar publica os dois ao mesmo tempo (03/08/2026): bastava a
+ * linha coincidir para o motor pareá-los como a MESMA aposta e fabricar surebet falsa.
+ */
+describe('markets — totais de tênis que colapsavam em GERAL', () => {
+  it('desempates e quebras de saque têm canônicos DISTINTOS', () => {
+    expect(normalizarMercado('Total de desempates')).toBe('TOTAIS_TIEBREAKS_FT');
+    expect(normalizarMercado('Total de quebras de saque')).toBe('TOTAIS_QUEBRAS_SAQUE_FT');
+    expect(normalizarMercado('Total de desempates')).not.toBe(normalizarMercado('Total de quebras de saque'));
+  });
+  it('não são mais a "mesma oferta" na linha coincidente (era o arb falso)', () => {
+    expect(mesmaOferta('Total de desempates', 3.5, 'Total de quebras de saque', 3.5)).toBe(false);
+  });
+  it('nenhum dos dois cruza com o total de games da partida', () => {
+    expect(mesmaOferta('Total de desempates', 9.5, 'Total de Games', 9.5)).toBe(false);
+    expect(mesmaOferta('Total de quebras de saque', 9.5, 'Total de Games', 9.5)).toBe(false);
+  });
+  it('mesmo mercado entre casas segue cruzando (não quebrei o caso bom)', () => {
+    expect(mesmaOferta('Total de desempates', 2.5, 'Total de Desempates', 2.5)).toBe(true);
+  });
+});

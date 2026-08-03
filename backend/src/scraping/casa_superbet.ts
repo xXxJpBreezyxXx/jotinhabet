@@ -80,14 +80,58 @@ interface SbEvent {
   sportId?: number;
   odds?: SbOdd[];
   marketCount?: number;
+  /** true quando o evento tem oferta AO VIVO (usado no recorte de partida em andamento). */
+  hasLive?: boolean;
+  /** Estado por tipo de oferta: {"1": prematch, "2": live} → "active" | "stop". */
+  offerStateStatus?: Record<string, string>;
 }
 
 export class SuperbetScraper implements OddsScraper {
   private maxEventosPorEsporte = 80;
   private maxEventosDetalhe = 40; // quantos eventos buscar mercados completos (Total/Handicap)
+  /**
+   * Mantém partidas EM ANDAMENTO no feed. O by-date da Superbet separa a oferta por
+   * `offerState`: `prematch` (o default, que é o que o scanner de surebet pré-match quer)
+   * e `live`. Sem esta opção, "quais jogos ao vivo tem na Superbet" não tinha resposta
+   * possível — o feed consultado simplesmente não contém jogo iniciado.
+   */
+  private incluirAoVivo: boolean;
+
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    this.incluirAoVivo = !!opts?.incluirAoVivo;
+  }
 
   getNome(): string {
     return 'Superbet';
+  }
+
+  /** `prematch` (default) ou `prematch,live` — a API aceita os dois estados na mesma query. */
+  private offerState(): string {
+    return this.incluirAoVivo ? 'prematch,live' : 'prematch';
+  }
+
+  /**
+   * Início da janela do by-date. Com ao vivo, a janela tem de COMEÇAR NO PASSADO: o
+   * `startDate` filtra por `matchDate`, e partida em andamento começou antes de agora —
+   * com a janela ancorada em "agora" o feed live voltava vazio (medido: 0 eventos
+   * iniciados com startDate=agora × 20 com startDate=agora−6h).
+   */
+  private inicioJanela(now: Date): Date {
+    return this.incluirAoVivo ? new Date(now.getTime() - 6 * 3600 * 1000) : now;
+  }
+
+  /**
+   * A oferta AO VIVO deste evento está ativa?
+   *
+   * Trava de assertividade: o feed devolve TAMBÉM partidas já começadas cuja oferta
+   * prematch ficou pendurada (`offerStateStatus {"1":"stop"}` sem live ativo) — odd
+   * congelada no apito inicial. Tratar isso como "jogo ao vivo" fabricaria surebet contra
+   * a odd real de outra casa. Só passa quem tem a oferta live ATIVA.
+   */
+  private ofertaAoVivoAtiva(ev: SbEvent): boolean {
+    const st = ev.offerStateStatus;
+    if (st && typeof st === 'object' && '2' in st) return `${st['2']}`.toLowerCase() === 'active';
+    return ev.hasLive === true;
   }
 
   private headers() {
@@ -151,15 +195,17 @@ export class SuperbetScraper implements OddsScraper {
     const end = new Date(now.getTime() + 48 * 3600 * 1000);
     for (const sid of sids) {
       try {
-        const url = `${BASE}/events/by-date?currentStatus=active&offerState=prematch&startDate=${this.fmtData(now)}&endDate=${this.fmtData(end)}&sportId=${sid}`;
+        const url = `${BASE}/events/by-date?currentStatus=active&offerState=${this.offerState()}&startDate=${this.fmtData(this.inicioJanela(now))}&endDate=${this.fmtData(end)}&sportId=${sid}`;
         const r = await fetchTextoComRetry(url, { headers: this.headers() }, 1, 'Superbet/reval', 10000);
         if (r.status !== 200) continue;
         const agora = Date.now();
         const evs: SbEvent[] = ((JSON.parse(r.body).data || []) as SbEvent[])
-          // Mesmo filtro da varredura: só PRÉ-JOGO (início no futuro).
+          // Só PRÉ-JOGO (início no futuro); com ao vivo, partida iniciada entra apenas se a
+          // oferta live estiver ATIVA (ver ofertaAoVivoAtiva).
           .filter((ev) => {
             const t = Date.parse((ev.matchDate || '').replace(' ', 'T') + 'Z');
-            return isNaN(t) || t > agora;
+            if (isNaN(t) || t > agora) return true;
+            return this.incluirAoVivo && this.ofertaAoVivoAtiva(ev);
           })
           .filter((ev) => {
             const par = this.evento(ev.matchName);
@@ -185,18 +231,32 @@ export class SuperbetScraper implements OddsScraper {
   private async extrairEsporte(sportId: number): Promise<ScrapedOdd[]> {
     const now = new Date();
     const end = new Date(now.getTime() + 48 * 3600 * 1000);
-    const url = `${BASE}/events/by-date?currentStatus=active&offerState=prematch&startDate=${this.fmtData(now)}&endDate=${this.fmtData(end)}&sportId=${sportId}`;
+    const url = `${BASE}/events/by-date?currentStatus=active&offerState=${this.offerState()}&startDate=${this.fmtData(this.inicioJanela(now))}&endDate=${this.fmtData(end)}&sportId=${sportId}`;
     const r = await fetchTextoComRetry(url, { headers: this.headers() }, 3, 'Superbet/list');
     if (r.status !== 200) throw new Error(`by-date HTTP ${r.status}`);
     const j = JSON.parse(r.body);
     const agora = Date.now();
-    const eventos: SbEvent[] = (j.data || j || [])
+    const brutos: SbEvent[] = j.data || j || [];
+    const jaIniciado = (ev: SbEvent) => {
+      const t = Date.parse((ev.matchDate || '').replace(' ', 'T') + 'Z');
+      return !isNaN(t) && t <= agora;
+    };
+    const extraAoVivo = this.incluirAoVivo
+      ? brutos.filter((ev) => jaIniciado(ev) && this.ofertaAoVivoAtiva(ev)).length
+      : 0;
+    const eventos: SbEvent[] = brutos
       // offerState=prematch já exclui ao vivo; reforça descartando início no passado.
+      // Com incluirAoVivo, partida iniciada entra — mas só com oferta live ATIVA, senão é
+      // registro pendurado com odd congelada.
       .filter((ev: SbEvent) => {
         const t = Date.parse((ev.matchDate || '').replace(' ', 'T') + 'Z');
-        return isNaN(t) || t > agora;
+        if (isNaN(t) || t > agora) return true;
+        return this.incluirAoVivo && this.ofertaAoVivoAtiva(ev);
       })
-      .slice(0, this.maxEventosPorEsporte);
+      // Com a janela recuada 6h (ao vivo), os jogos já iniciados dividiriam o orçamento de
+      // 80 eventos com o pré-jogo e ROUBARIAM vaga dele — a BetBoom compensa isso do mesmo
+      // jeito. Sem a flag, `extraAoVivo` é 0 e o corte fica idêntico ao de antes.
+      .slice(0, this.maxEventosPorEsporte + extraAoVivo);
 
     const odds: ScrapedOdd[] = [];
 
@@ -212,7 +272,9 @@ export class SuperbetScraper implements OddsScraper {
     //    pulam o loop — economiza ~40 requests de ~270KB por varredura.
     const ehEsports = ESPORTS_SPORT_IDS.includes(sportId);
     if (!ehEsports && !TOTAL_CFG[sportId] && !HANDICAP_CFG[sportId]) return odds;
-    const detalhe = eventos.slice(0, this.maxEventosDetalhe);
+    // Detalhe custa ~270KB por evento: o extra do ao vivo entra com teto rígido, senão uma
+    // janela cheia de partidas em andamento multiplicaria o tráfego da varredura.
+    const detalhe = eventos.slice(0, Math.min(60, this.maxEventosDetalhe + extraAoVivo));
     for (const ev of detalhe) {
       try {
         const extras = ehEsports

@@ -56,10 +56,21 @@ export class WhatsAppNotifier {
   }
 
   /**
+   * Memo do token da instância (chave: nome da instância). O token só muda quando a
+   * instância é recriada, e cada envio pagava um GET /instance/all — com o agente no
+   * WhatsApp (resposta longa fatiada em 3 mensagens + presença + marcar lido) isso
+   * virava 5 requests extras por pergunta.
+   */
+  private static tokenCache = new Map<string, { token: string; at: number }>();
+  private static readonly TOKEN_TTL_MS = 10 * 60_000;
+
+  /**
    * Busca no Evolution GO o token da instância configurada (necessário para enviar).
    * Retorna null (e loga) se as instâncias não puderem ser lidas ou a instância não existir.
    */
   private async obterTokenInstancia(): Promise<string | null> {
+    const memo = WhatsAppNotifier.tokenCache.get(this.instanceName);
+    if (memo && Date.now() - memo.at < WhatsAppNotifier.TOKEN_TTL_MS) return memo.token;
     console.log(`✉️ [WhatsApp] Buscando token da instância "${this.instanceName}" no Evolution GO...`);
     const instancesResponse = await fetch(`${this.apiUrl}/instance/all`, {
       method: 'GET',
@@ -79,7 +90,117 @@ export class WhatsAppNotifier {
     if (!targetInstance.connected) {
       console.warn(`⚠️ [WhatsApp] Instância "${this.instanceName}" está desconectada do WhatsApp.`);
     }
+    if (targetInstance.token) {
+      WhatsAppNotifier.tokenCache.set(this.instanceName, { token: targetInstance.token, at: Date.now() });
+    }
     return targetInstance.token;
+  }
+
+  /** Config mínima presente? (usado por todos os envios antes de tocar a rede) */
+  private configurado(): boolean {
+    return !!(
+      this.apiUrl &&
+      this.apiKey &&
+      this.instanceName &&
+      this.recipient &&
+      !this.recipient.includes('xxxxx')
+    );
+  }
+
+  /**
+   * Marca mensagens como LIDAS no chat de destino (best-effort).
+   * Usado pelo agente no WhatsApp: sem isto, quem pergunta vê a mensagem "não lida" por
+   * mais de um minuto enquanto o agente consulta as casas.
+   */
+  async marcarLido(ids: string[]): Promise<void> {
+    if (!this.configurado() || !ids.length) return;
+    try {
+      const token = await this.obterTokenInstancia();
+      if (!token) return;
+      await fetch(`${this.apiUrl}/message/markread`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: token },
+        body: JSON.stringify({ number: this.formatarDestino(this.recipient), id: ids }),
+      });
+    } catch {
+      /* presença/recibo são cosméticos: nunca podem derrubar o fluxo de resposta */
+    }
+  }
+
+  /**
+   * Baixa a MÍDIA de uma mensagem recebida (imagem/documento) pela Evolution.
+   *
+   * O webhook não traz os bytes: traz o objeto `Message` com a URL criptografada e as
+   * chaves. `POST /message/downloadmedia` recebe esse objeto DE VOLTA e devolve o
+   * conteúdo — em base64 (campo variável por versão) ou binário.
+   *
+   * @param mensagem o `data.Message` cru do webhook.
+   * @returns base64 SEM prefixo data-URI + mimeType, ou null se não vier nada.
+   */
+  async baixarMidia(mensagem: any): Promise<{ base64: string; mimeType: string } | null> {
+    if (!this.configurado() || !mensagem) return null;
+    try {
+      const token = await this.obterTokenInstancia();
+      if (!token) return null;
+      const r = await fetch(`${this.apiUrl}/message/downloadmedia`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: token },
+        body: JSON.stringify({ message: mensagem }),
+      });
+      if (!r.ok) {
+        console.error(`❌ [WhatsApp] downloadmedia falhou (${r.status}):`, (await r.text()).slice(0, 200));
+        return null;
+      }
+      const tipoResposta = r.headers.get('content-type') || '';
+      if (/application\/json/.test(tipoResposta)) {
+        const j: any = await r.json();
+        // A chave do base64 muda por versão: aceita as conhecidas e, no limite, a 1ª string
+        // grande do objeto (é sempre o payload).
+        const alvo = j?.data ?? j;
+        const b64 =
+          alvo?.base64 ?? alvo?.media ?? alvo?.buffer ?? alvo?.data ??
+          Object.values(alvo || {}).find((v) => typeof v === 'string' && v.length > 1000);
+        if (typeof b64 !== 'string' || b64.length < 100) {
+          console.error('❌ [WhatsApp] downloadmedia sem base64 reconhecível:', JSON.stringify(j).slice(0, 200));
+          return null;
+        }
+        return {
+          base64: b64.replace(/^data:[^;]+;base64,/, ''),
+          mimeType: alvo?.mimetype || alvo?.mimeType || 'image/jpeg',
+        };
+      }
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (!buf.length) return null;
+      return { base64: buf.toString('base64'), mimeType: tipoResposta.split(';')[0] || 'image/jpeg' };
+    } catch (err: any) {
+      console.error('❌ [WhatsApp] erro no download de mídia:', `${err?.message || err}`.slice(0, 160));
+      return null;
+    }
+  }
+
+  /**
+   * Indicador de "digitando…"/"parado" no chat (best-effort).
+   * @param estado 'composing' | 'paused' | 'recording'
+   * @param manterMs mantém o indicador vivo por N ms (a Evolution reenvia sozinha e
+   * depois manda 'paused'); 0 = disparo único.
+   */
+  async presenca(estado: 'composing' | 'paused' | 'recording', manterMs = 0): Promise<void> {
+    if (!this.configurado()) return;
+    try {
+      const token = await this.obterTokenInstancia();
+      if (!token) return;
+      await fetch(`${this.apiUrl}/message/presence`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: token },
+        body: JSON.stringify({
+          number: this.formatarDestino(this.recipient),
+          state: estado,
+          ...(estado === 'composing' && manterMs > 0 ? { delay: Math.min(60_000, Math.round(manterMs)) } : {}),
+        }),
+      });
+    } catch {
+      /* idem: cosmético */
+    }
   }
 
   /**
@@ -153,7 +274,7 @@ export class WhatsAppNotifier {
    * continuam no enviarAlerta (formatado).
    */
   async enviarTexto(texto: string): Promise<boolean> {
-    if (!this.apiUrl || !this.apiKey || !this.instanceName || !this.recipient || this.recipient.includes('xxxxx')) {
+    if (!this.configurado()) {
       console.warn('⚠️ [WhatsApp] Configuração da Evolution API incompleta no .env.');
       return false;
     }
@@ -182,7 +303,7 @@ export class WhatsAppNotifier {
    * Envia um alerta de arbitragem estruturado e formatado para o WhatsApp.
    */
   async enviarAlerta(alert: WhatsAppAlert): Promise<boolean> {
-    if (!this.apiUrl || !this.apiKey || !this.instanceName || !this.recipient || this.recipient.includes('xxxxx')) {
+    if (!this.configurado()) {
       console.warn('⚠️ [WhatsApp] Configuração da Evolution API incompleta ou usando número placeholder no .env.');
       return false;
     }

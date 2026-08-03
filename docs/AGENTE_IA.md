@@ -7,28 +7,40 @@ responder — e mostra no frontend **quais skills usou** em cada resposta.
 ## Arquitetura
 
 ```
-POST /api/ai/chat
+POST /api/ai/chat            (painel)          POST /api/whatsapp/webhook   (grupo "Sure Agent")
   └─ IA/agent/agentLoop.ts        loop ReAct (system prompt + tools → executa skill → repete)
        ├─ IA/agent/chatModels.ts  motores com tool-calling: Groq/OpenAI (REST OpenAI-compat) e Gemini (functionDeclarations)
        ├─ IA/agent/registry.ts    registro das skills (+ projeção enxuta para o modelo)
        ├─ IA/agent/skills/*.ts    as ferramentas
        ├─ IA/agent/catalogoCasas.ts  o que cada casa sabe fazer (derivado do código)
        ├─ IA/agent/comparadorOdds.ts tabela comparada entre casas (mesmo matching do motor)
+       ├─ IA/agent/varredura.ts   agrupa feed por JOGO e cruza casas (varredura sem nome de evento)
+       ├─ IA/agent/whatsappBridge.ts  triagem do webhook + sessão por chat + resposta no grupo
+       ├─ notify/markdownWhatsapp.ts  markdown → dialeto do WhatsApp (negrito/tabela/lista)
        └─ IA/conhecimento/*       doutrina de promoções + conversa original com o Gemini
 
-GET /api/ai/skills   → catálogo de skills, casas, provedores e cadeia ativa (o painel da aba lê isto)
+GET /api/ai/skills            → catálogo de skills, casas, provedores e cadeia ativa (o painel lê isto)
+GET /api/whatsapp/webhook     → estado do canal do WhatsApp (sessões, contadores)   [requer API_TOKEN]
+GET /api/whatsapp/webhook/debug → últimos payloads CRUS recebidos da Evolution      [requer API_TOKEN]
 ```
+
+O frontend renderiza a resposta em **markdown** (`frontend/src/Markdown.tsx`, react-markdown +
+remark-gfm em chunk `lazy`): negrito, listas, código e principalmente TABELA — que é o que o
+agente mais produz (comparador de odds, cobertura de promoção). A bolha virou classe
+(`.chat-bubble` / `.md` no `index.css`) porque markdown precisa de estilo descendente.
 
 `modo: 'simples'` no corpo do POST (ou `AGENT_DESATIVADO=1`) cai no chat antigo de turno
 único — válvula de escape se um provedor quebrar function calling.
 
-## Skills (20)
+## Skills (23)
 
 | grupo | skill | o que faz |
 |---|---|---|
 | odds | `listar_casas` | catálogo das casas integradas e capacidades |
 | odds | `consultar_odds_casa` ⏳ | odds ao vivo de UM evento numa casa |
 | odds | `comparar_odds_casas` ⏳ | mesmo evento em N casas: melhor odd por lado, ROI ou quanto falta |
+| odds | `varrer_jogos_casa` ⏳ | LISTA os jogos de um esporte numa casa (ao vivo / pré / todos) — sem nome de evento |
+| odds | `varrer_surebets_casas` ⏳ | varre o feed de 2-4 casas e cruza tudo: surebet ao vivo ou pré, sem nome de evento |
 | radar | `surebets_no_radar` | surebets ativas com filtros (ROI, esporte, casa, evento) |
 | radar | `revalidar_surebet` ⏳ | reconsulta as duas pernas ao vivo (por id) |
 | radar | `value_bets_e_middles` | +EV vs Pinnacle e middles ativos |
@@ -41,7 +53,8 @@ GET /api/ai/skills   → catálogo de skills, casas, provedores e cadeia ativa (
 | cálculo | `calcular_surebet` | distribuição de stake, lucro e ROI garantido |
 | cálculo | `calcular_cobertura_promocao` | freebet SNR / qualificativa / cashback |
 | cálculo | `otimizar_odd_freebet` | curva de retenção e odd ótima √(1+1/m) |
-| cálculo | `calcular_multipla_qualificadora` | regulamento + cobertura sequencial |
+| cálculo | `calcular_multipla_qualificadora` | regulamento + cobertura sequencial de uma múltipla JÁ escolhida |
+| cálculo | `montar_multipla_promocao` ⏳ | MONTA a múltipla: escolhe pernas com odd real, acha a cobertura em outra casa e calcula a sequencial |
 | conhecimento | `buscar_conhecimento` | doutrina + conversa do Gemini (blank.pdf) |
 | ação | `criar_oportunidade_no_radar` ✍️ | registra surebet (via SignalPipeline: gates + dedup + revalidação) |
 | ação | `registrar_promocao` ✍️ | grava no histórico de promoções |
@@ -49,6 +62,217 @@ GET /api/ai/skills   → catálogo de skills, casas, provedores e cadeia ativa (
 
 ⏳ = consulta lenta (rede/scraper). ✍️ = escrita; só roda se a mensagem do usuário pedir
 explicitamente (gate no `agentLoop`, além da instrução no prompt).
+
+## Varredura de jogos (lote de 31/07/2026)
+
+O agente pedia o nome do jogo porque as skills de odds só sabiam buscar POR NOME
+(`oddsDoEvento`). Quem pergunta "quais jogos ao vivo tem na KTO?" não tem esse nome. Duas
+coisas mudaram:
+
+1. **Skills de varredura** — `varrer_jogos_casa` (feed de UMA casa, agrupado por jogo) e
+   `varrer_surebets_casas` (feed de 2-4 casas, cruzado pelo MESMO comparador da skill de um
+   evento só). O system prompt proíbe explicitamente pedir o nome do jogo quando o pedido é
+   de varredura.
+2. **Coleta AO VIVO nos scrapers** — até aqui NENHUM scraper devolvia partida em andamento
+   (todos descartavam `start <= now`, porque o pipeline de surebet é pré-match). A opção
+   `incluirAoVivo` foi levada a 15 casas, sempre por endpoint/parâmetro oficial da
+   plataforma (probes reais em 31/07):
+
+| plataforma | casas | como o ao vivo entra | semântica da flag |
+|---|---|---|---|
+| Kambi | KTO, BetWarrior | `listView` já traz `STARTED` | live **+** pré |
+| Pinnacle | Pinnacle | matchup FILHO (`parentId`, `isLive`) | live **+** pré |
+| Superbet | Superbet | `offerState=prematch,live` + janela começando no passado | live **+** pré |
+| Altenar | Aposta1, BetPix365, EstrelaBet, MC Games, 4Play, Luvabet | `widget/GetLiveEvents?sportId=` | **só live** (endpoints disjuntos) |
+| Swarm | SeuBet, Vbet | `where.game.is_live @in [0,1]` | live **+** pré |
+| sptpub | BetBoom | rota `/api/v4/live/...` somada à `/prematch` | live **+** pré |
+| NSoft | Brazino777, ApostaGanha | `games/2` além de `games/1` | live **+** pré |
+
+A diferença de semântica é tratada em `feedNaSituacao` (`skills/odds.ts`): nas Altenar,
+`situacao="todos"` faz DUAS coletas e une; nas outras, uma só.
+
+**Duas capacidades distintas**, por isso dois conjuntos em `revalidationService.ts`:
+`CASAS_AO_VIVO` (a busca por evento aceita partida em andamento) e `CASAS_FEED_AO_VIVO` (o
+FEED devolve partida em andamento). A Betano está só na primeira: a flag dela vale na busca
+dirigida, mas o caminho de lista navega páginas de pré-jogo. Quando a casa não coleta ao
+vivo, a skill DIZ isso — nunca responde "não tem jogo ao vivo".
+
+**Bug de assertividade corrigido no caminho (Pinnacle).** A flag `incluirAoVivo` existia
+desde o Radar Cashout, mas nunca entregou odd ao vivo: na Pinnacle a partida em andamento é
+um matchup **filho** (`parentId != null`, `isLive: true`) e a guarda de `parentId` — que
+existe para barrar derivados/especiais — rodava ANTES da flag. Resultado: os 44 jogos ao
+vivo do futebol eram 100% descartados e o que sobrava era o matchup **pai**, com preço
+congelado no apito inicial (medido em 31/07, Krasnodar × Rostov: moneyline do pai −404
+contra −496 no filho). A bússola "ao vivo" do Radar Cashout estava lendo esse preço velho.
+Agora o filho ao vivo entra e o pai de jogo já começado é descartado (`filtroMatchup`).
+
+**Casas que seguem SEM varredura ao vivo** (e por quê): EsportesDaSorte (o `left-menu`/
+`league-card` é a árvore pré-jogo; o feed live é outro e precisa de recon), Betnacional,
+Blaze, 1xBet, Stake, Rivalo (browser — mudança de rota + parser novo; 1xBet e Stake ainda
+exigem recon do marketId ao vivo) e o FEED da Betano. Nessas, `situacao="ao_vivo"` responde
+que a casa só entrega pré-jogo.
+
+## Casas do lote de 31/07/2026 (recon + integração)
+
+Seis casas pedidas, uma por agente de recon, com request real (não dedução pelo nome):
+
+| casa | domínio REAL | plataforma | veredito |
+|---|---|---|---|
+| **Onabet** | `ona.bet.br` (⚠️ `onabet.bet.br` é NXDOMAIN) | Altenar `onabet` | **INTEGRADA** |
+| **BrBET** | `brbet.bet.br` (site com 403 de WAF; o feed é o host da Altenar) | Altenar `brbet` | **INTEGRADA** |
+| **BetEsporte** | `betesporte.bet.br` | própria "SA Esportes"/SA Online (ASP.NET) + feed Sportradar | **INTEGRADA** |
+| **MarjoSports** | `www.marjosports.com.br` (⚠️ não é .bet.br — licença **LOTERJ**, não federal) | NGX/"BetPlus" (`sb-loterias.ngbras.com`), multi-tenant | **INTEGRADA** |
+| Sportybet | `sporty.bet.br` (⚠️ não `sportybet.bet.br`) | própria (SportyTech, API `factsCenter`) | pendente do túnel: BR responde **451 por ASN** |
+| ~~EsporteNetBet~~ | nenhum `.bet.br` existe | banca/cambista própria (2 variantes) | **VETADA** (ver abaixo) |
+
+Onabet e BrBET entraram como subclasses de `AltenarWidgetScraper` (o padrão da Luvabet) +
+registro nos pontos de sempre: `scanner_v2` (import, instância, allowlist `SCRAPERS_API`),
+`SCRAPER_FACTORY`/`CASAS_AO_VIVO`/`CASAS_FEED_LIVE_EXCLUSIVO` em `revalidationService`,
+`casasAliases` e o META de `catalogoCasas`. Medido no probe: Onabet 1.297 odds/324 jogos em
+2,8s (69 odds ao vivo) e BrBET 2.659 odds/721 jogos em 13,9s (117 ao vivo). Tênis fica
+BLOQUEADO nas duas até a auditoria de W.O. (grupo não classificado = fail-safe de
+`arbitrage/regras.ts`).
+
+Achado de manutenção: `recon/casas_alvo.ts` tinha `onabet.bet.br`, que não existe — por isso
+o recon automático nunca via essa casa.
+
+**BetEsporte** (`casa_betesporte.ts`) e **MarjoSports** (`casa_ngx.ts`, classe-base
+multi-tenant da plataforma NGX) exigiram parser próprio. Medido na coleta real de 31/07:
+
+| casa | pré-jogo | ao vivo | mercados canônicos |
+|---|---|---|---|
+| BetEsporte | 3.002 odds / 1.168 refs em 33,8s | 255 odds / 40 eventos (todos em andamento) | 21 |
+| MarjoSports | 1.058 odds / 296 eventos em 9,5s | +26 partidas em andamento | 10 (zero `DESCONHECIDO`) |
+
+Armadilhas que a coleta real revelou (as duas estão comentadas no código):
+
+- **BetEsporte**: o campo `line` só é preenchido no futebol (types 16/18); nos outros esportes
+  a linha existe apenas no rótulo (`"Casa (+5.5)"`), e quando os dois existem e divergem o
+  parser DESCARTA. O e-sports vem de OUTRO provedor (`od:player:...`) com numeração de
+  `externalId` conflitante, e a ordem do array `options` VARIA entre eventos — a perna sai por
+  `externalId`, nunca por posição. O type **1601 ("1x2 Pagamento antecipado")** aparece como
+  mercado principal em 123 dos 709 jogos de futebol e é promoção, não 1x2: mapear por `type`
+  numérico foi o que evitou publicar isso como Resultado Final. Custo: 1 request por esporte
+  (Resultado Final de tudo vem de graça) + 20 detalhes por esporte, SEQUENCIAIS com pacer de
+  260 ms — concorrência 4 já devolve 429; o 429 lê `retry-after`, pausa a casa no ciclo e
+  devolve o que já coletou.
+- **MarjoSports**: `/event?type=X` devolve **só `NOT_STARTED`** — as partidas em andamento
+  exigem `&status=LIVE` (a flag SOMA esse feed). Existe um `&search=<termo>` não documentado
+  que derruba o custo da busca dirigida de 4,8 MB para ~15 KB, mas ele é sensível a acento, então
+  o catálogo inteiro fica como fallback obrigatório (senão "Japao" nunca acha "Japão" e um
+  alerta bom seria abortado por falso negativo). No basquete o mercado principal está no grupo
+  `full_match`, não `full_time` (que é a versão com/sem prorrogação).
+
+Nas duas o **tênis está bloqueado** até a auditoria de W.O. (grupo não classificado).
+
+### Casa VETADA na operação (`arbitrage/regras.ts`)
+
+`casaBloqueada()` veta uma casa em QUALQUER fonte (SureRadar, sinal do Telegram, motor
+próprio, value bet) e QUALQUER mercado, porque roda no topo de `regraPermiteOportunidade` —
+o gate único usado por `scanner_v2:364`, `signalPipeline:292`, `valor.ts:348` e pelo
+comparador do agente. Vale também em promoção (`checar_regras_do_par` com
+`finalidade="promocao"` NÃO contorna): bloqueio por casa é decisão de operação, não regra de
+mercado.
+
+Vetada em 31/07/2026 por decisão do usuário: **EsporteNetBet** (e EsporteNet VIP). Motivo
+medido no recon: não é operadora regulada (nenhum domínio `.bet.br`; é rede de banca/cambista
+em `.bet`/`.net`, com Bilhete/Cambista/Bicho no menu), margem mediana de ~17% (casa de
+verdade opera 2-5%), teto de R$ 500 por aposta e odds derivadas do bet365 — com essa margem
+ela quase nunca tem a melhor perna e, quando tem, é erro de cotação em casa que pode
+cancelar. A lista aceita override por `CASAS_BLOQUEADAS` no .env (vírgula) para vetar outra
+casa sem deploy. Cuidado ao editar: a comparação é por igualdade/prefixo declarado, nunca
+"contém" — `esportenet*` é a vetada, `esportesdasorte` é casa integrada e legítima (há teste
+para isso em `tests/unit/regras.test.ts`).
+
+## Escopo das Diretrizes: surebet × promoção (lote de 31/07/2026)
+
+As Diretrizes (mercado proibido, grupos de W.O. do tênis) existem para SUREBET: num
+mercado 3-vias ou num cruzamento A×B, o lucro garantido vira prejuízo garantido. Em
+operação de PROMOÇÃO — freebet SNR, aposta qualificativa, cashback, "aposte e ganhe",
+múltipla qualificadora — não há lucro garantido a proteger e o mercado é o que o
+regulamento da casa exige (1X2 no futebol é o caso comum). Aplicá-las ali só impedia
+operação legítima.
+
+O que mudou:
+
+- `checar_regras_do_par` aceita `finalidade: 'surebet' | 'promocao'`. Em `promocao` devolve
+  `permitido: true`, `regras_de_surebet_aplicadas: false`, o bloqueio que existiria como
+  **aviso** e o `risco_residual` (no tênis com grupos diferentes, abandono pode anular a
+  perna e deixar a cobertura exposta — a exposição é o aporte, não red garantido).
+- `DOUTRINA_MERCADOS` ganhou a seção **ESCOPO** dizendo isso; ela é injetada no prompt do
+  agente e no RiskAnalyzer.
+- O system prompt proíbe o agente de dizer que a promoção "não pode" por mercado proibido
+  ou grupo de W.O.
+- Os gates DETERMINÍSTICOS do motor (`arbitrage/regras.ts`, `scanner_v2`) seguem inalterados
+  — quem alerta surebet continua bloqueando o que sempre bloqueou.
+
+### `montar_multipla_promocao`
+
+Monta a múltipla com odds REAIS, em vez de pedir ao usuário as pernas prontas:
+
+1. coleta o feed da casa da promoção + até 3 casas de cobertura (uma passada, 2 em paralelo);
+2. agrupa por jogo e **escolhe a perna dentro dos clusters comparados** — só entra mercado de
+   jogo completo e 2 vias (`DNB_FT`, `TOTAIS_*_FT`, `HANDICAP_*_FT`, `AMBAS_MARCAM_FT`,
+   `RESULTADO_FINAL_FT`) que JÁ tenha o lado oposto em outra casa. No primeiro probe, escolher
+   do feed cru deixou 3 de 5 pernas sem cobertura e trouxe mercado exótico ("Primeiro gol");
+3. por jogo, fica a perna de hedge mais barato (menor `1/odd + 1/oddCobertura`);
+4. entre jogos, mira a **odd equilibrada** (`odd_total_minima^(1/n)`, piso na odd mínima do
+   regulamento) e, se faltar total, troca a menor perna pela MENOR candidata que faz bater —
+   pegar a maior fechava com odd total 20.28 para exigência 5.00 e hedge de R$ 500 num bilhete
+   de R$ 50 (medido);
+5. ordena por horário (a cobertura é sequencial) e entrega tudo por `calcularMultiplaQualificadora`
+   — aporte por perna, gasto acumulado, caixa de pico e o aviso do caminho all-green.
+
+Medido em 31/07 (KTO, cobertura Superbet+EstrelaBet, R$ 50, exigência 5.00 com 5 pernas):
+odd total 5.15, todas as pernas com cobertura, caixa de pico R$ 472, all-green −R$ 216 com
+cobertura total (com `perda_aceita` o hedge fica mais barato).
+
+## Canal do WhatsApp (grupo "Sure Agent")
+
+`POST /api/whatsapp/webhook` recebe os eventos da Evolution e roda o MESMO agente da aba.
+
+**Como ligar na Evolution** (campo "Webhook" da instância, ou
+`POST /instance/connect {webhookUrl, subscribe:["MESSAGE"]}` com `apikey: <token da instância>`):
+
+```
+https://jotinhabet.eurekmind.com/api/whatsapp/webhook?token=<AGENT_WHATSAPP_WEBHOOK_TOKEN>
+```
+
+O formato do payload do **evolution-go é whatsmeow serializado** (`event: "Message"`,
+`data.Info.Chat`, `data.Info.ID`, `data.Info.IsFromMe`, `data.Info.Timestamp` em RFC3339,
+texto em `data.Message.conversation` ou `data.Message.extendedTextMessage.text`) — NÃO é o
+`messages.upsert`/`key.remoteJid` do Evolution v2 em Node. `extrairMensagemWhatsApp` cobre os
+dois formatos e ainda faz varredura em profundidade se o envelope mudar; `/webhook/debug`
+mostra os payloads crus recebidos.
+
+| guarda | por quê |
+|---|---|
+| responde 200 SEMPRE | a Evolution re-tenta 3x em não-2xx, e cada re-tentativa duplicaria a execução do agente |
+| execução em background | uma pergunta com scraper passa de 1 min; a triagem é síncrona, a resposta vai depois |
+| 1 pergunta por vez | VPS de 1 core; a 2ª pergunta recebe aviso em vez de derrubar o backend |
+| `IsFromMe` e evento `Send*` ignorados | a própria resposta volta pelo webhook — sem isso o agente conversaria consigo mesmo |
+| mensagem > 10 min ignorada | history-sync da Evolution re-entrega conversa antiga e queimaria a cota de IA |
+| chat em allowlist | só os JIDs de `AGENT_WHATSAPP_CHAT` |
+| token na URL | `/api` é público via Traefik e a Evolution não assina o payload |
+
+| env | default | o que faz |
+|---|---|---|
+| `AGENT_WHATSAPP_ATIVO` | 1 | liga/desliga o canal |
+| `AGENT_WHATSAPP_CHAT` | grupo Sure Agent | JIDs autorizados (vírgula) |
+| `AGENT_WHATSAPP_WEBHOOK_TOKEN` | — | segredo do `?token=` (vazio = aceita todos) |
+| `AGENT_WHATSAPP_TRACE` | 1 | rodapé com as skills usadas |
+| `AGENT_WHATSAPP_MAX_HISTORICO` | 12 | mensagens de contexto por chat |
+| `AGENT_WHATSAPP_SESSAO_MIN` | 180 | TTL da sessão |
+| `AGENT_WHATSAPP_MAX_POR_HORA` | 30 | teto de perguntas por chat |
+| `AGENT_WHATSAPP_IDADE_MAX_MIN` | 10 | idade máxima da mensagem aceita |
+
+Comandos locais (não gastam IA): `/novo` limpa o contexto, `/ajuda` lista o que o agente faz,
+`/status` mostra motor/sessão. Mídia sem legenda recebe aviso de que o canal só lê texto.
+
+A resposta sai por `markdownParaWhatsApp`: título vira `*negrito*`, tabela GFM vira bloco
+monoespaçado alinhado, lista vira `•`, link fica cru (o WhatsApp linkifica). Resposta longa é
+fatiada em ~3.500 caracteres com numeração. O `rodarAgente` recebe `{ canal: 'whatsapp' }` e
+o prompt pede resposta curta (celular).
 
 ## Guardas do loop
 
@@ -58,6 +282,47 @@ explicitamente (gate no `agentLoop`, além da instrução no prompt).
 | skills lentas por pergunta | `AGENT_MAX_SKILLS_CUSTOSAS` | 4 | VPS de 1 core; um "compara tudo" sem limite a derruba |
 | payload de uma skill | `AGENT_MAX_CHARS_SKILL` | 3800 | o resultado fica no histórico e é reenviado a cada rodada |
 | skill de WhatsApp | `AGENT_WHATSAPP_SKILL` | off | o destino é o grupo de alertas |
+
+## Leitura de IMAGEM (lote de 31/07/2026)
+
+O agente lê print nos DOIS canais: botão de anexar na aba (`ImageIcon` ao lado do input,
+`POST /api/ai/chat` com `imagemBase64`+`mimeType`) e imagem enviada no grupo do WhatsApp
+(baixada da Evolution por `POST /message/downloadmedia`, que exige o objeto `Message` cru
+de volta — por isso `EntradaWhatsApp.imagem` guarda a mensagem inteira).
+
+O caminho é o mesmo nos dois: `IA/extractors/imagemChat.ts` transforma a imagem em TEXTO
+estruturado (tipo do print, casa, evento, mercado/linha, odds, valores, regulamento) e esse
+texto entra na conversa como se o usuário tivesse digitado — daí o agente segue com as 23
+skills (cobertura de promoção, montar múltipla, comparar odds…). Não há caminho paralelo
+só para imagem, e a mensagem injetada avisa que o conteúdo veio de OCR e pode ter erro.
+
+**Provedor: OpenRouter** (`IA/Provedores/OpenRouter`), 1º da cadeia de visão
+(`AI_PROVIDER_CHAIN_VISION=openrouter,openai,gemini`). Motivo: em 31/07 a OpenAI respondia
+"no credits remaining", o Gemini "prepayment credits are depleted" e a conta da Groq não tem
+nenhum modelo multimodal (15 modelos, todos texto/áudio). A API da OpenRouter é compatível
+com a da OpenAI — mesmo SDK, só troca de `baseURL`.
+
+Modelos free multimodais medidos com print REAL de sinal (31/07):
+
+| modelo | tempo | resultado |
+|---|---|---|
+| `google/gemma-4-26b-a4b-it:free` | 6-21s | **default**: leu odds/mercado/evento certos; único com `response_format`/`structured_outputs` |
+| `nvidia/nemotron-nano-12b-v2-vl:free` | 4,7s (e 504 em outra tentativa) | leu certo quando respondeu; feito para "document intelligence" |
+| `google/gemma-4-31b-it:free` | 429 | upstream do Google congestionado no free tier |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 6,4s | leu certo, schema próprio |
+
+Como o 429/504 vem do provedor UPSTREAM (não da OpenRouter) e cada modelo free tem upstream
+próprio, existe uma **escada de modelos** (`OPENROUTER_MODEL_FALLBACKS`) igual à da Groq.
+
+**Teto de qualidade do free tier, documentado porque custa dinheiro:** o gemma-4-26b leu
+`casaA="Chance"` num print em que a casa era **Stake** — "Chance" é o cabeçalho da faixa do
+template. Duas defesas: (1) `validarSinal` (telegramSignalExtractor) REJEITA o sinal quando a
+casa extraída é um rótulo conhecido do template — casa errada faria a revalidação procurar a
+perna onde ela não está; (2) o prompt de `imagemChat` avisa explicitamente que essas faixas
+são cabeçalho. Ainda assim o modelo às vezes hesita; no chat isso aparece como "casa não
+integrada" e o agente pede confirmação. Com crédito na OpenAI/Gemini (ou na própria
+OpenRouter, que aí libera modelo pago barato de visão) a cadeia volta a começar por um modelo
+melhor sem mudar código.
 
 ## Provedores e a cota da Groq
 
@@ -166,5 +431,13 @@ antes tinha a fórmula duplicada): `calcularPromocao`, `calcularMultiplaQualific
 ```bash
 npx ts-node --transpile-only src/scripts/smoke_agente.ts "sua pergunta"
 npx ts-node --transpile-only src/scripts/smoke_skills_odds.ts Futebol ["Nome do evento"]
-npx vitest run tests/unit/agente.test.ts tests/unit/promocoes.test.ts
+npx vitest run tests/unit/agente.test.ts tests/unit/promocoes.test.ts tests/unit/whatsappAgente.test.ts
+```
+
+Webhook do WhatsApp sem depender da Evolution (payload no formato do evolution-go):
+
+```bash
+curl -s -X POST "http://localhost:4000/api/whatsapp/webhook?token=$AGENT_WHATSAPP_WEBHOOK_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"Message","instanceName":"Geek-Imperial","data":{"Info":{"Chat":"120363411828181043@g.us","Sender":"5516999@s.whatsapp.net","IsFromMe":false,"ID":"TESTE1","PushName":"Joao","Timestamp":"'"$(date -Iseconds)"'"},"Message":{"conversation":"/status"}}}'
 ```

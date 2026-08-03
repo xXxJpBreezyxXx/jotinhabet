@@ -88,6 +88,22 @@ describe('Swarm parseGames (SeuBet/BetConstruct)', () => {
     expect(odds[0].esporte).toBe('Tenis de Mesa');
   });
 
+  it('incluirAoVivo mantém o jogo já iniciado (e segue barrando bloqueado)', () => {
+    const mk = { type: 'P1P2', event: { a: { id: 1, type_1: 'W1', price: 1.5 }, b: { id: 2, type_1: 'W2', price: 2.6 } } };
+    const iniciado = Math.floor(Date.now() / 1000) - 600;
+    const odds = new SeuBetScraper({ incluirAoVivo: true }).parseGames(
+      [
+        jogo({ is_blocked: 1, market: { m1: mk } }),
+        jogo({ start_ts: iniciado, info: { current_game_state: 'set1', score1: '1', score2: '0' }, market: { m1: mk } }),
+        jogo({ market: { m1: mk } }),
+      ],
+      4
+    );
+    expect(odds).toHaveLength(2);
+    // dataHora no passado é o único sinal de "ao vivo" (ScrapedOdd não tem campo de estado).
+    expect(odds.filter((o) => Date.parse(o.dataHora) < Date.now())).toHaveLength(1);
+  });
+
   it('e-sports: MapsTotal/MapsHandicap clusterizam como as outras casas', () => {
     const odds = parse(
       [jogo({

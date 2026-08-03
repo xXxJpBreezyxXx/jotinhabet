@@ -43,6 +43,62 @@ ficam como **"?"** — nunca chute.
 ¹ *média* = regra oficial, mas obtida por snapshot (página viva atrás de WAF) ou apenas regra genérica.
 ² Betnacional NUNCA deve ir para o B: em ITF/UTR (onde mais há desistência) ela anula tudo — num B×B contra Pinnacle/KTO a perna dela voltaria (void) enquanto a outra casa dá red na perna oposta = prejuízo. No Grupo A ela é segura em todos os torneios (a variante win/void nunca dá red por abandono; no pior caso devolve, no melhor paga o avanço).
 
+## Lote de 31/07/2026 — 4 casas novas (cada classificação verificada por um 2º revisor)
+
+| Casa | Regra publicada (abandono no Vencedor) | **Grupo** | Confiança | Fonte |
+|---|---|:---:|:---:|---|
+| **BrBET** | **VOID**, declarado 2x no mesmo documento: "em caso de desistência de um jogador, ou ausência (lesão, doença ou circunstância pessoal), … desqualificação ou abandono, todos os mercados determinados em campo são liquidados em conformidade e todos os restantes indecisos são declarados nulos e sem efeito. Para evitar dúvidas, se um jogador de ténis desistir antes da conclusão do último ponto, **o mercado do vencedor do jogo é nulo**" | **A** ✅ | alta | [PDF oficial da casa](https://d1na21dgvoed1l.cloudfront.net/documents/661e5f86a6e23b0027c2ad6a/AltenarBettingRulesv1.29-English(1)pt-BR_pt_br.pdf) — "Altenar Betting Rules v1.29" traduzido, 196 p., p.61 §Tênis e p.6 §Regras Gerais |
+| **MarjoSports** | **VOID**: "abandono ou desqualificação de ao menos um dos competidores, poderão ter as apostas não definidas como nulas"; "partidas definidas sem que sejam disputadas (WO), todos os mercados de tais eventos serão anulados"; ao vivo, "desqualificação, abandono ou WO … gera a anulação de todas as apostas não decididas" | **A** ✅ | alta | [PDF de regras de tênis](https://d1na21dgvoed1l.cloudfront.net/general/rules/tennis_pt.pdf) — "V1.0.0. - 16/07/2025", §Observações Gerais |
+| **Onabet** | **NÃO PUBLICA REGRA NENHUMA de apostas.** Ausência PROVADA por enumeração: o CMS da casa expõe a lista completa de páginas (`/api/cms-go/v2/site/page/list`) = 10 páginas, nenhuma de regras. No T&C inteiro (217 mil caracteres): `desist`=0, `walkover`=0, `um set`=0, `avanç`=0, `desqualific`=0, `tênis`=0. Só existe §22.1 genérico de evento adiado/suspenso com janela de 72h — que não descreve desistência de tenista (a partida ENCERRA e alguém avança) | **?** 🚨 | alta (na ausência) | [T&C via API do CMS](https://ona.bet.br/page/terms-and-conditions) §22.1 (a URL humana está atrás de Cloudflare; o texto sai por `page?lang=BR_PT&name=terms-and-conditions`) |
+| **BetEsporte** | **NÃO PUBLICA** cláusula de abandono. O regulamento oficial completo (8 documentos, 523 KB, via `GET /api/regulation/getRegulations`) TEM seção "TÊNIS" que define os mercados (Vencedor, Handicap, Total…) mas não diz o que acontece em desistência/W.O. | **?** 🚨 | alta (na ausência) | [API pública de regulamento](https://betesporte.bet.br/api/regulation/getRegulations) — doc id 25 "Mercados e Apostas", §Tênis |
+
+### 01/08/2026 — Esportes da Sorte (a marca principal do mesmo grupo da Onabet)
+
+| Casa | Regra publicada (abandono no Vencedor) | **Grupo** | Confiança | Fonte |
+|---|---|:---:|:---:|---|
+| **Esportes da Sorte** | **VOID PURO**, §tênis do rulebook do sportsbook: "No caso de aposentadoria ou desqualificação de uma partida, todos os mercados que ainda não tiveram seu resultado determinado serão considerados nulos" + "No caso de uma Passagem [walkover], todos os mercados serão liquidados como nulos". Tênis de mesa idem. Preâmbulo declara que "as Regras Especiais terão precedência sobre as Regras Gerais" | **A** ✅ | alta | módulo CMS `support-rules` (93.317 chars, `lastUpdateDate` 12/06/2026), página humana [/ptb/contents/support-rules](https://esportesdasorte.bet.br/ptb/contents/support-rules); texto obtido por `GET /api/generic/getWebModuleContentByCode/esportesdasorte.bet.br/support-rules/d/23` (curl pelado, sem header nenhum) |
+
+**Desqualificação anula junto com a desistência** — na MESMA frase. Isso a diferencia de
+bet365/Vbet/SeuBet, que anulam na desistência mas dão a vitória a quem avança em DQ.
+
+🔑 **A lição do lote: a regra que classifica é do SPORTSBOOK, não do grupo empresarial.**
+Esportes da Sorte e Onabet são do mesmo operador (Esportes Gaming Brasil LTDA) e compartilham
+LITERALMENTE o mesmo T&C — que é mudo sobre desistência (censo idêntico nas duas: `desist`=0,
+`walkover`=0, `um set`=0, `avanç`=0, `desqualific`=0). O que classificou a Esportes da Sorte foi
+um SEGUNDO documento, o rulebook do sportsbook Sportingtech, que a Onabet não tem porque roda
+outra plataforma (Altenar + CMS Atlas-IAC) e outra mesa de trading. Portanto **a Onabet segue
+"?"** — estender o A dela seria a classificação por semelhança que a doutrina proíbe. A Lottu
+(3ª marca do grupo) segue igualmente sem classificação.
+
+**Endpoint reaproveitável (casas Sportingtech/TraderX):** o CMS inteiro sai sem auth por
+`GET /api/generic/getUsedWebModuleCodesByTraderLanguageAndDevice/<host>/d/23` (enumera os
+códigos; foram 38 nesta casa) e `GET /api/generic/getWebModuleContentByCode/<host>/<code>/d/23`
+(conteúdo). Só o `support-rules` tem regra de esporte. Serve para auditar Lottu e qualquer
+outra Sportingtech.
+
+**Correção de registro:** a URL `/api/cms-go/v2/site/page/list` da Onabet (anotada em 31/07)
+hoje devolve **401** — a enumeração viva agora sai do `window.CMS_CONFIG` inline no HTML da
+home, que traz a árvore de navegação completa (19 entradas, 5 páginas estáticas, nenhuma de
+regras de apostas). A conclusão "?" foi reconfirmada por esse caminho novo.
+
+**Por que "?" e não "tendência A"** nas duas últimas: a Onabet roda **Altenar**, e a Altenar
+tem operador em A (Aposta1 = void publicado) e em B (KTO = avanço, comprovado na liquidação
+real do caso Brumm × Savkin). Sem regra do OPERADOR, a liquidação segue o default do trading
+da plataforma — que no tênis é tipicamente avanço com ≥1 set. Chutar "A" aqui é exatamente a
+armadilha A×B que já custou dinheiro neste projeto. A assimetria decide: bloquear uma casa
+que era A custa OPORTUNIDADE; liberar uma casa que era B custa DINHEIRO.
+
+Detalhe operacional descoberto no caminho: a **Onabet é do mesmo operador da EsportesDaSorte**
+— Esportes Gaming Brasil LTDA (CNPJ 56.075.466/0001-00, licença SPA/MF Portaria 136/2025),
+grupo que opera "Esportes da Sorte", "Onabet" e "Lottu". A EsportesDaSorte também está sem
+classificação; se algum dia aparecer regra de tênis do grupo, ela resolve as duas de uma vez.
+
+E um endpoint reaproveitável: as casas da plataforma **Atlas-IAC** (Onabet, Luvabet, Geralbet,
+Realsbet, Lucksports, MMABet, 1pra1) expõem o CMS em `/api/cms-go/v2/site/page?lang=BR_PT&name=<slug>`
+e a lista de páginas em `/api/cms-go/v2/site/page/list` — sem Cloudflare, sem browser. Serve
+para auditar regra de qualquer uma delas. (Pegadinha: `page/<slug>` no path dá 500; tem de ser
+query string.)
+
 ## 🚨 Divergências críticas (regra publicada ≠ grupo atual)
 
 | Casa | Hoje | Deveria ser | Risco se ficar como está |
@@ -127,3 +183,108 @@ oficial da própria casa, citação literal + URL; sem regra acessível = **?** 
   situação que motivou remover a Novibet. Doutrina: desconhecida bloqueia.
 - **Bet7k** continua em A pelo mesmo "status quo" frágil, mas NÃO é fonte de odds hoje —
   fica no radar para quando/se for integrada.
+
+---
+
+## Lote 03/08/2026 — Betsson (integrada como fonte de odds neste lote)
+
+Auditoria feita ao integrar o scraper da Betsson. Mesma metodologia: só o documento oficial
+da própria casa, citação literal + fonte; sem regra acessível = **?**.
+
+**Obtenção da fonte:** as páginas HTML da Betsson são barradas por AWS WAF (HTTP 202 com
+corpo vazio) e o texto das regras **não está no HTML servido** — o site é todo web
+components e o conteúdo vem do CMS por API que também é WAF-protegida fora do browser.
+O texto foi extraído com chromium headed sob xvfb, atravessando o **shadow DOM**
+(`document.body.innerText` devolve 0 chars; é preciso descer em `shadowRoot`
+recursivamente). O mesmo corpo sai da API `GET /api/v2/content/documentgroups/game-rules`
+quando chamada DE DENTRO do browser (308 KB).
+
+| Casa | Documento | Regra publicada (abandono no Vencedor da Partida) | **Sugestão** | Confiança | Fonte |
+|---|---|---|:---:|:---:|---|
+| **Betsson** | acessível (via shadow DOM) | **"1 SET CONCLUÍDO"**: §17.57 Tênis → *"Vencedor da partida, inclusive durante o jogo — **Um set completo deve ser completado para que as apostas sejam válidas. Se menos de um set for completado na partida, todas as apostas serão consideradas nulas.**"* Não há cláusula de void por desistência: com ≥1 set fechado a aposta é VÁLIDA e liquida pelo resultado oficial (= quem avança) | **B** 🚨 | alta | [betsson.bet.br/my-account/game-rules/sportsbook](https://www.betsson.bet.br/my-account/game-rules/sportsbook) §17.57 (censo do doc: `um set`=8, `avanç`=7, `desist`=14, `desqualific`=22, `aposentad`=0) |
+
+**Por que B e não A — o argumento que sustenta a classificação:**
+
+1. A redação é **estruturalmente idêntica à da Pinnacle**, já classificada B com confiança
+   alta: *"apostas na partida no money line terão validade desde que um set tenha sido
+   concluído, caso contrário… canceladas"*. Mesma forma, mesma consequência.
+2. O documento **prova que a Betsson sabe escrever cláusula de avanço explícita quando é
+   isso que ela quer** — §17.50 Snooker: *"Se uma partida começar, mas não for concluída por
+   qualquer motivo, **o jogador que avançar** para a próxima rodada ou receber a vitória
+   será considerado o vencedor."* No tênis ela escolheu a forma "1 set válida"; em nenhum
+   lugar do §17.57 aparece anulação por desistência do Vencedor da Partida.
+3. Contraste com as casas do Grupo A: todas elas têm frase EXPLÍCITA de void por
+   desistência no mercado de vencedor (BrBET, MarjoSports, Esportes da Sorte, Superbet,
+   PixBet…). A Betsson não tem nenhuma.
+
+**Ressalva registrada (não bloqueante, mas anotada):** no MESMO §17.57, handicap de partida
+e Match Games (totais) são **anulados** se a partida não terminar, *"a menos que não haja
+nenhuma maneira possível de a partida ser jogada até sua conclusão natural sem determinar
+incondicionalmente o resultado desse mercado"* — com exemplos numéricos oficiais. É o mesmo
+padrão da KTO que motivou o bloqueio do KTO.md §3 em Handicap/Totais de tênis. A diferença
+é que na KTO havia caso real de liquidação divergente; aqui é só a redação padrão do
+mercado (que a Pinnacle também tem). Fica anotado para reavaliar se a Betsson ganhar volume
+em Handicap/Totais de tênis.
+
+### Decisão aplicada (03/08/2026)
+
+**APLICADA com aprovação do usuário no mesmo dia:** `'betsson'` entrou no `GRUPO_B` de
+`regras.ts`. `grupoTenis('Betsson')` agora devolve `'B'`, liberando cruzamentos de tênis
+Betsson×Pinnacle / ×BetWarrior / ×KTO / ×Stake / ×BolsaDeAposta / ×ReiDoPitaco / ×1xbet.
+Cruzamento com qualquer casa do Grupo A segue rejeitado (A×B), como manda a doutrina.
+
+Duas consequências que valem registro:
+- **Tênis de mesa não muda nada na prática**: a Betsson não oferta tênis de mesa.
+- **A ressalva da KTO segue valendo por cima**: em Handicap/Totais de tênis, o par
+  Betsson×KTO continua bloqueado pelo gate do KTO.md §3 (que é por CASA, não por grupo).
+
+Monitorar a 1ª liquidação real de abandono da Betsson — mesma cautela aplicada às
+reclassificadas de 17/07 (lição da KTO: regra publicada ≠ liquidação do provedor).
+
+---
+
+## Lote 03/08/2026 (2ª parte) — EstrelaBet e 4Play
+
+As duas eram FONTES de odds desde 26/07 com o tênis **inteiro rejeitado** pelo fail-safe
+(nunca classificadas) — juntas somam ~4.500 odds/varredura. Auditadas a pedido do usuário,
+com autorização para aplicar direto o que fosse confiança ALTA.
+
+**Obtenção da fonte (as duas resistem a HTTP puro):**
+- **4Play**: tudo 403 (Akamai) em fetch pelado. Cedeu com chromium HEADED sob xvfb: o
+  rodapé expõe `/info/regrasesportivas`, que rende **4,9 MB** de regras.
+- **EstrelaBet**: SPA cujo Zendesk dá 403 e cujas rotas `/pagina/*` renderizam conteúdo
+  GENÉRICO (as 4 que testei devolveram o mesmo texto, sem a palavra "tênis" — armadilha:
+  parecem existir, HTTP 200). O documento real é **`/policy/sports-betting-rules`**
+  (2,2 MB), descoberto lendo os âncoras do rodapé no browser após rolar a página.
+- Nos dois casos o texto exige extração por **shadow DOM** (a receita da Betsson).
+
+| Casa | Regra publicada (abandono no Vencedor) | **Grupo** | Confiança | Fonte |
+|---|---|:---:|:---:|---|
+| **4Play** | **VOID PURO** (template Altenar traduzido): "em caso de desistência do jogador (lesão, doença ou circunstância pessoal), decisão de adulto, vitória fácil, desqualificação ou abandono, todos os mercados determinados no campo são liquidados em conformidade e todo o resto indecisos declarado nulo e sem validade. **Para evitar dúvidas, se um tenista se retirar antes do último ponto concluído, o mercado vencedor da partida é anulado**, mas todos os mercados relacionados a sets ou jogos específicos que são determinados são liquidados de acordo" | **A** ✅ | alta | [4play.bet.br/info/regrasesportivas](https://4play.bet.br/info/regrasesportivas) |
+| **EstrelaBet** | **VOID PURO** — texto LITERALMENTE IGUAL ao da 4Play (mesmo template Altenar, só troca o nome da marca) | **A** ✅ | alta | [estrelabet.bet.br/policy/sports-betting-rules](https://www.estrelabet.bet.br/policy/sports-betting-rules) |
+
+### Verificação adversarial (feita nos dois documentos)
+
+Tentei derrubar a classificação procurando a regra de 1-set/avanço do Grupo B:
+- **"avanço"/"próxima rodada"/"vencedor da aposta"**: nenhuma ocorrência ligada a tênis. O
+  único hit próximo é a promo de *pagamento antecipado* do BASQUETE ("quando a equipe estiver
+  com dezoito ou vinte pontos de vantagem") — não é regra de liquidação de W.O.
+- **"um set"** (40 ocorrências): todas são **definição de mercado** ("Jogador 1 para ganhar
+  um set", "Ambos os jogadores vencerão um set", "Total de jogos do Set X"), nunca condição
+  de validade do vencedor da partida. Não existe a cláusula "é necessário um set completo
+  para as apostas serem válidas" que caracteriza o Grupo B.
+- Contraste que reforça: as casas do Grupo B (Pinnacle, KTO, BetWarrior, Betsson, Stake)
+  TÊM essa frase explícita. Aqui ela não existe, e existe a frase oposta ("é anulado").
+
+### Decisão aplicada (03/08/2026)
+
+`'estrelabet'` e `'4play'` entraram no **GRUPO_A** de `regras.ts`. O tênis das duas passa a
+cruzar com todo o Grupo A (Aposta1, Superbet, BetBoom, Betnacional, SeuBet, Vbet,
+EsportesDaSorte, BrBET, MarjoSports, Betano, Blaze…) e segue rejeitado contra o Grupo B
+(Kambi, Pinnacle, Betsson, Stake, 1xbet, Bolsa, Pitaco).
+
+Como as duas são Altenar, vale repetir a lição do lote 31/07: **isto NÃO se estende para
+outras casas Altenar** (Onabet, Luvabet) — o que classifica é o documento do OPERADOR, e
+Altenar tem operador em A (Aposta1, BrBET, e agora estas duas) e em B (KTO).
+
+Monitorar a 1ª liquidação real de abandono das duas — mesma cautela das reclassificadas.

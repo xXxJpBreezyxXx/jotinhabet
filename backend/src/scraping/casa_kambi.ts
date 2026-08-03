@@ -121,6 +121,31 @@ const TOTAL_ASIATICO_LABEL: Record<string, string> = {
   baseball: 'Total de Corridas',
 };
 
+/**
+ * Rótulos CRUS do Kambi que são o mesmo mercado que as outras casas nomeiam diferente.
+ *
+ * O Kambi repassa o `criterion` do feed como nome de mercado (ao contrário do Altenar,
+ * que traduz em `MERCADO_AO_VIVO`), então ele escapa da convenção do projeto e passa a
+ * cruzar só com o outro Kambi. Mesma classe de problema que o TOTAL_ASIATICO_LABEL acima.
+ *
+ * Medido em 03/08/2026: a KTO e a BetWarrior publicam 468 ofertas de "Handicap de Game"
+ * por varredura → canônico HANDICAP_GAMES_FT, enquanto Pinnacle, NSoft, BetBoom, Altenar
+ * e Betsson publicam o MESMO mercado (handicap de games do tênis) como 'Handicap' →
+ * HANDICAP_GERAL_FT. Resultado: 279 clusters presos entre as duas casas Kambi e 88
+ * clusters órfãos da Betsson, sem um único cruzamento possível entre os dois grupos.
+ *
+ * A convenção está documentada em casa_altenar.ts: "handicap de GAMES = o handicap geral
+ * do tênis, convenção que já vale na Pinnacle/NSoft/BetBoom".
+ *
+ * NÃO precisa entrar aqui: "Handicap de Set" (→ HANDICAP_SETS_FT) já bate com o
+ * 'Handicap de Sets' das outras casas; e no basquete "Handicap" e "Handicap - Incluindo
+ * prorrogação" já caem no MESMO canônico e nunca aparecem juntos no mesmo evento
+ * (verificado: 0 eventos com os dois), então são o mesmo mercado com nome variável.
+ */
+const MERCADO_CONVENCAO: Record<string, string> = {
+  'Handicap de Game': 'Handicap',
+};
+
 export class KambiScraper implements OddsScraper {
   private cfg: Required<KambiConfig>;
 
@@ -360,7 +385,10 @@ export class KambiScraper implements OddsScraper {
       const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
       return {
         esporte, evento, dataHora, url,
-        mercado: /handicap|desvantagem/i.test(criterio) ? criterio : `Handicap ${criterio}`.trim(),
+        // Aplica a convenção do projeto ANTES de emitir (ver MERCADO_CONVENCAO).
+        mercado:
+          MERCADO_CONVENCAO[criterio] ||
+          (/handicap|desvantagem/i.test(criterio) ? criterio : `Handicap ${criterio}`.trim()),
         linha,
         opcaoA: `${ev.homeName} (${sinal(linha)})`,
         opcaoB: `${ev.awayName} (${sinal(-linha)})`,

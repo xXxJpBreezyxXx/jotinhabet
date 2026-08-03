@@ -36,6 +36,9 @@ interface NSoftConfig {
   tenant: string;
   /** Páginas de cursor por esporte (cada uma ~50 eventos). Default 4. */
   maxPaginas?: number;
+  // Agente ao vivo: quando true varre TAMBÉM o feed games/2 (ao vivo) e não descarta
+  // partida já iniciada. O scanner de surebets constrói SEM esta opção (só pré-jogo).
+  incluirAoVivo?: boolean;
 }
 
 /**
@@ -160,7 +163,7 @@ export class NSoftAioScraper implements OddsScraper {
   private cfg: Required<NSoftConfig>;
 
   constructor(cfg: NSoftConfig) {
-    this.cfg = { maxPaginas: 4, ...cfg };
+    this.cfg = { maxPaginas: 4, ...cfg, incluirAoVivo: !!cfg.incluirAoVivo };
   }
 
   getNome(): string {
@@ -177,21 +180,38 @@ export class NSoftAioScraper implements OddsScraper {
     };
   }
 
-  private base(): string {
-    return `${AIO}/tenants/${this.cfg.tenant}/games/1/languages/pt/offer/cursors`;
+  /**
+   * Feeds a varrer: 1 = pré-match, 2 = ao vivo. São ofertas SEPARADAS na NSoft (o path
+   * exige gameID numérico), então "incluir ao vivo" é varrer os dois, não trocar de um
+   * pelo outro.
+   */
+  private games(): number[] {
+    return this.cfg.incluirAoVivo ? [1, 2] : [1];
+  }
+
+  private base(gameId: number): string {
+    return `${AIO}/tenants/${this.cfg.tenant}/games/${gameId}/languages/pt/offer/cursors`;
   }
 
   /**
    * Resolve nome do esporte → sportId DESTE tenant (os ids não são globais na NSoft).
    * Fonte: offer-stats/event-counts/cursors, que lista os esportes do tenant com id+nome.
    * Cacheado por instância (uma chamada por varredura).
+   *
+   * ⚠️ O cache é POR gameID, e o feed ao vivo é consultado com o id que ELE mesmo
+   * declarou: cada game publica só os esportes que tem (medido 31/07: games/2 lista 7
+   * esportes na Brazino777 e 12 na Aposta Ganha) e a numeração é do tenant — o 49 é
+   * "Críquete" na Brazino777 e "Futebol" na Aposta Ganha, o 65 é "Futebol" na Brazino777 e
+   * "Futebol Americano" na Aposta Ganha. Reaproveitar id de outro feed/tenant venderia
+   * críquete ou futebol americano como futebol e cruzaria com futebol de outra casa.
    */
-  private sportsCache: Map<string, number> | null = null;
-  private async resolverSports(): Promise<Map<string, number>> {
-    if (this.sportsCache) return this.sportsCache;
+  private sportsCache = new Map<number, Map<string, number>>();
+  private async resolverSports(gameId: number): Promise<Map<string, number>> {
+    const cache = this.sportsCache.get(gameId);
+    if (cache) return cache;
     const mapa = new Map<string, number>();
     try {
-      const url = `${AIO}/tenants/${this.cfg.tenant}/games/1/languages/pt/offer-stats/event-counts/cursors`;
+      const url = `${AIO}/tenants/${this.cfg.tenant}/games/${gameId}/languages/pt/offer-stats/event-counts/cursors`;
       const resp = await fetchTextoComRetry(url, { headers: this.headers() }, 2, `${this.cfg.nome}/sports`);
       if (resp.status === 200) {
         const j: NsResp = JSON.parse(resp.body);
@@ -203,27 +223,31 @@ export class NSoftAioScraper implements OddsScraper {
     } catch (e: any) {
       console.error(`   ⚠️ [${this.cfg.nome}] não resolveu sportIds: ${e.message}`);
     }
-    this.sportsCache = mapa;
+    this.sportsCache.set(gameId, mapa);
     return mapa;
   }
 
   async executarCrawler(esportes: string[], _datas: string[], _headless = true): Promise<ScrapedOdd[]> {
     console.log(`🤖 [${this.cfg.nome}] Extração via NSoft AIO (API pública)...`);
     const todas: ScrapedOdd[] = [];
-    const mapa = await this.resolverSports();
     const nomes = [...new Set(esportes.map((e) => SPORT_NOME[e]).filter(Boolean))];
-    for (const nome of nomes) {
-      const sid = mapa.get(nome);
-      if (!sid) {
-        console.log(`   [${this.cfg.nome}] ${NOME_LABEL[nome]}: esporte não ofertado neste tenant`);
-        continue;
-      }
-      try {
-        const antes = todas.length;
-        await this.coletarEsporte(sid, nome, todas);
-        console.log(`   [${this.cfg.nome}] ${NOME_LABEL[nome]}: ${todas.length - antes} odds`);
-      } catch (e: any) {
-        console.error(`   ⚠️ [${this.cfg.nome}] falha em ${NOME_LABEL[nome]}: ${e.message}`);
+    for (const gameId of this.games()) {
+      // Resolve os ids DENTRO do laço: cada feed tem a sua numeração de esporte.
+      const mapa = await this.resolverSports(gameId);
+      const sufixo = gameId === 2 ? ' (ao vivo)' : '';
+      for (const nome of nomes) {
+        const sid = mapa.get(nome);
+        if (!sid) {
+          console.log(`   [${this.cfg.nome}] ${NOME_LABEL[nome]}${sufixo}: esporte não ofertado neste tenant`);
+          continue;
+        }
+        try {
+          const antes = todas.length;
+          await this.coletarEsporte(sid, nome, todas, gameId);
+          console.log(`   [${this.cfg.nome}] ${NOME_LABEL[nome]}${sufixo}: ${todas.length - antes} odds`);
+        } catch (e: any) {
+          console.error(`   ⚠️ [${this.cfg.nome}] falha em ${NOME_LABEL[nome]}${sufixo}: ${e.message}`);
+        }
       }
     }
     const unicas = this.dedupar(todas);
@@ -249,32 +273,34 @@ export class NSoftAioScraper implements OddsScraper {
 
   /** Revalidação dirigida: re-coleta o esporte e filtra o evento (a API não busca por jogo). */
   async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
-    const mapa = await this.resolverSports();
     const nomes = esporte && SPORT_NOME[esporte] ? [SPORT_NOME[esporte]] : [...new Set(Object.values(SPORT_NOME))];
-    for (const nome of nomes) {
-      const sid = mapa.get(nome);
-      if (!sid) continue;
-      try {
-        const out: ScrapedOdd[] = [];
-        await this.coletarEsporte(sid, nome, out);
-        const doEvento = out.filter((o) => areEventsSame(o.evento, evento));
-        if (doEvento.length) return doEvento;
-      } catch {
-        /* melhor esforço */
+    for (const gameId of this.games()) {
+      const mapa = await this.resolverSports(gameId);
+      for (const nome of nomes) {
+        const sid = mapa.get(nome);
+        if (!sid) continue;
+        try {
+          const out: ScrapedOdd[] = [];
+          await this.coletarEsporte(sid, nome, out, gameId);
+          const doEvento = out.filter((o) => areEventsSame(o.evento, evento));
+          if (doEvento.length) return doEvento;
+        } catch {
+          /* melhor esforço */
+        }
       }
     }
     return [];
   }
 
   /** Percorre as páginas de cursor de um esporte, acumulando o dicionário de mercados. */
-  private async coletarEsporte(sportId: number, nomeEsporte: string, out: ScrapedOdd[]): Promise<void> {
+  private async coletarEsporte(sportId: number, nomeEsporte: string, out: ScrapedOdd[], gameId: number): Promise<void> {
     const dicMercados = new Map<number, NsMarketDic>();
     const dicOutcomes = new Map<number, string>(); // outcomeId → name
     // O stream de cursor REENVIA eventos já vistos (atualização). Sem dedupe, o mesmo
     // jogo é parseado 2x e sai linha duplicada — visto em tênis de mesa: dois handicaps
     // -0.5 no mesmo evento com odds 1.82 e 1.86.
     const vistos = new Set<number>();
-    let url = `${this.base()}?sports=${sportId}`;
+    let url = `${this.base(gameId)}?sports=${sportId}`;
     let cursorAnterior: string | null = null;
 
     for (let p = 0; p < this.cfg.maxPaginas; p++) {
@@ -295,7 +321,7 @@ export class NSoftAioScraper implements OddsScraper {
       const cur = j.cursorId;
       if (!cur || cur === cursorAnterior || !(j.events || []).length) break;
       cursorAnterior = cur;
-      url = `${this.base()}/${encodeURIComponent(cur)}`;
+      url = `${this.base(gameId)}/${encodeURIComponent(cur)}`;
     }
   }
 
@@ -314,9 +340,10 @@ export class NSoftAioScraper implements OddsScraper {
     const home = (comps[0].teamName || comps[0].name || '').trim();
     const away = (comps[1].teamName || comps[1].name || '').trim();
     if (!home || !away) return;
-    // Só PRÉ-JOGO.
+    // Só PRÉ-JOGO — com incluirAoVivo o jogo em andamento fica (o consumidor deduz "ao
+    // vivo" pelo dataHora no passado, que é o próprio startsAt do feed).
     const t = Date.parse(ev.startsAt || '');
-    if (!isNaN(t) && t <= Date.now()) return;
+    if (!this.cfg.incluirAoVivo && !isNaN(t) && t <= Date.now()) return;
     const evento = `${home} vs ${away}`;
     const dataHora = ev.startsAt || 'Hoje';
     const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
@@ -399,8 +426,8 @@ export class NSoftAioScraper implements OddsScraper {
  * responde por HTTP puro — este scraper NÃO precisa de browser.
  */
 export class Brazino777Scraper extends NSoftAioScraper {
-  constructor() {
-    super({ nome: 'Brazino777', tenant: '27b22090-fe8e-49f7-a64e-1d75d7f44076' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'Brazino777', tenant: '27b22090-fe8e-49f7-a64e-1d75d7f44076', incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
@@ -410,7 +437,7 @@ export class Brazino777Scraper extends NSoftAioScraper {
  * plataforma — entra só com config.
  */
 export class ApostaGanhaScraper extends NSoftAioScraper {
-  constructor() {
-    super({ nome: 'ApostaGanha', tenant: '736cb862-f857-4970-8664-3ab7e4ea1137' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'ApostaGanha', tenant: '736cb862-f857-4970-8664-3ab7e4ea1137', incluirAoVivo: opts?.incluirAoVivo });
   }
 }

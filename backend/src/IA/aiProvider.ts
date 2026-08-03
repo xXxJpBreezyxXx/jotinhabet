@@ -1,6 +1,7 @@
 import { GeminiProvider } from './Provedores/Gemini';
 import { OpenAIProvider } from './Provedores/OpenAI';
 import { GroqProvider } from './Provedores/Groq';
+import { OpenRouterProvider } from './Provedores/OpenRouter';
 import { IAProvider, ImagemEntrada } from './Provedores/types';
 
 export { ImagemEntrada };
@@ -26,19 +27,22 @@ export { ImagemEntrada };
  *    continua; só devolve mock se TODOS estiverem sem chave.
  *
  * 3) VISÃO tem cadeia própria (`AI_PROVIDER_CHAIN_VISION`): a Groq não expõe
- *    modelo multimodal na conta atual, então ela fica por último na visão.
+ *    modelo multimodal na conta atual e OpenAI/Gemini estavam com crédito zerado
+ *    em 31/07 — por isso a **OpenRouter** (free tier multimodal) entrou como 1ª da
+ *    cadeia de visão. Ver Provedores/OpenRouter.
  */
 
-export type ProviderName = 'gemini' | 'openai' | 'groq';
+export type ProviderName = 'gemini' | 'openai' | 'groq' | 'openrouter';
 
 export interface AIResult {
   text: string;
   provider: ProviderName;
 }
 
-const NOMES_VALIDOS: ProviderName[] = ['openai', 'gemini', 'groq'];
+const NOMES_VALIDOS: ProviderName[] = ['openai', 'gemini', 'groq', 'openrouter'];
 const CADEIA_TEXTO_DEFAULT: ProviderName[] = ['openai', 'gemini', 'groq'];
-const CADEIA_VISAO_DEFAULT: ProviderName[] = ['openai', 'gemini', 'groq'];
+// Visão: OpenRouter primeiro (é a única com crédito hoje — ver nota 3 acima).
+const CADEIA_VISAO_DEFAULT: ProviderName[] = ['openrouter', 'openai', 'gemini', 'groq'];
 
 // Instâncias preguiçosas (lazy) para não construir clientes na importação.
 const instancias: Partial<Record<ProviderName, IAProvider>> = {};
@@ -46,7 +50,13 @@ const instancias: Partial<Record<ProviderName, IAProvider>> = {};
 function getProvider(nome: ProviderName): IAProvider {
   if (!instancias[nome]) {
     instancias[nome] =
-      nome === 'openai' ? new OpenAIProvider() : nome === 'gemini' ? new GeminiProvider() : new GroqProvider();
+      nome === 'openai'
+        ? new OpenAIProvider()
+        : nome === 'gemini'
+        ? new GeminiProvider()
+        : nome === 'openrouter'
+        ? new OpenRouterProvider()
+        : new GroqProvider();
   }
   return instancias[nome]!;
 }
@@ -71,7 +81,9 @@ export function cadeiaTexto(): ProviderName[] {
   return lerCadeia('AI_PROVIDER_CHAIN', CADEIA_TEXTO_DEFAULT);
 }
 export function cadeiaVisao(): ProviderName[] {
-  return lerCadeia('AI_PROVIDER_CHAIN_VISION', lerCadeia('AI_PROVIDER_CHAIN', CADEIA_VISAO_DEFAULT));
+  // Não herda AI_PROVIDER_CHAIN: a cadeia de TEXTO é outra (a Groq é excelente em texto e
+  // não tem visão; a OpenRouter free é o contrário — multimodal, mas lenta para texto).
+  return lerCadeia('AI_PROVIDER_CHAIN_VISION', CADEIA_VISAO_DEFAULT);
 }
 
 // ───────────────────────── circuit breaker de cota ─────────────────────────
@@ -120,11 +132,13 @@ export function statusProvedores(): Array<{
     openai: process.env.OPENAI_API_KEY,
     gemini: process.env.GEMINI_API_KEY,
     groq: process.env.GROQ_API_KEY,
+    openrouter: process.env.OPENROUTER_API_KEY,
   };
   const modelos: Record<ProviderName, string | undefined> = {
     openai: process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini',
     gemini: process.env.GEMINI_MODEL?.trim() || 'gemini-2.5-flash',
     groq: process.env.GROQ_MODEL?.trim() || 'openai/gpt-oss-120b',
+    openrouter: process.env.OPENROUTER_MODEL_VISION?.trim() || process.env.OPENROUTER_MODEL?.trim() || 'google/gemma-4-26b-a4b-it:free',
   };
   return NOMES_VALIDOS.map((p) => ({
     provider: p,

@@ -18,6 +18,7 @@ import { getResumoCalibracao, getAlertasRecentes } from './core/calibracaoRepo';
 import { requireApiToken } from './auth/apiToken';
 import { generateWithFallback, statusProvedores, cadeiaTexto } from './IA/aiProvider';
 import { rodarAgente, pediuEscritaExplicita } from './IA/agent/agentLoop';
+import { WhatsAppAgentBridge, tokenWebhookValido, chatsPermitidos } from './IA/agent/whatsappBridge';
 import { skillsParaUI } from './IA/agent/registry';
 import { catalogoCasas, casasSemIntegracao } from './IA/agent/catalogoCasas';
 import { cadeiaAgente, criarMotor } from './IA/agent/chatModels';
@@ -25,6 +26,7 @@ import { calcularPromocao } from './core/promocoes';
 import { WhatsAppNotifier } from './notify/whatsapp';
 import { avisarDeployWhatsApp } from './notify/deployNotice';
 import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
+import { lerImagemDaConversa, mensagemComImagem } from './IA/extractors/imagemChat';
 import { SignalPipeline } from './signals/signalPipeline';
 import { montarContextoApp, PROTOCOLO_ACAO_COPILOT, extrairAcaoCopilot, executarCriarOportunidade, resumirResultadoCriacao } from './IA/copilot';
 import { TelegramIngestService } from './signals/telegramIngestService';
@@ -58,7 +60,25 @@ if (frontendOrigin) {
 // um print de sinal em base64 tem ~1-3 MB e estouraria o parser global.
 const jsonPadrao = express.json();
 const jsonGrande = express.json({ limit: '8mb' });
-app.use((req, res, next) => (req.path.startsWith('/api/telegram') ? jsonGrande : jsonPadrao)(req, res, next));
+// (o webhook do WhatsApp entra no grande pelo mesmo motivo: payload de mídia da Evolution
+// traz metadados longos e um 413 do parser faria a Evolution re-tentar 3x.)
+//
+// ANTES do parser, o webhook do WhatsApp confere o token — que vem na QUERY STRING e não
+// exige corpo lido. Sem isso, qualquer um na internet fazia o backend desserializar 8 MB de
+// JSON por request só para ser recusado depois.
+app.use('/api/whatsapp/webhook', (req, res, next) => {
+  if (req.method !== 'POST') return next();
+  if (tokenWebhookValido(req.query?.token ?? req.header('x-webhook-token'))) return next();
+  console.warn('⚠️ [WA-Agente] webhook recebido com token inválido — ignorado (antes do parser).');
+  res.json({ ok: false, motivo: 'token inválido' });
+});
+// /api/ai/chat entra no grande porque o chat aceita IMAGEM (print de promoção/cupom): um
+// base64 de 1-3 MB estouraria o limite de 100kb do parser padrão com 413.
+app.use((req, res, next) =>
+  (req.path.startsWith('/api/telegram') || req.path.startsWith('/api/whatsapp') || req.path === '/api/ai/chat'
+    ? jsonGrande
+    : jsonPadrao)(req, res, next)
+);
 
 // Worker de enriquecimento assíncrono de risco por IA.
 const enrichment = new EnrichmentService();
@@ -66,6 +86,9 @@ const enrichment = new EnrichmentService();
 const revalidation = new RevalidationService();
 // Listener do grupo de sinais no Telegram (GramJS) — no-op sem envs TELEGRAM_*.
 const telegramIngest = new TelegramIngestService();
+// Ponte WhatsApp ↔ agente (grupo "Sure Agent"): recebe o webhook da Evolution, roda o
+// MESMO agente da aba "IA & Automação" e responde no grupo.
+const whatsappAgente = new WhatsAppAgentBridge(revalidation);
 
 // Initialize AI providers
 const geminiProvider = new GeminiProvider();
@@ -176,6 +199,8 @@ app.get('/api/ai/skills', (_req, res) => {
       plataforma: c.plataforma,
       fonte_scanner: c.fonte_scanner,
       odd_ao_vivo: c.odd_ao_vivo,
+      varredura_ao_vivo: c.varredura_ao_vivo,
+      consulta_ao_vivo: c.consulta_ao_vivo,
       grupo_wo_tenis: c.grupo_wo_tenis,
     })),
     casas_sem_integracao: casasSemIntegracao().map((c) => c.nome),
@@ -190,13 +215,39 @@ app.get('/api/ai/skills', (_req, res) => {
 });
 
 app.post('/api/ai/chat', requireApiToken, async (req, res) => {
-  const { messages } = req.body;
+  const { messages, imagemBase64, mimeType } = req.body;
   // Mantém só mensagens com conteúdo textual real e limita o histórico enviado ao LLM.
   const validas = (Array.isArray(messages) ? messages : [])
     .filter((m: any) => m && typeof m.content === 'string' && m.content.trim())
     .slice(-40);
-  if (validas.length === 0) {
+  const temImagem = typeof imagemBase64 === 'string' && imagemBase64.trim().length > 100;
+  if (validas.length === 0 && !temImagem) {
     return res.status(400).json({ error: 'Envie ao menos uma mensagem com conteúdo.' });
+  }
+
+  // IMAGEM anexada no chat (print de promoção, cupom, tela de odds): a visão converte em
+  // texto e ele entra na ÚLTIMA mensagem do usuário — daí o agente segue com as skills
+  // normais, sem precisar de um caminho paralelo só para imagem.
+  let avisoImagem: string | null = null;
+  if (temImagem) {
+    const legenda = validas.length ? `${validas[validas.length - 1].content}`.trim() : '';
+    try {
+      const b64 = imagemBase64.replace(/^data:[^;]+;base64,/, '');
+      const leitura = await lerImagemDaConversa(b64, mimeType || 'image/jpeg', legenda);
+      const conteudo = mensagemComImagem(leitura.texto, legenda);
+      if (validas.length) validas[validas.length - 1] = { ...validas[validas.length - 1], content: conteudo };
+      else validas.push({ role: 'user', content: conteudo });
+      console.log(`🖼️ [ai/chat] imagem lida por ${leitura.provider} (${leitura.texto.length} chars)`);
+    } catch (error: any) {
+      avisoImagem = `não consegui ler a imagem (${`${error?.message || error}`.slice(0, 120)})`;
+      console.error('[ai/chat] visão falhou:', avisoImagem);
+      if (!validas.length) {
+        return res.json({
+          reply: `👁️ Recebi a imagem, mas a leitura falhou: ${avisoImagem}. Me descreve o que está nela que eu sigo daqui.`,
+          provider: 'nenhum',
+        });
+      }
+    }
   }
 
   // MODO AGENTE (default): tool-calling com as skills de scraper/odds/radar/banca/
@@ -217,7 +268,7 @@ app.post('/api/ai/chat', requireApiToken, async (req, res) => {
         provider: r.provider,
         modelo: r.modelo,
         passos: r.passos,
-        avisos: r.avisos,
+        avisos: avisoImagem ? [...r.avisos, avisoImagem] : r.avisos,
         ...(r.acao ? { acao: r.acao } : {}),
       });
     } catch (error: any) {
@@ -330,6 +381,44 @@ app.get('/api/whatsapp/grupos', async (_req, res) => {
   } catch (error: any) {
     res.status(500).json({ error: error?.message || 'Erro ao listar grupos do WhatsApp' });
   }
+});
+
+/**
+ * WEBHOOK DA EVOLUTION — é aqui que a conversa do WhatsApp com o agente entra.
+ *
+ * Cole esta URL no campo "Webhook" da instância na Evolution (ou via
+ * POST /instance/connect {webhookUrl, subscribe:["MESSAGE"]}):
+ *   https://jotinhabet.eurekmind.com/api/whatsapp/webhook?token=<AGENT_WHATSAPP_WEBHOOK_TOKEN>
+ * De dentro da overlay do Swarm, o caminho curto também serve:
+ *   http://jotinhabet_backend:4000/api/whatsapp/webhook?token=...
+ *
+ * SEMPRE responde 200 — a Evolution re-tenta 3x quando o webhook não devolve 2xx, e cada
+ * re-tentativa viraria uma execução duplicada do agente (com scraper e cota de IA).
+ * A triagem é síncrona; a execução do agente roda em background.
+ */
+app.post('/api/whatsapp/webhook', (req, res) => {
+  if (!tokenWebhookValido(req.query?.token ?? req.header('x-webhook-token'))) {
+    console.warn('⚠️ [WA-Agente] webhook recebido com token inválido — ignorado.');
+    return res.json({ ok: false, motivo: 'token inválido' });
+  }
+  try {
+    const triagem = whatsappAgente.receber(req.body);
+    res.json({ ok: true, ...triagem });
+  } catch (error: any) {
+    console.error('[whatsapp/webhook] erro na triagem:', error?.message || error);
+    res.json({ ok: false, motivo: 'erro interno na triagem' });
+  }
+});
+
+// Estado do canal do WhatsApp (sessões, contadores, chats autorizados).
+app.get('/api/whatsapp/webhook', requireApiToken, (_req, res) => {
+  res.json({ ...whatsappAgente.getStatus(), chats_autorizados: chatsPermitidos() });
+});
+
+// Últimos payloads CRUS recebidos — o formato do webhook varia por versão do
+// evolution-go; é por aqui que se confere o que chegou de verdade.
+app.get('/api/whatsapp/webhook/debug', requireApiToken, (_req, res) => {
+  res.json({ ultimos: whatsappAgente.ultimosPayloads() });
 });
 
 // Arbitrage Calculator Endpoint

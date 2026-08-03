@@ -29,6 +29,12 @@ export interface MensagemCliente {
   content: string;
 }
 
+/** Ajustes por canal de origem (a aba do painel × o grupo do WhatsApp). */
+export interface OpcoesAgente {
+  /** 'web' (default) = aba IA & Automação; 'whatsapp' = grupo do agente no celular. */
+  canal?: 'web' | 'whatsapp';
+}
+
 export interface RespostaAgente {
   reply: string;
   provider: MotorNome | 'nenhum';
@@ -127,14 +133,29 @@ export function pediuEscritaExplicita(textoUltimaMensagem: string): boolean {
   return (imperativo || infinitivoComPedido) && objeto;
 }
 
-function systemPrompt(contextoApp: string): string {
+/**
+ * Instrução extra do canal WhatsApp. Sem ela o agente responde como no painel — com
+ * tabela de 6 colunas e 40 linhas, ilegível no celular (e a conversão para o dialeto do
+ * WhatsApp só resolve a SINTAXE, não o tamanho).
+ */
+const ESTILO_WHATSAPP = `CANAL: WhatsApp, no celular.
+- Seja BREVE: até ~12 linhas. Uma resposta longa é ilegível no celular.
+- Nada de tabela com mais de 3 colunas: prefira uma linha por item ("Casa — lado @odd").
+- Negrito com **assim** e lista com "- " (o sistema converte para o formato do WhatsApp).
+- Números primeiro, ressalva em UMA linha no fim.`;
+
+function systemPrompt(contextoApp: string, canal: OpcoesAgente['canal'] = 'web'): string {
   return `Você é o AGENTE do JotinhaBet: copiloto de arbitragem esportiva (surebets), apostas de promoção (matched betting), gestão de banca e regras de casas de apostas. Responda SEMPRE em português do Brasil, objetivo e prático, com números.
 
 COMO VOCÊ TRABALHA
 - Você TEM FERRAMENTAS (skills) com acesso real ao sistema: odds ao vivo nas casas integradas, radar de surebets/value bets, banca e saldos, regras/W.O. por casa, calculadoras e a base de conhecimento. USE-AS em vez de estimar.
+- NUNCA peça o nome do jogo quando o usuário quer uma VARREDURA. "quais jogos ao vivo tem na casa X", "vê o que tem de tênis na Y", "tem surebet ao vivo entre X e Y" se resolvem com varrer_jogos_casa (lista os jogos de uma casa) e varrer_surebets_casas (cruza 2-4 casas) — ambas aceitam situacao="ao_vivo" | "pre_jogo" | "todos" e NÃO precisam do nome do evento. Só depois, para detalhar um jogo específico, use consultar_odds_casa/comparar_odds_casas com o nome que a varredura devolveu.
+- Casa fora da lista "VARREM jogo em andamento" não coleta partida em andamento: nesse caso diga isso explicitamente — NÃO afirme que "não há jogo ao vivo" na casa.
 - NUNCA invente odd, casa, evento, valor de bônus ou regra de promoção. Se não está no CONTEXTO_APP, não veio de uma skill e o usuário não disse: pergunte ou consulte.
 - Cálculo de dinheiro é sempre por skill (calcular_surebet, calcular_cobertura_promocao, calcular_multipla_qualificadora). Não faça aritmética de cabeça para dizer aporte.
-- Antes de recomendar uma operação entre duas casas, verifique checar_regras_do_par (mercado proibido, grupos de W.O. do tênis).
+- Antes de recomendar uma SUREBET entre duas casas, verifique checar_regras_do_par (mercado proibido, grupos de W.O. do tênis).
+- ATENÇÃO AO ESCOPO DAS DIRETRIZES: mercado proibido (1X2 etc.) e grupo de W.O. valem para SUREBET. Em operação de PROMOÇÃO (freebet SNR, aposta qualificativa, cashback, "aposte e ganhe", múltipla qualificadora) elas NÃO bloqueiam nada — chame checar_regras_do_par com finalidade="promocao" e trate o retorno como AVISO, nunca como impedimento. Nunca diga a ele que a promoção "não pode" por causa de mercado proibido ou de grupo de W.O.
+- Para MONTAR uma múltipla de promoção com odds reais, use montar_multipla_promocao: ele varre a casa da promoção, escolhe as pernas que cumprem o regulamento (odd mínima por seleção e odd total) e já traz a odd de cobertura em outra casa + a cobertura sequencial. Se o usuário mandar o regulamento, extraia dele: odd total mínima, odd mínima por seleção, valor do bilhete e prazo.
 - Skills marcadas como lentas (consultar_odds_casa, comparar_odds_casas, revalidar_surebet) custam tempo real: use no máximo o necessário e diga ao usuário o que consultou.
 - Skills de ESCRITA (criar_oportunidade_no_radar, registrar_promocao, avisar_no_whatsapp) SÓ com pedido explícito do usuário nesta conversa.
 - O sistema NUNCA aposta: a execução é manual. Termine recomendações operacionais lembrando de conferir a odd na tela antes de confirmar.
@@ -144,6 +165,7 @@ ESTILO
 - Vá direto ao ponto: números primeiro, ressalva depois. Nada de promessa de lucro sem risco.
 - Ao explicar um alerta, traduza os dois rótulos para o MESMO evento binário; se não conseguir, avise que pode ser falso positivo de matching.
 
+${canal === 'whatsapp' ? `\n${ESTILO_WHATSAPP}\n` : ''}
 ${DOUTRINA_MERCADOS}
 
 ${RESUMO_DOUTRINA_PROMOCOES}
@@ -165,6 +187,12 @@ function resumirResultado(nome: string, payload: any): string {
     return p.encontrado === false
       ? 'evento não encontrado nas casas consultadas'
       : `${p.casas_com_o_evento?.length || 0} casa(s), ${p.total_mercados_comparados} mercado(s), ${p.surebets_encontradas} surebet(s)`;
+  if (nome === 'varrer_jogos_casa')
+    return p.erro ? `erro: ${`${p.erro}`.slice(0, 90)}` : `${p.casa}: ${p.total_jogos ?? 0} jogo(s) no recorte ${p.situacao}`;
+  if (nome === 'varrer_surebets_casas')
+    return p.encontrado === false
+      ? 'menos de 2 casas com jogo no recorte'
+      : `${p.casas_consultadas?.length || 0} casa(s), ${p.jogos_em_2_ou_mais_casas ?? 0} jogo(s) em comum, ${p.surebets_encontradas ?? 0} surebet(s)`;
   if (nome === 'surebets_no_radar') return `${p.total} surebet(s) no radar`;
   if (nome === 'revalidar_surebet') return `status ${p.status} (ROI atual ${p.roi_atual ?? '—'})`;
   if (nome === 'banca_e_saldos') return `banca R$ ${p.banca_ativa_reais ?? '—'}, ${p.casas_com_saldo?.length || 0} casa(s) com saldo`;
@@ -175,6 +203,10 @@ function resumirResultado(nome: string, payload: any): string {
   if (nome === 'calcular_cobertura_promocao')
     return `cobrir R$ ${p.coverStake} → lucro R$ ${p.lucroGarantido}${p.retencaoPct !== null && p.retencaoPct !== undefined ? ` (retenção ${p.retencaoPct}%)` : ''}`;
   if (nome === 'otimizar_odd_freebet') return `odd ideal ${p.odd_ideal} (retenção ${p.retencao_no_ideal_pct}%)`;
+  if (nome === 'montar_multipla_promocao')
+    return p.erro
+      ? `erro: ${`${p.erro}`.slice(0, 90)}`
+      : `${p.pernas?.length || 0} perna(s), odd total ${p.odd_total}${p.qualifica ? ' (qualifica)' : ' (NÃO qualifica)'}, caixa de pico R$ ${p.cobertura?.caixa_pico ?? '—'}`;
   if (nome === 'calcular_multipla_qualificadora')
     return `odd total ${p.oddTotal}${p.qualifica ? ' (qualifica)' : ' (NÃO qualifica)'}, caixa de pico R$ ${p.cobertura?.caixaPico}`;
   if (nome === 'buscar_conhecimento') return `${p.total ?? p.indice?.length ?? 0} trecho(s)`;
@@ -200,12 +232,14 @@ function truncarParaModelo(payload: any): string {
  * Roda o agente sobre o histórico do chat.
  * @param mensagens histórico multi-turno vindo do frontend (últimas N).
  * @param revalidation instância compartilhada (memo de odds de 60s).
+ * @param opcoes canal de origem (ajusta o estilo da resposta: painel × WhatsApp).
  */
 export async function rodarAgente(
   mensagens: MensagemCliente[],
-  revalidation: RevalidationService
+  revalidation: RevalidationService,
+  opcoes: OpcoesAgente = {}
 ): Promise<RespostaAgente> {
-  const ctx: ContextoSkills = { revalidation, origem: 'agente' };
+  const ctx: ContextoSkills = { revalidation, origem: opcoes.canal === 'whatsapp' ? 'agente-whatsapp' : 'agente' };
   const passos: PassoAgente[] = [];
   const avisos: string[] = [];
   let acao: RespostaAgente['acao'] | undefined;
@@ -216,7 +250,7 @@ export async function rodarAgente(
   const pediuEscrita = pediuEscritaExplicita(ultimaDoUsuario);
 
   const contextoApp = await montarContextoAgente().catch(() => '(CONTEXTO indisponível)');
-  const system = systemPrompt(contextoApp);
+  const system = systemPrompt(contextoApp, opcoes.canal);
 
   const historico: MsgAgente[] = mensagens
     .filter((m) => m.content && m.content.trim())

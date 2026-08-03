@@ -4,6 +4,8 @@ import { catalogoCasas, acharCasa, resumoCasasParaPrompt } from '../../src/IA/ag
 import { SKILLS, acharSkill, ferramentasParaModelo, skillsParaUI } from '../../src/IA/agent/registry';
 import { buscarConhecimento, obterConhecimento, listarConhecimento } from '../../src/IA/conhecimento';
 import { pediuEscritaExplicita } from '../../src/IA/agent/agentLoop';
+import { agruparPorJogo, cruzarFeeds, ehAoVivo, filtrarSituacao, lerSituacao, normalizarEsporte, resumirJogo, resumirSurebet } from '../../src/IA/agent/varredura';
+import { acharSkill as buscarSkill } from '../../src/IA/agent/registry';
 import { casasComScraper } from '../../src/core/revalidationService';
 import { ScrapedOdd } from '../../src/scraping/scraper_base';
 
@@ -400,5 +402,163 @@ describe('gate de escrita do agente', () => {
     expect(pediuEscritaExplicita('quero registrar essa promoção')).toBe(true);
     // Infinitivo SEM pedido (dúvida sobre valor) continua fechado.
     expect(pediuEscritaExplicita('vale a pena registrar essa promoção no histórico?')).toBe(false);
+  });
+});
+
+describe('varredura de jogos (ao vivo × pré-jogo)', () => {
+  const agora = Date.parse('2026-07-31T18:00:00Z');
+  const emAndamento = { dataHora: '2026-07-31T17:00:00Z' };
+  const daquiUmaHora = { dataHora: '2026-07-31T19:00:00Z' };
+
+  it('data SEM fuso é lida como UTC (é a convenção do projeto, não hora local)', () => {
+    // Superbet emite "2026-07-31 17:00:00". Com Date.parse isso seria 20:00Z em São Paulo
+    // e um jogo em andamento apareceria como pré-jogo — foi o bug pego no probe.
+    expect(ehAoVivo({ dataHora: '2026-07-31 17:00:00' }, agora)).toBe(true);
+    expect(ehAoVivo({ dataHora: '2026-07-31 19:00:00' }, agora)).toBe(false);
+  });
+
+  it('classifica em andamento × pré-jogo, e horário desconhecido NÃO é ao vivo', () => {
+    expect(ehAoVivo(emAndamento, agora)).toBe(true);
+    expect(ehAoVivo(daquiUmaHora, agora)).toBe(false);
+    // "Hoje" (Betano/Blaze/1xBet/Stake) não permite afirmar que está rolando.
+    expect(ehAoVivo({ dataHora: 'Hoje' }, agora)).toBe(false);
+    expect(ehAoVivo({}, agora)).toBe(false);
+  });
+
+  it('filtra o recorte pedido', () => {
+    // Datas ancoradas LONGE do relógio real (o filtro usa Date.now()), para o teste não
+    // depender da hora em que roda.
+    const lista = [odd({ dataHora: '2020-01-01T10:00:00Z' }), odd({ dataHora: '2090-01-01T10:00:00Z' })];
+    expect(filtrarSituacao(lista, 'todos')).toHaveLength(2);
+    expect(filtrarSituacao(lista, 'pre_jogo')).toHaveLength(1);
+    expect(filtrarSituacao(lista, 'ao_vivo')).toHaveLength(1);
+    expect(filtrarSituacao(lista, 'ao_vivo')[0].dataHora).toBe('2020-01-01T10:00:00Z');
+  });
+
+  it('agrupa o MESMO jogo escrito diferente em casas diferentes', () => {
+    const jogos = agruparPorJogo([
+      { nome: 'KTO', odds: [odd({ evento: 'Flamengo vs Palmeiras' })] },
+      { nome: 'Superbet', odds: [odd({ evento: 'Flamengo - Palmeiras' })] },
+    ]);
+    expect(jogos).toHaveLength(1);
+    expect([...jogos[0].porCasa.keys()].sort()).toEqual(['KTO', 'Superbet']);
+  });
+
+  it('NÃO agrupa jogos de horários incompatíveis (homônimo de outro dia)', () => {
+    const jogos = agruparPorJogo([
+      { nome: 'KTO', odds: [odd({ evento: 'Flamengo vs Palmeiras', dataHora: '2026-07-31T20:00:00Z' })] },
+      { nome: 'Superbet', odds: [odd({ evento: 'Flamengo vs Palmeiras', dataHora: '2026-08-01T20:00:00Z' })] },
+    ]);
+    expect(jogos).toHaveLength(2);
+  });
+
+  it('cruza os feeds e acha a surebet do jogo, com o resumo em uma linha', () => {
+    const cruzadas = cruzarFeeds([
+      { nome: 'KTO', odds: [odd({ evento: 'Flamengo vs Palmeiras', oddA: 2.15, oddB: 1.7 })] },
+      { nome: 'Superbet', odds: [odd({ evento: 'Flamengo vs Palmeiras', oddA: 1.8, oddB: 2.2 })] },
+    ]);
+    expect(cruzadas).toHaveLength(1);
+    expect(cruzadas[0].mercado.roiPct).toBeGreaterThan(0);
+    const linha = resumirSurebet(cruzadas[0]);
+    expect(linha).toContain('ROI');
+    expect(linha).toContain('KTO');
+    expect(linha).toContain('Superbet');
+  });
+
+  it('jogo em UMA casa só não entra no cruzamento (não existe arbitragem)', () => {
+    const cruzadas = cruzarFeeds([
+      { nome: 'KTO', odds: [odd({ evento: 'Flamengo vs Palmeiras', oddA: 2.15, oddB: 2.2 })] },
+    ]);
+    expect(cruzadas).toHaveLength(0);
+  });
+
+  it('o resumo do jogo marca AO VIVO e traz o mercado principal', () => {
+    const jogos = agruparPorJogo([
+      {
+        nome: 'KTO',
+        odds: [odd({ evento: 'Flamengo vs Palmeiras', dataHora: '2026-01-01T10:00:00Z', mercado: 'Resultado Final' })],
+      },
+    ]);
+    const linha = resumirJogo(jogos[0], true);
+    expect(linha).toContain('AO VIVO');
+    expect(linha).toContain('Flamengo vs Palmeiras');
+    expect(linha).toContain('Resultado Final');
+    expect(linha).toContain('casas: KTO');
+  });
+});
+
+describe('normalizarEsporte (o modelo escreve o esporte como quer)', () => {
+  it('mapeia para o vocabulário dos scrapers', () => {
+    // Caso REAL: o modelo mandou "futebol" e o mapa do Kambi (indexado por 'Futebol')
+    // devolveu undefined → varredura de 0 odds → "não há jogo ao vivo" com 7 rolando.
+    expect(normalizarEsporte('futebol')).toBe('Futebol');
+    expect(normalizarEsporte('Futebol')).toBe('Futebol');
+    expect(normalizarEsporte('soccer')).toBe('Futebol');
+    expect(normalizarEsporte('tênis')).toBe('Tenis');
+    expect(normalizarEsporte('tenis')).toBe('Tenis');
+    expect(normalizarEsporte('Tênis de Mesa')).toBe('TenisDeMesa');
+    expect(normalizarEsporte('table tennis')).toBe('TenisDeMesa');
+    expect(normalizarEsporte('basquete')).toBe('Basquete');
+    expect(normalizarEsporte('vôlei')).toBe('Volei');
+    expect(normalizarEsporte('e-sports')).toBe('Esports');
+    expect(normalizarEsporte('CS2')).toBe('Esports');
+    expect(normalizarEsporte('beisebol')).toBe('Beisebol');
+  });
+
+  it('vazio cai em Futebol e desconhecido passa direto (não força default errado)', () => {
+    expect(normalizarEsporte('')).toBe('Futebol');
+    expect(normalizarEsporte(undefined)).toBe('Futebol');
+    expect(normalizarEsporte('Handebol')).toBe('Handebol');
+  });
+});
+
+describe('escopo das Diretrizes: surebet BLOQUEIA, promoção NÃO', () => {
+  const skill = buscarSkill('checar_regras_do_par')!;
+
+  it('em SUREBET, 1X2 no futebol continua bloqueado', async () => {
+    const r: any = await skill.executar(
+      { esporte: 'Futebol', mercado: 'Resultado Final', casaA: 'KTO', casaB: 'Superbet' },
+      {} as any
+    );
+    expect(r.finalidade).toBe('surebet');
+    expect(r.permitido).toBe(false);
+    expect(r.motivo_bloqueio).toBeTruthy();
+  });
+
+  it('em PROMOÇÃO, o MESMO par passa — com o bloqueio de surebet vindo como aviso', async () => {
+    const r: any = await skill.executar(
+      { esporte: 'Futebol', mercado: 'Resultado Final', casaA: 'KTO', casaB: 'Superbet', finalidade: 'promocao' },
+      {} as any
+    );
+    expect(r.finalidade).toBe('promocao');
+    expect(r.permitido).toBe(true);
+    expect(r.regras_de_surebet_aplicadas).toBe(false);
+    expect(r.aviso).toContain('NÃO impede');
+  });
+
+  it('tênis com grupos de W.O. diferentes: bloqueia em surebet, avisa em promoção', async () => {
+    const surebet: any = await skill.executar(
+      { esporte: 'Tênis', mercado: 'Vencedor da Partida', casaA: 'Superbet', casaB: 'Pinnacle' },
+      {} as any
+    );
+    expect(surebet.permitido).toBe(false);
+    const promo: any = await skill.executar(
+      { esporte: 'Tênis', mercado: 'Vencedor da Partida', casaA: 'Superbet', casaB: 'Pinnacle', finalidade: 'freebet' },
+      {} as any
+    );
+    expect(promo.permitido).toBe(true);
+    expect(promo.risco_residual).toContain('abandono');
+  });
+});
+
+describe('lerSituacao', () => {
+  it('entende como o modelo escreve', () => {
+    expect(lerSituacao('ao vivo')).toBe('ao_vivo');
+    expect(lerSituacao('LIVE')).toBe('ao_vivo');
+    expect(lerSituacao('in-play')).toBe('ao_vivo');
+    expect(lerSituacao('pré-jogo')).toBe('pre_jogo');
+    expect(lerSituacao('prematch')).toBe('pre_jogo');
+    expect(lerSituacao('todos')).toBe('todos');
+    expect(lerSituacao(undefined)).toBe('todos');
   });
 });

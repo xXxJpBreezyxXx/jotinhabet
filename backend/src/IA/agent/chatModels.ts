@@ -18,7 +18,7 @@ import { fetch as undiciFetch } from 'undici';
 import { GoogleGenAI } from '@google/genai';
 import { EsquemaParametros } from './tipos';
 
-export type MotorNome = 'groq' | 'openai' | 'gemini';
+export type MotorNome = 'groq' | 'openai' | 'gemini' | 'openrouter';
 
 export interface ChamadaFerramenta {
   id: string;
@@ -328,6 +328,25 @@ export function criarMotor(nome: MotorNome): MotorChat {
       process.env.OPENAI_API_KEY || ''
     );
   }
+  if (nome === 'openrouter') {
+    // Rede de segurança do agente para quando a TPM da Groq estoura (413 "Request too
+    // large … tokens per minute") e OpenAI/Gemini estão sem crédito — foi exatamente o que
+    // aconteceu em 31/07 numa pergunta com imagem, que gasta mais contexto.
+    // `google/gemma-4-26b-a4b-it:free` declara `tools`/`tool_choice` entre os parâmetros
+    // suportados, então serve para o loop de ferramentas; a escada cobre o 429 do upstream.
+    const escada = (process.env.OPENROUTER_MODEL_FALLBACKS || '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return new MotorOpenAICompat(
+      'openrouter',
+      process.env.OPENROUTER_MODEL_AGENTE?.trim() || process.env.OPENROUTER_MODEL?.trim() || 'google/gemma-4-26b-a4b-it:free',
+      process.env.OPENROUTER_BASE_URL?.trim() || 'https://openrouter.ai/api/v1',
+      process.env.OPENROUTER_API_KEY || '',
+      0.25,
+      escada
+    );
+  }
   return new MotorGemini();
 }
 
@@ -335,8 +354,8 @@ export function criarMotor(nome: MotorNome): MotorChat {
  *  Groq primeiro de propósito: tem tool-calling nativo, é rápida e é a única com
  *  crédito ativo desde 29/07 (OpenAI/Gemini estavam 429 por cota). */
 export function cadeiaAgente(): MotorNome[] {
-  const validos: MotorNome[] = ['groq', 'openai', 'gemini'];
-  const bruto = (process.env.AGENT_PROVIDER_CHAIN || 'groq,openai,gemini').trim();
+  const validos: MotorNome[] = ['groq', 'openai', 'gemini', 'openrouter'];
+  const bruto = (process.env.AGENT_PROVIDER_CHAIN || 'groq,openai,gemini,openrouter').trim();
   const lista = bruto
     .split(',')
     .map((s) => s.trim().toLowerCase())

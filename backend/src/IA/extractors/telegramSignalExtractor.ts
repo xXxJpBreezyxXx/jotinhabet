@@ -85,7 +85,7 @@ TEMPLATE (print da calculadora de surebet do grupo):
 - Topo: "Time A – Time B" (separador travessão) → no campo evento converta para "Time A x Time B".
 - 2ª linha: "Esporte / País - Campeonato" → o campo esporte é SÓ a primeira parte (ex.: "Futebol").
 - 3ª linha: um percentual grande (lucro da arb) e "ROI: N%" — IGNORE os dois, não entram no schema.
-- Faixa "Chance": abre a seção das duas pernas, LADO A LADO (coluna esquerda = perna A, direita = perna B). Em cada coluna:
+- Faixa "Chance": é o CABEÇALHO da seção das duas pernas — a palavra "Chance" NUNCA é nome de casa (um modelo de visão já errou isso e devolveu casaA="Chance"). Abaixo dela vêm as pernas LADO A LADO (coluna esquerda = perna A, direita = perna B). Em cada coluna:
   · Nome da casa em negrito, geralmente com sufixo "(BR)" — copie SEM o sufixo ("Betsson (BR)" → "Betsson").
   · Descrição da seleção, ex.: "Acima 8.5 - escanteios" ou "Abaixo 3.5 - escanteios 1º o time":
     → opcaoA/opcaoB = parte direcional com a linha ("Acima 8.5", "Abaixo 3.5");
@@ -211,6 +211,20 @@ export function validarSinal(obj: any, ref?: Date): { ok: boolean; motivo?: stri
   for (const campo of camposTexto) {
     if (typeof obj[campo] !== 'string' || !obj[campo].trim()) {
       return { ok: false, motivo: `campo obrigatório vazio: ${campo}` };
+    }
+  }
+
+  // RÓTULO DO TEMPLATE NO LUGAR DA CASA. O modelo de visão free (gemma-4-26b) leu o
+  // cabeçalho da faixa como nome de casa — devolveu casaA="Chance" num print em que a casa
+  // era "Stake" (medido em 31/07/2026 com o template_telegram_exemplo_2). Casa errada é pior
+  // que sinal descartado: a revalidação procura a perna numa casa que não a tem e o alerta
+  // sai mandando apostar no lugar errado. Estes são rótulos FIXOS do template, não casas.
+  const ROTULOS_DO_TEMPLATE = /^(chance|aposta|com comiss[ãa]o|lucro|taxas de c[âa]mbio|roi|stake\s*\(?br\)?$|total)$/i;
+  for (const campo of ['casaA', 'casaB'] as const) {
+    const valor = `${obj[campo]}`.trim();
+    // "Stake" sozinho É uma casa (stake.bet.br); só o rótulo exato da linha de aposta cai aqui.
+    if (ROTULOS_DO_TEMPLATE.test(valor) && !/^stake$/i.test(valor)) {
+      return { ok: false, motivo: `${campo}="${valor}" é rótulo do template, não nome de casa (leitura da imagem falhou)` };
     }
   }
 

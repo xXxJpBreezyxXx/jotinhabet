@@ -86,13 +86,29 @@ interface PinMatchup {
   league?: { name?: string };
   state?: string;
   isLive?: boolean;
+  /**
+   * Unidade contada pelo matchup. 'Regular' (ou ausente) é a PARTIDA; matchup derivado vem
+   * com outra unidade ('Corners', 'Bookings', 'Sets'…) e tem moneyline/total próprios —
+   * que não são o resultado nem os gols do jogo.
+   */
+  units?: string;
+  type?: string;
+  special?: unknown;
 }
 
 export class PinnacleScraper implements OddsScraper {
   private maxEventosPorEsporte = 80;
-  // Radar Cashout: quando true, NÃO descarta partidas ao vivo/iniciadas (mantém a
-  // bússola visível após o kickoff). O scanner de surebets constrói SEM esta opção
-  // (segue só pré-jogo — não fazemos surebet ao vivo). Ver plano do cashout ao vivo.
+  /**
+   * Quando true, coleta a partida EM ANDAMENTO (Radar Cashout e varredura ao vivo do
+   * Agente). O scanner de surebet pré-match constrói SEM esta opção.
+   *
+   * ATENÇÃO ao modelo de dados da Pinnacle: o jogo ao vivo NÃO é o mesmo matchup do
+   * pré-jogo — é um matchup FILHO (`parentId` != null, `isLive: true`, `status: 'started'`),
+   * com preço próprio. O matchup PAI continua listado com o preço CONGELADO no apito
+   * inicial. Medido em 31/07 (Krasnodar × Rostov): moneyline do pai −404 contra −496 no
+   * filho ao vivo. Por isso `filtroMatchup` trata o filho explicitamente e DESCARTA o pai
+   * de jogo já começado — ler o pai é pior que não ler nada, porque parece odd válida.
+   */
   private incluirAoVivo: boolean;
 
   constructor(opts?: { incluirAoVivo?: boolean }) {
@@ -101,6 +117,77 @@ export class PinnacleScraper implements OddsScraper {
 
   getNome(): string {
     return 'Pinnacle';
+  }
+
+  /**
+   * O matchup entra na coleta?
+   *
+   *  - FILHO (`parentId`): só o filho AO VIVO que representa A PARTIDA, e só com
+   *    incluirAoVivo. Um jogo ao vivo tem VÁRIOS filhos (medido: ~2,1 por jogo) — os
+   *    outros contam escanteios, cartões, sets. Aceitar todos fazia o `parseMercados`
+   *    emitir o total de ESCANTEIOS como "Total de Gols" e o moneyline de escanteios como
+   *    "Resultado Final" (o guard `mk.matchupId !== ev.id` de lá não protege mais, porque
+   *    o derivado passa a ser o próprio `ev`) — falsa arbitragem, o mesmo defeito que o
+   *    comentário do parseMercados diz ter corrigido, reaberto por outra porta.
+   *  - RAIZ ainda não começada: entra (é o pré-jogo).
+   *  - RAIZ já começada: FORA. É o pai com preço congelado no apito inicial.
+   *
+   * @param liveDoPai por pai: o id do filho ao vivo que é a partida (ver filhosLiveDaPartida).
+   * @param paisComFilhoLive pais que têm QUALQUER filho ao vivo — o pai sai da coleta mesmo
+   * que nenhum filho tenha passado no filtro de partida-base: preço congelado é pior que
+   * ausência, porque tem cara de odd válida.
+   */
+  private filtroMatchup(
+    m: PinMatchup,
+    agora: number,
+    paisComFilhoLive: Set<number>,
+    liveDoPai: Map<number, number>
+  ): boolean {
+    if ((m.participants?.length || 0) < 2) return false;
+    if (m.parentId) return this.incluirAoVivo && liveDoPai.get(m.parentId) === m.id;
+    if (paisComFilhoLive.has(m.id)) return false;
+    if (m.isLive) return this.incluirAoVivo;
+    const t = Date.parse(m.startTime || '');
+    return isNaN(t) || t > agora;
+  }
+
+  /** Pais que têm QUALQUER filho ao vivo (o pai é sempre descartado — odd congelada). */
+  private paisComFilhoLive(matchups: PinMatchup[]): Set<number> {
+    const s = new Set<number>();
+    if (!this.incluirAoVivo) return s;
+    for (const m of matchups) if (m.parentId && m.isLive) s.add(m.parentId);
+    return s;
+  }
+
+  /**
+   * Para cada pai, o ÚNICO filho ao vivo que representa a partida.
+   *
+   * Dois critérios, de propósito independentes do vocabulário da API (que não pude sondar
+   * com o túnel da Pinnacle fora do ar):
+   *  1. unidade base — `units` ausente ou 'Regular' e sem `special`. Derivado declara a
+   *     unidade que conta ('Corners', 'Bookings', 'Sets'…). Se o campo não vier, este
+   *     critério não rejeita nada;
+   *  2. um por pai — entre os que passam, fica o de MENOR id (a partida-base é criada antes
+   *     dos derivados). É o cinto de segurança para o caso de (1) não discriminar.
+   * Pai sem nenhum filho aprovado fica de fora inteiro: melhor perder o jogo ao vivo do que
+   * publicar odd de escanteio como odd da partida.
+   */
+  private filhosLiveDaPartida(matchups: PinMatchup[]): Map<number, number> {
+    const escolhido = new Map<number, number>();
+    if (!this.incluirAoVivo) return escolhido;
+    let vistos = 0;
+    for (const m of matchups) {
+      if (!m.parentId || !m.isLive || (m.participants?.length || 0) < 2) continue;
+      vistos++;
+      const unidadeBase = (m.units ?? 'Regular') === 'Regular' && !m.special;
+      if (!unidadeBase) continue;
+      const atual = escolhido.get(m.parentId);
+      if (atual === undefined || m.id < atual) escolhido.set(m.parentId, m.id);
+    }
+    if (vistos > escolhido.size) {
+      console.log(`   [Pinnacle] ao vivo: ${escolhido.size} partida(s) de ${vistos} matchup(s) filho(s) (derivados descartados).`);
+    }
+    return escolhido;
   }
 
   private headers() {
@@ -147,6 +234,7 @@ export class PinnacleScraper implements OddsScraper {
     return todas;
   }
 
+
   /**
    * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento, 2-3 requests
    * (matchups do esporte + markets só do matchup casado). Reusa o parser de produção.
@@ -162,18 +250,15 @@ export class PinnacleScraper implements OddsScraper {
         );
         if (rMatch.status !== 200) continue;
         const matchups: PinMatchup[] = JSON.parse(rMatch.body);
+        const agora = Date.now();
+        const pais = this.paisComFilhoLive(matchups);
+        const liveDoPai = this.filhosLiveDaPartida(matchups);
         const alvo = matchups
           .filter((m) => {
-            // Raiz + 2 participantes sempre. Pré-jogo/ao vivo conforme incluirAoVivo
-            // (cashout ao vivo mantém live; surebet segue só pré-jogo).
-            if (m.parentId || (m.participants?.length || 0) < 2) return false;
+            if (!this.filtroMatchup(m, agora, pais, liveDoPai)) return false;
             const home = m.participants!.find((p) => p.alignment === 'home')?.name;
             const away = m.participants!.find((p) => p.alignment === 'away')?.name;
-            if (!home || !away || !areEventsSame(`${home} vs ${away}`, evento)) return false;
-            if (this.incluirAoVivo) return true;
-            if (m.isLive) return false;
-            const t = Date.parse(m.startTime || '');
-            return isNaN(t) || t > Date.now();
+            return !!home && !!away && areEventsSame(`${home} vs ${away}`, evento);
           })
           .slice(0, 2);
         const odds: ScrapedOdd[] = [];
@@ -198,17 +283,13 @@ export class PinnacleScraper implements OddsScraper {
     if (rMatch.status !== 200) throw new Error(`matchups HTTP ${rMatch.status}`);
     const matchups: PinMatchup[] = JSON.parse(rMatch.body);
 
-    // Só jogos "raiz" (sem parentId) com 2 participantes, PRÉ-JOGO (não ao vivo, início
-    // no futuro); os mais próximos primeiro.
+    // Pré-jogo (raiz com início no futuro) e, com incluirAoVivo, o matchup FILHO ao vivo;
+    // os mais próximos primeiro. Ver filtroMatchup para o porquê do filho.
     const agora = Date.now();
+    const pais = this.paisComFilhoLive(matchups);
+    const liveDoPai = this.filhosLiveDaPartida(matchups);
     const eventos = matchups
-      .filter((m) => {
-        if (m.parentId || (m.participants?.length || 0) < 2) return false;
-        if (this.incluirAoVivo) return true; // cashout ao vivo: mantém live + pré-jogo
-        if (m.isLive) return false;
-        const t = Date.parse(m.startTime || '');
-        return isNaN(t) || t > agora;
-      })
+      .filter((m) => this.filtroMatchup(m, agora, pais, liveDoPai))
       .sort((a, b) => (Date.parse(a.startTime || '') || 0) - (Date.parse(b.startTime || '') || 0))
       .slice(0, this.maxEventosPorEsporte);
     if (eventos.length === 0) return [];
@@ -335,6 +416,30 @@ export class PinnacleScraper implements OddsScraper {
         const oH = dec(hp?.price);
         const oA = dec(ap?.price);
         const linha = hp?.points;
+        // SPREAD 0 = EMPATE ANULA (Draw No Bet): com handicap 0 o empate devolve as duas
+        // pernas, que é exatamente a liquidação do DNB — mesmo mercado, mesmo risco.
+        // `linhaArbitravel(0)` é false (linha inteira → push), então todo spread 0 era
+        // descartado em silêncio. Aqui isso pesa mais que nas outras casas: a Pinnacle é a
+        // casa SHARP, e o DNB é o mercado com a melhor taxa de arb medida do sistema
+        // (574 clusters com 2+ casas numa varredura de 8 casas). A Pinnacle não tem
+        // mercado de DNB próprio no feed — só moneyline/total/spread —, então sem esta
+        // conversão ela simplesmente não participa do melhor mercado que temos.
+        // Emitido no formato dos outros emissores de DNB (rótulo 'Empate Anula', nomes dos
+        // times, SEM linha) para o canônico bater em DNB_FT e cruzar de verdade.
+        // Só a linha EXATAMENTE 0 vira DNB; os outros inteiros seguem fora (em -1 o push é
+        // "mandante vence por 1" e não há mercado equivalente com que cruzar).
+        // SÓ no futebol (sportId 29): é o único esporte que mapeamos onde a partida pode
+        // terminar EMPATADA e o handicap 0 dar push. Em tênis/basquete(incl. OT)/vôlei/
+        // beisebol não existe empate, então handicap 0 ali é o PRÓPRIO vencedor da partida
+        // — carimbá-lo 'Empate Anula' colocaria um Resultado Final no canônico DNB_FT.
+        if (ok(oH) && ok(oA) && linha === 0 && sportId === 29) {
+          out.push({
+            esporte, evento: eventoStr, dataHora,
+            mercado: 'Empate Anula',
+            opcaoA: home, opcaoB: away, oddA: oH, oddB: oA,
+          });
+          continue;
+        }
         if (ok(oH) && ok(oA) && typeof linha === 'number' && linhaArbitravel(linha)) {
           const sinal = (v: number) => `${v > 0 ? '+' : ''}${v}`;
           out.push({

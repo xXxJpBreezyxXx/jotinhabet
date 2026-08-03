@@ -9,13 +9,16 @@ import { SuperbetScraper } from '../scraping/casa_superbet';
 import { BlazeScraper } from '../scraping/casa_blaze';
 import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
-import { Aposta1Scraper, EstrelaBetScraper, FourPlayScraper, LuvabetScraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, EstrelaBetScraper, FourPlayScraper, LuvabetScraper, OnabetScraper, BrBetScraper } from '../scraping/casa_altenar';
+import { BetEsporteScraper } from '../scraping/casa_betesporte';
+import { MarjoSportsScraper } from '../scraping/casa_ngx';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
 import { EsportesDaSorteScraper } from '../scraping/casa_esportesdasorte';
 import { BetnacionalScraper } from '../scraping/casa_betnacional';
 import { RivaloScraper } from '../scraping/casa_rivalo';
 import { Brazino777Scraper, ApostaGanhaScraper } from '../scraping/casa_nsoft';
+import { BetssonScraper } from '../scraping/casa_betsson';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
@@ -132,9 +135,14 @@ export class ArbitrageScannerV2 {
     new EstrelaBetScraper(),
     new FourPlayScraper(),
     new LuvabetScraper(),
+    new OnabetScraper(),
+    new BrBetScraper(),
+    new BetEsporteScraper(),
+    new MarjoSportsScraper(),
     new RivaloScraper(),
     new Brazino777Scraper(),
     new ApostaGanhaScraper(),
+    new BetssonScraper(),
     new BetBoomScraper(),
     new SeuBetScraper(),
     new VbetScraper(),
@@ -158,7 +166,7 @@ export class ArbitrageScannerV2 {
   // agendada (linha ~223). Casa nova que fique fora daqui compila, aparece no scan manual
   // completo e parece integrada, mas NUNCA roda no scan de 5 min (foi o que aconteceu com
   // a Luvabet em 29/07/2026: 10 min em produção sem uma linha de log).
-  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional', 'Luvabet', 'Rivalo', 'Brazino777', 'ApostaGanha']);
+  private static readonly SCRAPERS_API = new Set(['KTO', 'Superbet', 'BetWarrior', 'Aposta1', 'EstrelaBet', '4Play', 'BetBoom', 'SeuBet', 'Vbet', 'BetPix365', 'EsportesDaSorte', 'Pinnacle', 'Betnacional', 'Luvabet', 'Onabet', 'BrBET', 'BetEsporte', 'MarjoSports', 'Rivalo', 'Brazino777', 'ApostaGanha', 'Betsson']);
 
   /**
    * Scrapers baseados em BROWSER (Playwright) — coletados SEQUENCIALMENTE (um chromium
@@ -170,6 +178,69 @@ export class ArbitrageScannerV2 {
 
   /** Teto de scrapers de API coletados em paralelo. I/O-bound; o limite protege a VPS 1-core. */
   private static readonly LIMITE_PARALELO = 5;
+
+  // ─────────────────── SAÚDE DAS FONTES (fonte caída em silêncio) ───────────────────
+  //
+  // A Pinnacle passou ~3h fora da varredura em 03/08/2026 sem ninguém saber: o exit node
+  // do túnel (celular) caiu da tailnet e o scraper, em vez de LANÇAR, engoliu o erro por
+  // esporte e devolveu lista VAZIA. Como o laço de coleta só loga scraper REJEITADO, uma
+  // casa "bem-sucedida com 0 odds" era indistinguível de uma casa sem jogos.
+  //
+  // Isso custa oportunidade real: a Pinnacle é a casa sharp e o alerta do motor até baixa
+  // a barra de confiança quando ela está envolvida (0.90 contra 0.95). Sem ela, todo arb
+  // exige que duas casas soft discordem — o caso mais raro.
+  //
+  // Por isso o critério de falha aqui é `0 odds` OU exceção, e não só exceção.
+  private falhasSeguidas = new Map<string, number>();
+  private fontesAvisadas = new Set<string>();
+  /** 3 varreduras seguidas ≈ 15 min (o scheduler roda de 5 em 5). */
+  private static readonly FALHAS_PARA_AVISAR = 3;
+  /** Fontes recém-caídas/recuperadas desta varredura, para mandar UMA mensagem só. */
+  private caiuAgora: string[] = [];
+  private voltouAgora: string[] = [];
+
+  /**
+   * Contabiliza o resultado da coleta de UMA casa. Zero odds conta como falha de propósito
+   * (ver comentário do bloco acima). O aviso sai UMA vez por queda: só volta a avisar
+   * depois de a casa recuperar, senão viraria spam de 5 em 5 minutos.
+   */
+  private registrarSaudeDaFonte(casa: string, qtdOdds: number, motivo: string | null): void {
+    const falhou = qtdOdds === 0;
+    if (!falhou) {
+      if (this.fontesAvisadas.has(casa)) this.voltouAgora.push(casa);
+      this.falhasSeguidas.delete(casa);
+      this.fontesAvisadas.delete(casa);
+      return;
+    }
+    const n = (this.falhasSeguidas.get(casa) || 0) + 1;
+    this.falhasSeguidas.set(casa, n);
+    if (n >= ArbitrageScannerV2.FALHAS_PARA_AVISAR && !this.fontesAvisadas.has(casa)) {
+      this.fontesAvisadas.add(casa);
+      this.caiuAgora.push(`${casa}${motivo ? ` (${motivo.slice(0, 80)})` : ' (0 odds, sem erro)'}`);
+    }
+  }
+
+  /** Manda um aviso agregado de fontes caídas/recuperadas. Nunca derruba a varredura. */
+  private async avisarFontesCaidas(): Promise<void> {
+    const caiu = this.caiuAgora.splice(0);
+    const voltou = this.voltouAgora.splice(0);
+    if (!caiu.length && !voltou.length) return;
+    const partes: string[] = [];
+    if (caiu.length) {
+      partes.push(
+        `🔌 *Fonte de odds caída* (${ArbitrageScannerV2.FALHAS_PARA_AVISAR} varreduras seguidas sem uma odd)\n` +
+          caiu.map((c) => `• ${c}`).join('\n')
+      );
+    }
+    if (voltou.length) partes.push(`✅ *Voltou a coletar*: ${voltou.join(', ')}`);
+    const texto = partes.join('\n\n');
+    console.warn(`🔌 [Scanner V2] Saúde das fontes: ${caiu.length} caída(s), ${voltou.length} recuperada(s).`);
+    try {
+      await new WhatsAppNotifier().enviarTexto(texto);
+    } catch (e: any) {
+      console.error(`⚠️ [Scanner V2] Falha ao avisar fonte caída: ${e.message}`);
+    }
+  }
 
   /**
    * Fontes REAIS da varredura, para quem precisa listar as casas sem instanciar o
@@ -278,8 +349,11 @@ export class ArbitrageScannerV2 {
       resLeves.forEach((r, i) => {
         if (r.status === 'fulfilled') {
           todasOdds.push({ nome: leves[i].getNome(), odds: r.value });
+          this.registrarSaudeDaFonte(leves[i].getNome(), r.value.length, null);
         } else {
-          console.error(`❌ Erro no scraper ${leves[i].getNome()}: ${r.reason?.message || r.reason}`);
+          const motivo = r.reason?.message || String(r.reason);
+          console.error(`❌ Erro no scraper ${leves[i].getNome()}: ${motivo}`);
+          this.registrarSaudeDaFonte(leves[i].getNome(), 0, motivo);
         }
       });
 
@@ -288,10 +362,16 @@ export class ArbitrageScannerV2 {
         try {
           const odds = await scraper.executarCrawler(esportes, datas, true);
           todasOdds.push({ nome: scraper.getNome(), odds });
+          this.registrarSaudeDaFonte(scraper.getNome(), odds.length, null);
         } catch (err: any) {
           console.error(`❌ Erro no scraper ${scraper.getNome()}: ${err.message}`);
+          this.registrarSaudeDaFonte(scraper.getNome(), 0, err.message);
         }
       }
+
+      // Avisa no WhatsApp as fontes que ficaram caídas (e as que voltaram). Fora do laço
+      // para mandar UMA mensagem com todas, em vez de uma por casa.
+      await this.avisarFontesCaidas();
 
       // Casas de BROWSER (Betano/Blaze/1xBet) coletadas por um worker de cadência própria
       // entram via cache em memória — participam do scan automático sem Playwright inline.

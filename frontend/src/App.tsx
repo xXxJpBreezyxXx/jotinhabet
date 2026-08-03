@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { Component, useState, useEffect, useRef, lazy, Suspense } from 'react';
+import type { ReactNode } from 'react';
 import { 
   TrendingUp, 
   Cpu, 
@@ -26,8 +27,31 @@ import {
   Gift,
   Menu,
   Wrench,
+  Image as ImageIcon,
   ChevronDown
 } from 'lucide-react';
+
+// Markdown das respostas do agente (aba IA & Automação) em CHUNK SEPARADO: as libs
+// (react-markdown + remark-gfm, ~47 KB gzip) só baixam quando a aba do chat abre — o
+// bundle inicial, que todo mundo paga, fica igual.
+const Markdown = lazy(() => import('./Markdown'));
+
+/**
+ * Casca de segurança do chunk de markdown. Se o download do chunk falhar (rede ruim no
+ * celular) ou o renderer lançar em algum markdown estranho, o React propaga o erro e
+ * DESMONTA a aba inteira — tela branca no lugar da conversa. Aqui o erro degrada para o
+ * texto cru, que é exatamente o que era exibido antes deste lote.
+ */
+class MarkdownBoundary extends Component<{ texto: string; children: ReactNode }, { erro: boolean }> {
+  state = { erro: false };
+  static getDerivedStateFromError() {
+    return { erro: true };
+  }
+  render() {
+    if (this.state.erro) return <div style={{ whiteSpace: 'pre-wrap' }}>{this.props.texto}</div>;
+    return this.props.children;
+  }
+}
 
 interface HealthStatus {
   status: string;
@@ -840,6 +864,10 @@ export default function App() {
     modelo_agente?: string;
     agente_ativo: boolean;
   } | null>(null);
+  // Imagem anexada ao chat (print de promoção/cupom/tela de odds): vai em base64 junto da
+  // mensagem e o backend converte em texto por visão antes de rodar o agente.
+  const [chatImagem, setChatImagem] = useState<{ nome: string; dataUrl: string; mimeType: string } | null>(null);
+  const chatFileRef = useRef<HTMLInputElement | null>(null);
   const [chatSkillsAbertas, setChatSkillsAbertas] = useState(false);
   const [chatTraceAberto, setChatTraceAberto] = useState<Record<number, boolean>>({});
   const chatFimRef = useRef<HTMLDivElement | null>(null);
@@ -1808,11 +1836,15 @@ export default function App() {
 
   const handleSendChat = async (text?: string) => {
     const content = (text ?? chatInput).trim();
-    if (!content || chatLoading) return;
+    const imagem = chatImagem;
+    // Com imagem anexada, a legenda é opcional (o print já é a pergunta).
+    if ((!content && !imagem) || chatLoading) return;
 
-    const nextMessages: ChatMsg[] = [...chatMessages, { role: 'user' as const, content }];
+    const rotulo = content || (imagem ? `📎 ${imagem.nome}` : '');
+    const nextMessages: ChatMsg[] = [...chatMessages, { role: 'user' as const, content: rotulo }];
     setChatMessages(nextMessages);
     setChatInput('');
+    setChatImagem(null);
     setChatLoading(true);
     try {
       const response = await fetch('/api/ai/chat', {
@@ -1820,7 +1852,10 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         // Só role/content vão para o backend: o trace (passos/provider) é metadado de
         // exibição e reenviá-lo inflaria o histórico que o agente reprocessa a cada turno.
-        body: JSON.stringify({ messages: nextMessages.map(m => ({ role: m.role, content: m.content })) }),
+        body: JSON.stringify({
+          messages: nextMessages.map(m => ({ role: m.role, content: m.content })),
+          ...(imagem ? { imagemBase64: imagem.dataUrl.split(',')[1], mimeType: imagem.mimeType } : {}),
+        }),
       });
       const data = await response.json();
       const reply = data.reply || (data.error ? `Erro: ${data.error}` : 'Resposta vazia do servidor.');
@@ -4418,18 +4453,21 @@ export default function App() {
               ) : (
                 chatMessages.map((m, i) => (
                   <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                    <div style={{
-                      maxWidth: '78%',
-                      padding: '10px 14px',
-                      borderRadius: m.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                      fontSize: '14px',
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                      background: m.role === 'user' ? 'linear-gradient(135deg, var(--color-primary), var(--color-accent))' : 'rgba(255,255,255,0.05)',
-                      color: m.role === 'user' ? '#fff' : 'var(--text-primary)',
-                      border: m.role === 'user' ? 'none' : '1px solid var(--panel-border)'
-                    }}>
-                      {m.content}
+                    {/* A bolha saiu do estilo inline para CLASSE (.chat-bubble) porque o
+                        markdown renderizado precisa de estilo descendente (lista, tabela,
+                        código) — e regra em CSS ainda respeita o tema claro. */}
+                    <div className={`chat-bubble ${m.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'}`}>
+                      {m.role === 'assistant' ? (
+                        // Fallback = texto cru: a resposta NUNCA desaparece enquanto o
+                        // chunk do markdown carrega (nem se ele falhar — ver MarkdownBoundary).
+                        <MarkdownBoundary texto={m.content}>
+                          <Suspense fallback={<div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>}>
+                            <Markdown>{m.content}</Markdown>
+                          </Suspense>
+                        </MarkdownBoundary>
+                      ) : (
+                        m.content
+                      )}
                     </div>
 
                     {/* TRACE: quais skills o agente usou para produzir esta resposta. */}
@@ -4481,8 +4519,47 @@ export default function App() {
               <div ref={chatFimRef} />
             </div>
 
+            {/* Imagem anexada (print de promoção/cupom): miniatura + remover */}
+            {chatImagem && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '12px', padding: '8px 10px', border: '1px solid var(--panel-border)', borderRadius: '10px', background: 'rgba(255,255,255,0.03)' }}>
+                <img src={chatImagem.dataUrl} alt={chatImagem.nome} style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '6px' }} />
+                <div style={{ flex: 1, minWidth: 0, fontSize: '12px', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {chatImagem.nome} — vai junto da próxima mensagem
+                </div>
+                <button className="btn btn-secondary" style={{ fontSize: '11px' }} onClick={() => setChatImagem(null)}>Remover</button>
+              </div>
+            )}
+
             {/* Entrada */}
             <div style={{ display: 'flex', gap: '10px', marginTop: '16px' }}>
+              <input
+                ref={chatFileRef}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={e => {
+                  const f = e.target.files?.[0];
+                  e.target.value = ''; // permite reanexar o MESMO arquivo depois de remover
+                  if (!f) return;
+                  // 8 MB é o teto do parser do backend; acima disso o 413 viraria "erro de conexão".
+                  if (f.size > 7_500_000) {
+                    alert('Imagem muito grande (máx. ~7 MB). Manda um print menor.');
+                    return;
+                  }
+                  const reader = new FileReader();
+                  reader.onload = () => setChatImagem({ nome: f.name, dataUrl: String(reader.result), mimeType: f.type || 'image/jpeg' });
+                  reader.readAsDataURL(f);
+                }}
+              />
+              <button
+                className="btn btn-secondary"
+                title="Anexar print (promoção, cupom, tela de odds)"
+                onClick={() => chatFileRef.current?.click()}
+                disabled={chatLoading}
+                style={{ paddingLeft: '10px', paddingRight: '10px' }}
+              >
+                <ImageIcon size={15} />
+              </button>
               <input
                 className="form-control"
                 style={{ flex: 1 }}

@@ -41,11 +41,64 @@ import { normalizarMercado } from './markets';
 //    (tenant aposta_ganha_sportsbook). O doc /regras-de-apostas (25k chars) não tem
 //    UMA menção a desistência/abandono/W.O. Como ela passou a ser FONTE de odds em
 //    29/07, valia a mesma doutrina da Novibet: regra inacessível → desconhecida bloqueia.
+// Auditoria de W.O. das casas novas em 31/07/2026 (GRUPOS_WO_CASAS.md §lote 31/07), cada
+// classificação verificada por um segundo revisor tentando derrubá-la:
+//  - brbet A: PDF oficial da casa ("Altenar Betting Rules v1.29" traduzido, 196 p.) diz VOID
+//    duas vezes — p.61 §Tênis "se um jogador de ténis desistir antes da conclusão do último
+//    ponto, o mercado do vencedor do jogo é nulo" e a mesma exceção na p.6. Desqualificação
+//    e walkover estão DENTRO da mesma cláusula de anulação (não há regra de avanço).
+//  - marjosports A: PDF "Regras de apostas aplicadas aos eventos de tênis V1.0.0 (16/07/2025)"
+//    — "abandono ou desqualificação ... poderão ter as apostas não definidas como nulas",
+//    "partidas definidas sem que sejam disputadas (WO), todos os mercados serão anulados" e,
+//    ao vivo, "desqualificação, abandono ou WO ... gera a anulação de todas as apostas não
+//    decididas".
+//  - esportesdasorte A (auditada em 01/08): o rulebook do sportsbook Sportingtech
+//    ("support-rules", §tênis) diz "No caso de aposentadoria ou desqualificação de uma
+//    partida, todos os mercados que ainda não tiveram seu resultado determinado serão
+//    considerados nulos" e "No caso de uma Passagem [walkover], todos os mercados serão
+//    liquidados como nulos". Void puro, com DESQUALIFICAÇÃO anulando na MESMA frase (difere
+//    de bet365/Vbet/SeuBet, que dão a vitória a quem avança em DQ). O preâmbulo declara que
+//    as Regras Especiais do esporte prevalecem sobre as gerais. Tênis de mesa idem.
+//    ATENÇÃO: isso NÃO estende para a Onabet, apesar de MESMO OPERADOR (Esportes Gaming
+//    Brasil). O T&C do grupo é o mesmo texto nas duas e é MUDO sobre desistência; a regra
+//    que classifica vem do SPORTSBOOK, e a Onabet roda outro (Altenar), com outra mesa.
+//  - onabet e betesporte NÃO entram em grupo nenhum: as duas simplesmente NÃO publicam regra
+//    de abandono no tênis (ausência PROVADA por enumeração da fonte autoritativa — o CMS da
+//    Onabet lista 10 páginas e nenhuma é de regras; o regulamento da BetEsporte tem seção de
+//    tênis que define mercados e não fala de desistência). Sem regra do OPERADOR, o
+//    fail-safe vale: grupoTenis() = null → tênis bloqueado. A Onabet é Altenar, e Altenar tem
+//    operador em A (Aposta1) e em B (KTO) — chutar aqui é a armadilha A×B que já custou caro.
+// BETSSON classificada em B em 03/08/2026 (auditoria + aprovação do usuário no mesmo dia;
+// GRUPOS_WO_CASAS.md §lote 03/08), ao integrar o scraper dela. O §17.57 do rulebook oficial
+// é a redação de "1 SET CONCLUÍDO" ("um set completo deve ser completado para que as apostas
+// sejam válidas; se menos de um set for completado, todas as apostas serão consideradas
+// nulas") — estruturalmente IGUAL à da Pinnacle, que já estava em B. O mesmo documento prova
+// que a casa escreve cláusula de avanço explícita quando é isso que quer (§17.50 Snooker) e
+// NÃO tem void por desistência no mercado de vencedor do tênis.
+// Ressalva anotada: no MESMO §17.57 o handicap de partida e o total de games são ANULADOS se
+// a partida não terminar ("a menos que … já determinado incondicionalmente"). É a redação
+// padrão do mercado (a Pinnacle tem igual), não a ambiguidade específica que motivou o
+// bloqueio da KTO — mas se a Betsson ganhar volume em Handicap/Totais de tênis, reavaliar.
+// ESTRELABET e 4PLAY classificadas em A em 03/08/2026 (auditoria + aprovação do usuário
+// para aplicar direto o que fosse confiança ALTA; GRUPOS_WO_CASAS.md §lote 03/08). As duas
+// publicam o MESMO texto (template Altenar traduzido), com a cláusula explícita de void:
+// "se um tenista se retirar antes do último ponto concluído, o mercado vencedor da partida
+// é anulado, mas todos os mercados relacionados a sets ou jogos específicos que são
+// determinados são liquidados de acordo". É a mesma base que classificou a BrBET em A.
+// Verificação adversarial feita nos dois documentos: NENHUMA ocorrência de "avanço"/"próxima
+// rodada" se liga a tênis (o único hit é promo de pagamento antecipado do basquete), e todas
+// as 40 ocorrências de "um set" são DEFINIÇÃO de mercado ("Jogador 1 para ganhar um set"),
+// não condição de validade do vencedor — ou seja, não há a regra de 1-set do Grupo B.
+// Fontes: estrelabet.bet.br/policy/sports-betting-rules e 4play.bet.br/info/regrasesportivas
+// (as duas só cedem o texto via browser + shadow DOM; ver GRUPOS_WO_CASAS.md).
 const GRUPO_A = new Set([
   'alfabet', 'aposta1', 'bet365', 'bet7k', 'betano', 'betao', 'betboom',
-  'betnacional', 'betsul', 'blaze', 'pixbet', 'seubet', 'superbet', 'vbet',
+  'betnacional', 'betsul', 'blaze', 'brbet', 'esportesdasorte', 'marjosports', 'pixbet',
+  'seubet', 'superbet', 'vbet', 'estrelabet', '4play',
 ]);
-const GRUPO_B = new Set(['pinnacle', 'betwarrior', 'kto', 'stake', 'bolsadeaposta', 'reidopitaco', '1xbet']);
+const GRUPO_B = new Set([
+  'pinnacle', 'betwarrior', 'kto', 'stake', 'bolsadeaposta', 'reidopitaco', '1xbet', 'betsson',
+]);
 
 /** Normaliza o nome da casa: sem acento, minúsculo, sem "(BR)" e sem pontuação. */
 function normCasa(casa: string): string {
@@ -119,6 +172,42 @@ export function mercadoPermitido(esporte: string | undefined, mercado: string): 
 }
 
 /**
+ * CASAS VETADAS NA OPERAÇÃO — bloqueio por CASA, não por mercado.
+ *
+ * Decisão do usuário em 31/07/2026 sobre a **EsporteNetBet** (e a irmã EsporteNet VIP):
+ * não é operadora regulada bet.br (nenhum domínio .bet.br existe; é rede de banca/cambista
+ * em .bet/.net), a margem mediana medida no feed é de ~17% (contra 2-5% de casa de verdade),
+ * o teto por aposta é R$ 500 e as odds são derivadas do bet365. Com essa margem ela quase
+ * nunca tem a melhor perna; quando tem, é erro de cotação — e erro de cotação em casa não
+ * regulada é o cenário em que o operador simplesmente cancela.
+ *
+ * Sobrescrevível por `CASAS_BLOQUEADAS` no .env (lista por vírgula) para vetar outra casa
+ * sem deploy. Cuidado ao editar: `esportenet*` é a VETADA, `esportesdasorte` é uma casa
+ * INTEGRADA e legítima — os nomes são parecidos e a comparação aqui é exata/por prefixo
+ * declarado, nunca por "contém".
+ */
+const CASAS_BLOQUEADAS_PADRAO = ['esportenetbet', 'esportenet', 'esportenetvip'];
+
+function casasBloqueadas(): string[] {
+  const doEnv = (process.env.CASAS_BLOQUEADAS || '')
+    .split(',')
+    .map((c) => normCasa(c))
+    .filter(Boolean);
+  return doEnv.length ? doEnv : CASAS_BLOQUEADAS_PADRAO;
+}
+
+/**
+ * A casa está vetada? Compara a chave normalizada por igualdade E por prefixo declarado
+ * ("esportenetvipbet" casa com "esportenetvip"), sem cair no "contém" — que confundiria
+ * EsportesDaSorte com EsporteNet.
+ */
+export function casaBloqueada(casa: string): boolean {
+  const chave = normCasa(casa);
+  if (!chave) return false;
+  return casasBloqueadas().some((b) => chave === b || chave.startsWith(b));
+}
+
+/**
  * Decide se uma oportunidade respeita as Diretrizes de risco.
  * @returns { ok, motivo } — motivo preenchido quando rejeitada (para log).
  */
@@ -128,6 +217,13 @@ export function regraPermiteOportunidade(opp: {
   casaA: string;
   casaB: string;
 }): { ok: boolean; motivo?: string } {
+  // CASA VETADA vem antes de tudo: vale para qualquer fonte (SureRadar, sinal do Telegram,
+  // motor próprio, value bet) e para qualquer mercado.
+  for (const casa of [opp.casaA, opp.casaB]) {
+    if (casaBloqueada(casa)) {
+      return { ok: false, motivo: `casa vetada na operação: ${casa}` };
+    }
+  }
   if (!mercadoPermitido(opp.esporte, opp.mercado)) {
     return { ok: false, motivo: `mercado bloqueado (${opp.esporte}): ${opp.mercado}` };
   }

@@ -7,7 +7,7 @@
  * core/promocoes.ts (testada em vitest) — o modelo só interpreta o resultado.
  */
 
-import { Skill } from '../tipos';
+import { ContextoSkills, Skill } from '../tipos';
 import { calcularArbitragem } from '../../../core/calculator';
 import {
   calcularPromocao,
@@ -19,6 +19,13 @@ import {
 } from '../../../core/promocoes';
 import { bancaParaAlertas } from '../../../core/bancaAtiva';
 import { canonizarCasa } from '../../../signals/casasAliases';
+import { acharCasa, catalogoCasas, CasaCatalogada } from '../catalogoCasas';
+import { compararOfertas, FonteOdds } from '../comparadorOdds';
+import { agruparPorJogo, JogoAgrupado, lerSituacao, normalizarEsporte } from '../varredura';
+import { ScrapedOdd } from '../../../scraping/scraper_base';
+import { comLimite } from '../../../utils/concorrencia';
+import { normalizarMercado } from '../../../arbitrage/markets';
+import { parseKickoff } from '../../../arbitrage/matcher';
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
@@ -126,11 +133,11 @@ export const skillCalcularPromocao: Skill = {
       valor_promocao: { type: 'number', description: 'Valor da freebet ou stake real da qualificadora.' },
       odd_promocao: { type: 'number', description: 'Odd da perna promocional.' },
       odd_cobertura: { type: 'number', description: 'Odd do mercado OPOSTO na casa de cobertura.' },
-      aporte_cobertura: { type: 'number', description: 'Aporte já feito/planejado. Vazio = calcula o que EQUALIZA os cenários.' },
-      cashback: { type: 'number', description: 'Cashback em reais que a casa devolve (ex.: 10).' },
-      cashback_so_se_perder: { type: 'boolean', description: 'true (default) = cashback só se a perna promocional perder.' },
+      aporte_cobertura: { type: 'number', description: 'Aporte já feito. Vazio = calcula o que EQUALIZA.' },
+      cashback: { type: 'number', description: 'Cashback em reais.' },
+      cashback_so_se_perder: { type: 'boolean', description: 'true (default) = só se a perna promo perder.' },
       casa_promocao: { type: 'string' },
-      casa_cobertura: { type: 'string', description: 'Usada para descontar comissão de exchange.' },
+      casa_cobertura: { type: 'string', description: 'Para descontar comissão de exchange.' },
     },
     required: ['valor_promocao', 'odd_promocao', 'odd_cobertura'],
     additionalProperties: false,
@@ -216,7 +223,7 @@ export const skillOtimizarFreebet: Skill = {
 export const skillMultiplaQualificadora: Skill = {
   nome: 'calcular_multipla_qualificadora',
   resumo:
-    'Valida a múltipla contra o regulamento e monta a cobertura SEQUENCIAL: aporte por perna, gasto acumulado, caixa de pico e lucro se tudo bater.',
+    'Valida uma múltipla JÁ ESCOLHIDA contra o regulamento e monta a cobertura sequencial (aporte por perna, caixa de pico). Para ESCOLHER as pernas, use montar_multipla_promocao.',
   grupo: 'calculo',
   descricao:
     'Valida uma múltipla de qualificação contra o regulamento (odd total mínima, odd mínima por seleção) e monta ' +
@@ -228,21 +235,21 @@ export const skillMultiplaQualificadora: Skill = {
       stake: { type: 'number', description: 'Valor do bilhete (ex.: 50).' },
       pernas: {
         type: 'array',
-        description: 'Seleções do bilhete, na ORDEM de resolução.',
+        description: 'Seleções na ORDEM de resolução.',
         items: {
           type: 'object',
           properties: {
-            descricao: { type: 'string', description: 'Ex.: "Grêmio vence (19:30)".' },
-            odd: { type: 'number', description: 'Odd da seleção no bilhete.' },
-            oddCobertura: { type: 'number', description: 'Odd do mercado OPOSTO na casa de cobertura.' },
-            resolveEm: { type: 'string', description: 'Quando essa perna RESOLVE (ex.: "30/07 20:15 (1ºT)").' },
+            descricao: { type: 'string' },
+            odd: { type: 'number', description: 'Odd da seleção.' },
+            oddCobertura: { type: 'number', description: 'Odd do mercado OPOSTO na cobertura.' },
+            resolveEm: { type: 'string', description: 'Quando a perna RESOLVE.' },
           },
           required: ['odd'],
         },
       },
-      odd_total_minima: { type: 'number', description: 'Exigência da promoção (ex.: 4.00).' },
-      odd_minima_por_perna: { type: 'number', description: 'Exigência da promoção (ex.: 1.20).' },
-      perda_aceita: { type: 'number', description: 'Perda que ele aceita no pior caminho (default 0 = cobertura total).' },
+      odd_total_minima: { type: 'number' },
+      odd_minima_por_perna: { type: 'number' },
+      perda_aceita: { type: 'number', description: 'Perda aceita no pior caminho (default 0).' },
     },
     required: ['stake', 'pernas'],
     additionalProperties: false,
@@ -271,9 +278,259 @@ export const skillMultiplaQualificadora: Skill = {
   },
 };
 
+
+/** Perna candidata: um lado de um mercado de 2 vias JÁ com cobertura localizada. */
+interface PernaCandidata {
+  jogo: JogoAgrupado;
+  /** Odd da seleção na casa da promoção. */
+  valor: number;
+  /** 1/odd + 1/oddCobertura — quanto menor, mais barato é o hedge desta perna. */
+  custoHedge: number;
+  descricao: string;
+  oddCobertura: number;
+  casaCobertura: string;
+}
+
+/**
+ * Mercados que servem de perna de promoção: 2 vias, jogo completo e líquidos nas casas.
+ * Fora ficam props e recortes de tempo ("Primeiro gol", "1º Tempo"), que a promoção
+ * costuma não aceitar e a casa de cobertura raramente oferece — no primeiro probe eles
+ * entraram e deixaram 3 de 5 pernas sem cobertura.
+ */
+const MERCADO_PROMO_OK = /^(DNB_FT|TOTAIS_[A-Z]+_FT|HANDICAP_[A-Z]+_FT|AMBAS_MARCAM_FT|RESULTADO_FINAL_FT)$/;
+
+const odd2 = (n: number) => Math.round(n * 100) / 100;
+
+export const skillMontarMultiplaPromocao: Skill = {
+  nome: 'montar_multipla_promocao',
+  resumo:
+    'MONTA a múltipla de promoção com odds reais: escolhe as pernas que cumprem o regulamento, acha a odd de cobertura em outra casa e calcula a cobertura sequencial. LENTA.',
+  grupo: 'calculo',
+  custosa: true,
+  descricao:
+    'Monta uma múltipla de promoção (qualificativa, "aposte e ganhe", múltipla mínima) usando odds REAIS: ' +
+    'varre o feed da casa da promoção, escolhe as seleções que satisfazem o regulamento (odd mínima por perna e ' +
+    'odd total mínima), busca a odd do mercado OPOSTO nas casas de cobertura e devolve a cobertura sequencial ' +
+    '(aporte por perna, caixa de pico, pior caminho). As Diretrizes de surebet (mercado proibido, grupo de W.O.) ' +
+    'NÃO se aplicam aqui — promoção não é arbitragem; o risco residual vem como aviso.',
+  parametros: {
+    type: 'object',
+    properties: {
+      casa: { type: 'string', description: 'Casa da PROMOÇÃO (onde o bilhete será feito).' },
+      stake: { type: 'number', description: 'Valor do bilhete (ex.: 50).' },
+      odd_total_minima: { type: 'number', description: 'Odd total mínima do regulamento.' },
+      odd_minima_por_perna: { type: 'number', description: 'Odd mínima por seleção (default 1.20).' },
+      max_pernas: { type: 'number', description: 'Teto de seleções (default 5).' },
+      esporte: { type: 'string', description: 'Default Futebol.' },
+      situacao: { type: 'string', description: 'pre_jogo (default) | ao_vivo | todos.' },
+      casas_cobertura: { type: 'array', items: { type: 'string' }, description: 'Onde cobrir (máx. 3).' },
+      perda_aceita: { type: 'number', description: 'Perda aceita no pior caminho (default 0).' },
+    },
+    required: ['casa', 'stake', 'odd_total_minima'],
+    additionalProperties: false,
+  },
+  async executar(args: any, ctx: ContextoSkills) {
+    const casaPromo = acharCasa(args?.casa);
+    if (!casaPromo) {
+      return { erro: `Casa "${args?.casa}" não está integrada — não consigo ler as odds dela.`, dica: 'chame listar_casas' };
+    }
+    const stake = Number(args?.stake);
+    const oddTotalMin = Number(args?.odd_total_minima);
+    if (!(stake > 0) || !(oddTotalMin > 1)) {
+      return { erro: 'informe stake (> 0) e odd_total_minima (> 1) — são as duas exigências do regulamento' };
+    }
+    const oddMinPerna = Number(args?.odd_minima_por_perna) > 1 ? Number(args.odd_minima_por_perna) : 1.2;
+    const maxPernas = Math.max(2, Math.min(8, Number(args?.max_pernas) || 5));
+    const esporte = normalizarEsporte(args?.esporte);
+    const situacao = lerSituacao(args?.situacao ?? 'pre_jogo');
+    const perdaAceita = Number(args?.perda_aceita) > 0 ? Number(args.perda_aceita) : 0;
+
+    // 1) Casas de cobertura (a múltipla é feita na casa da promoção; a cobertura vai em
+    //    OUTRA casa, apostando o lado oposto de cada perna).
+    const todas = catalogoCasas();
+    const pedidas: string[] = Array.isArray(args?.casas_cobertura)
+      ? args.casas_cobertura.filter((c: any) => typeof c === 'string' && c.trim())
+      : [];
+    const cobertura: CasaCatalogada[] = (pedidas.length
+      ? pedidas.map((n) => acharCasa(n)).filter((c): c is CasaCatalogada => !!c)
+      : todas.filter((c) => (c.transporte === 'api' || c.transporte === 'ws') && c.fonte_scanner)
+    )
+      .filter((c) => c.chave !== casaPromo.chave)
+      .slice(0, 3);
+
+    // 2) Feeds: casa da promoção + casas de cobertura, em UMA passada (2 por vez: 1 core).
+    const alvos = [casaPromo, ...cobertura];
+    const coletas = await comLimite(alvos, 2, async (casa) => ({
+      nome: casa.nome,
+      odds: await ctx.revalidation.feedDaCasa(casa.nome, esporte, { aoVivo: situacao !== 'pre_jogo' }),
+    }));
+    const fontes: FonteOdds[] = [];
+    const falhas: string[] = [];
+    coletas.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value.odds.length) fontes.push(r.value);
+      else falhas.push(alvos[i].nome);
+    });
+    const oddsPromo = fontes.find((f) => f.nome === casaPromo.nome)?.odds || [];
+    if (!oddsPromo.length) {
+      return {
+        erro: `não consegui ler as odds da ${casaPromo.nome} (${esporte}) agora`,
+        casas_que_falharam: falhas,
+        dica: 'tente outro esporte, ou situacao="todos"',
+      };
+    }
+
+    // 3) Agrupa TUDO por jogo de uma vez: cada grupo já traz as odds da casa da promoção e
+    //    das casas de cobertura, que é exatamente o que a escolha da perna precisa.
+    const jogos = agruparPorJogo(fontes).filter((j) =>
+      situacao === 'ao_vivo' ? j.aoVivo : situacao === 'pre_jogo' ? !j.aoVivo : true
+    );
+
+    // 4) Candidatas — a escolha é feita SOBRE OS CLUSTERS COMPARADOS, não sobre o feed cru.
+    //    Motivo, medido no primeiro probe: escolhendo do feed cru, 3 das 5 pernas saíram sem
+    //    cobertura possível (mercado que a casa de cobertura não oferece) e ainda vinham
+    //    mercados exóticos ("Primeiro gol", "1º Tempo") que promoção nenhuma aceita bem.
+    //    Trabalhando no cluster, a perna só é candidata se JÁ existe o lado oposto em outra
+    //    casa — e o lado oposto sai alinhado pelo mesmo pareamento do motor.
+    const candidatas: PernaCandidata[] = [];
+    for (const jogo of jogos) {
+      if (!jogo.porCasa.has(casaPromo.nome)) continue;
+      const fontesDoJogo: FonteOdds[] = [...jogo.porCasa.entries()].map(([casa, odds]) => ({ nome: casa, odds }));
+      let melhor: PernaCandidata | null = null;
+      for (const m of compararOfertas(fontesDoJogo)) {
+        if (m.umaCasaSo) continue;
+        if (!MERCADO_PROMO_OK.test(normalizarMercado(m.mercado))) continue;
+        const ofertaPromo = m.casas.find((c) => c.casa === casaPromo.nome);
+        if (!ofertaPromo) continue;
+        for (const lado of ['A', 'B'] as const) {
+          const oddPromo = lado === 'A' ? ofertaPromo.oddA : ofertaPromo.oddB;
+          if (!(oddPromo >= oddMinPerna)) continue;
+          // Cobertura = melhor odd do lado OPOSTO em casa DIFERENTE da promoção.
+          const oposto = lado === 'A' ? m.melhorB : m.melhorA;
+          if (!oposto || oposto.casa === casaPromo.nome) continue;
+          // Entre as opções do mesmo jogo, fica a de cobertura mais BARATA: menor
+          // (1/oddPromo + 1/oddCobertura) é menos dinheiro parado no hedge.
+          const custo = 1 / oddPromo + 1 / oposto.odd;
+          if (!melhor || custo < melhor.custoHedge) {
+            melhor = {
+              jogo,
+              valor: oddPromo,
+              custoHedge: custo,
+              descricao: `${jogo.evento} — ${m.mercado}${m.linha !== null ? ` ${m.linha}` : ''}: ${
+                lado === 'A' ? m.opcaoA : m.opcaoB
+              }`,
+              oddCobertura: oposto.odd,
+              casaCobertura: oposto.casa,
+            };
+          }
+        }
+      }
+      if (melhor) candidatas.push(melhor);
+    }
+    if (!candidatas.length) {
+      return {
+        erro: `não achei seleção com odd >= ${oddMinPerna} na ${casaPromo.nome} que TAMBÉM tenha cobertura nas casas consultadas (${esporte}, ${situacao})`,
+        jogos_no_feed: jogos.length,
+        casas_de_cobertura: fontes.filter((f) => f.nome !== casaPromo.nome).map((f) => f.nome),
+        dica: 'baixe odd_minima_por_perna, adicione casas_cobertura ou troque o esporte',
+      };
+    }
+
+    // Seleção EQUILIBRADA, não "as maiores odds primeiro".
+    //
+    // Medido no probe: pegando as maiores primeiro, a múltipla fechou com UMA perna de odd
+    // 6.34 — qualifica no papel, mas cobrir uma odd dessas custou R$ 500 para um bilhete de
+    // R$ 50 e o caminho all-green dava prejuízo de R$ 233. Odd alta é hedge caro. O alvo é
+    // a odd equilibrada por perna (raiz n-ésima da odd total exigida), com piso na odd
+    // mínima do regulamento — que é a prática de matched betting: várias pernas de favorito.
+    const alvoPorPerna = Math.max(oddMinPerna, Math.pow(oddTotalMin, 1 / maxPernas));
+    const ordenadas = [...candidatas].sort(
+      (a, b) => Math.abs(a.valor - alvoPorPerna) - Math.abs(b.valor - alvoPorPerna) || a.custoHedge - b.custoHedge
+    );
+    const escolhidas: PernaCandidata[] = ordenadas.slice(0, maxPernas);
+    let oddTotal = escolhidas.reduce((acc, c) => acc * c.valor, 1);
+    // Faltou odd total? Troca a perna de MENOR odd pela MENOR candidata que ainda faz o
+    // total bater — não pela maior. Pegando a maior, o probe fechou com uma perna de odd
+    // 6.34 e odd total 20.28 para uma exigência de 5.00: overshoot que só encarece o hedge
+    // (cobrir 6.34 custou R$ 500 de um bilhete de R$ 50).
+    const reserva = ordenadas.slice(maxPernas).sort((a, b) => a.valor - b.valor);
+    while (oddTotal < oddTotalMin && reserva.length) {
+      let iMenor = 0;
+      escolhidas.forEach((c, i) => {
+        if (c.valor < escolhidas[iMenor].valor) iMenor = i;
+      });
+      const necessaria = (oddTotalMin / oddTotal) * escolhidas[iMenor].valor;
+      const idx = reserva.findIndex((c) => c.valor >= necessaria);
+      const troca = (idx >= 0 ? reserva.splice(idx, 1)[0] : reserva.pop()) as PernaCandidata;
+      if (troca.valor <= escolhidas[iMenor].valor) break; // reserva não ajuda mais
+      oddTotal = (oddTotal / escolhidas[iMenor].valor) * troca.valor;
+      escolhidas[iMenor] = troca;
+    }
+    // ORDEM DE RESOLUÇÃO: a cobertura é sequencial (cada aporte depende do gasto acumulado
+    // das pernas já resolvidas), então as pernas vão na ordem dos horários.
+    escolhidas.sort((a, b) => (parseKickoff(a.jogo.inicio || undefined) ?? 0) - (parseKickoff(b.jogo.inicio || undefined) ?? 0));
+
+    const pernas = escolhidas.map((c) => ({
+      descricao: c.descricao,
+      odd: odd2(c.valor),
+      oddCobertura: odd2(c.oddCobertura),
+      casaCobertura: c.casaCobertura,
+      resolveEm: c.jogo.inicio || null,
+    }));
+
+    // 4) Cobertura sequencial pela MESMA matemática do app (core/promocoes).
+    const res = calcularMultiplaQualificadora({
+      stake,
+      pernas: pernas.map((p) => ({
+        descricao: p.descricao,
+        odd: p.odd,
+        oddCobertura: p.oddCobertura,
+        resolveEm: p.resolveEm || undefined,
+      })),
+      oddTotalMinima: oddTotalMin,
+      oddMinimaPorPerna: oddMinPerna,
+      perdaAceita,
+    });
+
+    const semCobertura = pernas.filter((p) => p.oddCobertura === null).map((p) => p.descricao);
+    return {
+      casa_da_promocao: casaPromo.nome,
+      esporte,
+      situacao,
+      regulamento: { stake, odd_total_minima: oddTotalMin, odd_minima_por_perna: oddMinPerna, max_pernas: maxPernas },
+      jogos_no_feed: jogos.length,
+      candidatas_encontradas: candidatas.length,
+      casas_de_cobertura_consultadas: fontes.filter((f) => f.nome !== casaPromo.nome).map((f) => f.nome),
+      casas_que_falharam: falhas.length ? falhas : undefined,
+      odd_total: odd2(oddTotal),
+      qualifica: oddTotal >= oddTotalMin,
+      odd_alvo_por_perna: odd2(alvoPorPerna),
+      pernas: pernas.map(
+        (p, i) =>
+          `${i + 1}. ${p.descricao} @${p.odd}` +
+          (p.oddCobertura ? ` | cobrir em ${p.casaCobertura} @${p.oddCobertura}` : ' | ⚠️ SEM cobertura encontrada')
+      ),
+      pernas_sem_cobertura: semCobertura.length ? semCobertura : undefined,
+      cobertura: res
+        ? {
+            possivel: res.cobertura.possivel,
+            caixa_pico: res.cobertura.caixaPico,
+            passos: res.cobertura.passos,
+            avisos: res.cobertura.avisos,
+            lucro_se_tudo_bater: res.cobertura.lucroSeTudoBater,
+            problemas_de_regulamento: res.problemas,
+          }
+        : null,
+      nota:
+        'Diretrizes de SUREBET (mercado proibido, grupo de W.O.) NÃO se aplicam a promoção — aqui vale o regulamento da casa. ' +
+        'Odds mudam: confira cada perna na tela antes de montar o bilhete. A cobertura é SEQUENCIAL: só aporte a perna seguinte depois do green da anterior.',
+    };
+  },
+};
+
 export const SKILLS_CALCULO: Skill[] = [
   skillCalcularSurebet,
   skillCalcularPromocao,
   skillOtimizarFreebet,
   skillMultiplaQualificadora,
+  skillMontarMultiplaPromocao,
 ];

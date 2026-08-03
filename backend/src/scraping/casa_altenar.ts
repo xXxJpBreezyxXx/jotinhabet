@@ -14,6 +14,7 @@ import { fetchTextoComRetry } from '../utils/http';
  *    Total: market.name "Total", linha no campo `sv`; odds "Mais de X"/"Menos de X".
  *    1x2: 3 odds (casa/empate/fora por competitorId) → dupla chance sintética.
  *  (Handicap não vem neste endpoint — exigiria detalhe por evento; fica p/ depois.)
+ *  - widget/GetLiveEvents?sportId=X → MESMO formato, mas só IN-PLAY (ver incluirAoVivo).
  */
 
 interface AltenarConfig {
@@ -21,6 +22,12 @@ interface AltenarConfig {
   integration: string; // ex: 'aposta1'
   referer: string; // ex: 'https://www.aposta1.bet.br/'
   maxCampeonatosPorEsporte?: number; // default 40 (maiores ligas)
+  // Agente/Radar ao vivo: quando true a coleta muda de endpoint (GetLiveEvents) e mantém
+  // partidas EM ANDAMENTO. Aqui a flag TROCA o feed em vez de só relaxar o filtro porque
+  // o GetEvents?champIds do pré-jogo simplesmente NÃO lista jogo iniciado (probe 31/07:
+  // 176 eventos, 0 em andamento). O scanner de surebet constrói SEM a opção e continua
+  // percorrendo o mesmo caminho pré-jogo de antes.
+  incluirAoVivo?: boolean;
 }
 
 interface AltCompetitor { id: number; name: string; }
@@ -53,6 +60,30 @@ const SPORT_LABEL: Record<number, string> = {
   66: 'Futebol', 67: 'Basquete', 68: 'Tenis', 145: 'Esports',
   69: 'Volei', 77: 'Tenis de Mesa', 76: 'Beisebol',
 };
+/**
+ * Rótulos que são o MESMO mercado com outro nome. O vocabulário do Altenar VARIA por
+ * integration (ver aviso na memória do projeto): a mesma oferta que a Aposta1 publica como
+ * "Total" a EstrelaBet publica como "Total de Gols (incluindo linhas Asiáticas)".
+ *
+ * ⚠️ Até 03/08/2026 esta tabela só era aplicada com `incluirAoVivo`, "para o scanner
+ * pré-match continuar idêntico". O custo disso foi medido e é alto: a **EstrelaBet emitia
+ * ZERO total de gols no pré-match** (contra 555 da 4Play e 416 da Aposta1 na mesma
+ * varredura) — ~520 ofertas/varredura descartadas em silêncio no mercado de MAIOR cobertura
+ * cruzada do sistema (778 clusters com 2+ casas). Agora vale sempre.
+ *
+ * Cada linha é o MESMO mercado, não uma aproximação:
+ *  - "Total de Gols (incluindo linhas Asiáticas)" = total de gols da partida; o "incluindo
+ *    linhas Asiáticas" só diz que vêm também linhas quarter (.25/.75), que o projeto já
+ *    trata com o ROI-piso (`ehLinhaQuarter`/`linhaArbitravel`). Over 2.5 é over 2.5.
+ *  - "Total jogos" = total de GAMES do tênis (rótulo final sai de TOTAL_LABEL).
+ *  - "Handicap de jogos" = handicap de games = o handicap geral do tênis, convenção que já
+ *    vale na Pinnacle/NSoft/BetBoom (e agora também no Kambi, ver MERCADO_CONVENCAO lá).
+ */
+const MERCADO_EQUIVALENTE: Record<string, string> = {
+  'Total de Gols (incluindo linhas Asiáticas)': 'Total',
+  'Total jogos': 'Total',
+  'Handicap de jogos': 'Handicap',
+};
 const TOTAL_LABEL: Record<number, string> = {
   66: 'Total de Gols', 67: 'Total de Pontos', 68: 'Total de Games',
   69: 'Total de Pontos', 77: 'Total de Pontos', 76: 'Total de Corridas',
@@ -63,7 +94,7 @@ export class AltenarWidgetScraper implements OddsScraper {
   private readonly F = 'https://sb2frontend-altenar2.biahosted.com/api';
 
   constructor(cfg: AltenarConfig) {
-    this.cfg = { maxCampeonatosPorEsporte: 40, ...cfg };
+    this.cfg = { maxCampeonatosPorEsporte: 40, incluirAoVivo: false, ...cfg };
   }
 
   getNome(): string {
@@ -84,20 +115,25 @@ export class AltenarWidgetScraper implements OddsScraper {
   }
 
   async executarCrawler(esportes: string[], _datas: string[], _headless = true): Promise<ScrapedOdd[]> {
-    console.log(`🤖 [${this.cfg.nome}] Extração via Altenar widget (biahosted)...`);
+    console.log(
+      `🤖 [${this.cfg.nome}] Extração via Altenar widget (biahosted)${this.cfg.incluirAoVivo ? ' — AO VIVO (in-play)' : ''}...`
+    );
     const todas: ScrapedOdd[] = [];
     const vistos = new Set<number>(); // dedupe de eventos entre esportes
     // O menu do Altenar IGNORA o param sportId (retorna tudo); busca 1x e filtra os
     // campeonatos por esporte via a cadeia sport.catIds → category.champIds → champ.id.
-    let menu: AltResp;
-    try {
-      const menuResp = await fetchTextoComRetry(
-        `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 3, `${this.cfg.nome}/menu`
-      );
-      menu = JSON.parse(menuResp.body);
-    } catch (e: any) {
-      console.error(`   ⚠️ [${this.cfg.nome}] menu falhou: ${e.message}`);
-      return todas;
+    // Ao vivo o menu não é necessário: GetLiveEvents já busca por sportId direto.
+    let menu: AltResp = {};
+    if (!this.cfg.incluirAoVivo) {
+      try {
+        const menuResp = await fetchTextoComRetry(
+          `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 3, `${this.cfg.nome}/menu`
+        );
+        menu = JSON.parse(menuResp.body);
+      } catch (e: any) {
+        console.error(`   ⚠️ [${this.cfg.nome}] menu falhou: ${e.message}`);
+        return todas;
+      }
     }
     for (const esporte of esportes) {
       const sid = SPORT_ID[esporte];
@@ -118,13 +154,20 @@ export class AltenarWidgetScraper implements OddsScraper {
    * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento. A API do widget
    * só busca por campeonato, então re-extrai o esporte (menu + lotes) e filtra o evento
    * — ~5 requests. Reusa o parser de produção.
+   *
+   * Com incluirAoVivo procura no feed IN-PLAY (1 request por esporte, sem menu); o evento
+   * pré-jogo NÃO aparece nesse feed, então quem quiser os dois casos chama duas vezes
+   * (é o que o memo live/pré da revalidação já faz).
    */
   async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
     try {
-      const menuResp = await fetchTextoComRetry(
-        `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 1, `${this.cfg.nome}/reval-menu`, 10000
-      );
-      const menu: AltResp = JSON.parse(menuResp.body);
+      let menu: AltResp = {};
+      if (!this.cfg.incluirAoVivo) {
+        const menuResp = await fetchTextoComRetry(
+          `${this.F}/widget/GetClickableSportMenu?${this.q()}`, { headers: this.headers() }, 1, `${this.cfg.nome}/reval-menu`, 10000
+        );
+        menu = JSON.parse(menuResp.body);
+      }
       const sids = esporte && SPORT_ID[esporte] ? [SPORT_ID[esporte]] : [...new Set(Object.values(SPORT_ID))];
       for (const sid of sids) {
         const odds = await this.extrairEsporte(sid, menu, new Set());
@@ -138,6 +181,7 @@ export class AltenarWidgetScraper implements OddsScraper {
   }
 
   private async extrairEsporte(sportId: number, menu: AltResp, vistos: Set<number>): Promise<ScrapedOdd[]> {
+    if (this.cfg.incluirAoVivo) return this.extrairEsporteAoVivo(sportId, vistos);
     // Campeonatos DESTE esporte: sport.catIds → categories.champIds → champ.
     const sport = (menu.sports || []).find((s) => s.id === sportId);
     if (!sport) return [];
@@ -166,6 +210,26 @@ export class AltenarWidgetScraper implements OddsScraper {
     return odds;
   }
 
+  /**
+   * IN-PLAY: 1 request por esporte em GetLiveEvents (sem menu, sem champIds, sem lotes —
+   * sportId é OBRIGATÓRIO, sem ele volta vazio). O corpo é o MESMO formato relacional do
+   * GetEvents (events/markets/odds/competitors), então o parser é reusado inteiro; odd
+   * suspensa vem com price=0 e já cai no filtro `ativa()`. Só os mercados PRINCIPAIS
+   * (5-6 por evento) vêm nesse feed, o que basta para o agente.
+   */
+  private async extrairEsporteAoVivo(sportId: number, vistos: Set<number>): Promise<ScrapedOdd[]> {
+    const odds: ScrapedOdd[] = [];
+    let resp;
+    try {
+      resp = await fetchTextoComRetry(
+        `${this.F}/widget/GetLiveEvents?${this.q()}&sportId=${sportId}`, { headers: this.headers() }, 2, `${this.cfg.nome}/live`
+      );
+    } catch { return odds; }
+    if (resp.status !== 200) return odds;
+    this.parseResposta(JSON.parse(resp.body), odds, vistos);
+    return odds;
+  }
+
   private parseResposta(j: AltResp, out: ScrapedOdd[], vistos: Set<number>): void {
     const comp = new Map<number, string>((j.competitors || []).map((c) => [c.id, c.name]));
     const oddById = new Map<number, AltOdd>((j.odds || []).map((o) => [o.id, o]));
@@ -189,9 +253,10 @@ export class AltenarWidgetScraper implements OddsScraper {
       const home = comp.get(cids[0]);
       const away = comp.get(cids[1]);
       if (!home || !away) continue;
-      // Só PRÉ-JOGO.
+      // Só PRÉ-JOGO (com incluirAoVivo mantém a partida em andamento; o consumidor
+      // reconhece "ao vivo" pelo dataHora no passado, que aqui é o startDate real).
       const t = Date.parse(ev.startDate || '');
-      if (!isNaN(t) && t <= agora) continue;
+      if (!this.cfg.incluirAoVivo && !isNaN(t) && t <= agora) continue;
       const evento = `${home} vs ${away}`;
       const dataHora = ev.startDate || 'Hoje';
 
@@ -203,7 +268,10 @@ export class AltenarWidgetScraper implements OddsScraper {
         // Nome base sem o sufixo "(incluindo Prorrogação)" / "(incluindo innings extra)"
         // — normaliza futebol/basquete/tênis/beisebol. (Ambos os sufixos indicam a
         // convenção padrão de liquidação do esporte, então remover não muda o mercado.)
-        const base = (m.name || '').replace(/\s*\(incluindo (?:prorroga[cç][aã]o|innings? extras?)\)\s*/i, '').trim();
+        const cru = (m.name || '').replace(/\s*\(incluindo (?:prorroga[cç][aã]o|innings? extras?)\)\s*/i, '').trim();
+        // Normaliza os nomes que variam por integration (ver MERCADO_EQUIVALENTE) — sempre,
+        // não só ao vivo: era isso que fazia a EstrelaBet não emitir total de gols nenhum.
+        const base = MERCADO_EQUIVALENTE[cru] || cru;
 
         // --- Resultado Final (1x2 3-way / Vencedor 2-way; e-sports: "Vencedor da partida") ---
         // "Vencedor do encontro": rótulo do futebol na integration da Luvabet.
@@ -271,7 +339,12 @@ export class AltenarWidgetScraper implements OddsScraper {
         // --- Handicap Asiático 2-way (home/away com sinal), linha em sv, só meia-linha.
         //     Vôlei/mesa usam "Handicap pontos" → rótulo com ASSUNTO ("Handicap de
         //     Pontos"), para nunca colidir com handicap de SETS de outra casa. ---
-        else if ((base === 'Handicap' || base === 'Handicap pontos') && m.sv) {
+        // "Handicap de sets" (tênis): mercado DIFERENTE do handicap de games, então sai com
+        // rótulo próprio "Handicap de Sets" (mesmo nome que Pinnacle/Superbet/Rivalo/BetBoom
+        // usam) — nunca cruza com "Handicap". Deixou de ficar atrás da flag de ao vivo em
+        // 03/08/2026: o motivo era só "o resultado do scanner não pode mudar", e o nome
+        // também aparece no PRÉ-JOGO, onde era descartado de graça.
+        else if ((base === 'Handicap' || base === 'Handicap pontos' || base === 'Handicap de sets') && m.sv) {
           const linha = parseFloat(m.sv); // linha do mandante
           if (!Number.isFinite(linha) || !ehLinhaOk(linha)) continue;
           const oHome = oddsM.find((o) => o.competitorId === cids[0]);
@@ -279,7 +352,10 @@ export class AltenarWidgetScraper implements OddsScraper {
           if (!ativa(oHome) || !ativa(oAway)) continue;
           out.push({
             esporte, evento, dataHora,
-            mercado: base === 'Handicap pontos' ? 'Handicap de Pontos' : 'Handicap',
+            mercado:
+              base === 'Handicap pontos' ? 'Handicap de Pontos'
+              : base === 'Handicap de sets' ? 'Handicap de Sets'
+              : 'Handicap',
             linha,
             opcaoA: `${home} (${sinal(linha)})`, opcaoB: `${away} (${sinal(-linha)})`,
             oddA: oHome!.price, oddB: oAway!.price,
@@ -328,16 +404,40 @@ export class AltenarWidgetScraper implements OddsScraper {
  *
  * Operador distinto (preço próprio) → entra como FONTE do scanner e no SCRAPER_FACTORY.
  */
+/**
+ * Onabet — Altenar `onabet`. O domínio regulado é **ona.bet.br** (onabet.bet.br não existe:
+ * NXDOMAIN). O tenant saiu do próprio config da home
+ * (`"sportsbookIntegrator":{"altenarIntegrationName":"onabet"}`) e foi confirmado por
+ * controle negativo (tenant inventado não responde). O site tem challenge de Cloudflare,
+ * mas a coleta não passa por ele — as odds vêm do host da Altenar.
+ */
+export class OnabetScraper extends AltenarWidgetScraper {
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'Onabet', integration: 'onabet', referer: 'https://ona.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
+  }
+}
+
+/**
+ * BrBET — Altenar `brbet`. O site (brbet.bet.br) responde 403 de WAF do Cloudflare para o
+ * IP da VPS, o que é indiferente aqui: o feed é o host da Altenar. A camada de site é NGX
+ * ("BET_PLUS2"), que suporta NGX/Altenar/BETBY — o sportsbook desta marca é o Altenar.
+ */
+export class BrBetScraper extends AltenarWidgetScraper {
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'BrBET', integration: 'brbet', referer: 'https://www.brbet.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
+  }
+}
+
 export class LuvabetScraper extends AltenarWidgetScraper {
-  constructor() {
-    super({ nome: 'Luvabet', integration: 'luvabet', referer: 'https://luva.bet.br/' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'Luvabet', integration: 'luvabet', referer: 'https://luva.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
 /** Aposta1 — Altenar widget, integration "aposta1". */
 export class Aposta1Scraper extends AltenarWidgetScraper {
-  constructor() {
-    super({ nome: 'Aposta1', integration: 'aposta1', referer: 'https://www.aposta1.bet.br/' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'Aposta1', integration: 'aposta1', referer: 'https://www.aposta1.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
@@ -348,8 +448,8 @@ export class Aposta1Scraper extends AltenarWidgetScraper {
  * pouco arb novo e muita redundância.
  */
 export class BetPix365Scraper extends AltenarWidgetScraper {
-  constructor() {
-    super({ nome: 'BetPix365', integration: 'betpix365', referer: 'https://betpix365.bet.br/' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'BetPix365', integration: 'betpix365', referer: 'https://betpix365.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
@@ -359,8 +459,8 @@ export class BetPix365Scraper extends AltenarWidgetScraper {
  * por casa. Adicionada só ao SCRAPER_FACTORY (não é fonte do scanner nesta rodada).
  */
 export class EstrelaBetScraper extends AltenarWidgetScraper {
-  constructor() {
-    super({ nome: 'EstrelaBet', integration: 'estrelabet', referer: 'https://www.estrelabet.bet.br/' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'EstrelaBet', integration: 'estrelabet', referer: 'https://www.estrelabet.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
@@ -369,8 +469,8 @@ export class EstrelaBetScraper extends AltenarWidgetScraper {
  * confirmado no biahosted). Adicionada só ao SCRAPER_FACTORY (revalidação; não é fonte do scanner).
  */
 export class MCGamesScraper extends AltenarWidgetScraper {
-  constructor() {
-    super({ nome: 'MC Games', integration: 'mcgames2', referer: 'https://www.mcgames.bet.br/' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: 'MC Games', integration: 'mcgames2', referer: 'https://www.mcgames.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
   }
 }
 
@@ -381,7 +481,7 @@ export class MCGamesScraper extends AltenarWidgetScraper {
  * FONTE do scanner e também no SCRAPER_FACTORY (revalidação).
  */
 export class FourPlayScraper extends AltenarWidgetScraper {
-  constructor() {
-    super({ nome: '4Play', integration: '4play', referer: 'https://4play.bet.br/' });
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    super({ nome: '4Play', integration: '4play', referer: 'https://4play.bet.br/', incluirAoVivo: opts?.incluirAoVivo });
   }
 }

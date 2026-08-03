@@ -9,8 +9,11 @@ import { fetchTextoComRetry } from '../utils/http';
  * do feed não).
  *
  * Fluxo (todas as odds do catálogo em ~5 requests, sem browser):
- *  - GET {BASE}/0                → índice { top_events_versions, rest_events_versions }.
- *  - GET {BASE}/{versão}         → blob { sports, events } (gzip; ~400 eventos/página).
+ *  - GET {base}/0                → índice { top_events_versions, rest_events_versions }.
+ *  - GET {base}/{versão}         → blob { sports, events } (gzip; ~400 eventos/página).
+ *
+ * O feed é SEPARADO por modo (/prematch × /live), com a MESMA forma de índice/blob e
+ * os mesmos marketIds — por isso o parser roda igual nos dois (ver base()).
  *
  * Encoding Betradar (Sportradar UOF): events[id].markets[marketId][specifier][outcomeId].k
  *  - mercado 1 (1x2): outcomes 1/2/3 — SÓ futebol; não emitimos (futebol 1X2 é
@@ -22,10 +25,13 @@ import { fetchTextoComRetry } from '../utils/http';
  * Confirmado com eventos reais do blob em 17/07/2026.
  *
  * SEM tênis de mesa no prematch (conferido no feed). e-soccer ("eFutebol", "FC 26")
- * fica fora do mapa de esportes de propósito (odd travada de virtual).
+ * fica fora do mapa de esportes de propósito (odd travada de virtual). O feed live
+ * TEM tênis de mesa (sport 20), mas ele segue fora do SPORT_LABEL: mexer no mapa
+ * mudaria também a superfície do prematch, que precisa ficar intacta.
  */
 
-const BASE = 'https://api-32-sp-c7818b61-598.sptpub.com/api/v4/prematch/brand/2671060590084104192/pt-BR';
+const HOST = 'https://api-32-sp-c7818b61-598.sptpub.com';
+const BRAND = '2671060590084104192';
 
 // Betradar sport id → rótulo interno do esporte.
 const SPORT_LABEL: Record<string, string> = {
@@ -58,8 +64,19 @@ interface MercadoCfg {
   tipo: 'rf2' | 'total' | 'handicap' | 'mapa_vencedor' | 'mapa_total' | 'mapa_handicap';
   label?: string;
 }
+/**
+ * Esportes em que o HANDICAP 0 equivale a Empate Anula — ou seja, onde a partida pode
+ * terminar EMPATADA e o handicap 0 dar push. Só o futebol, entre os que mapeamos.
+ *
+ * Não é detalhe: em tênis, basquete (incl. OT), vôlei e beisebol não existe empate, então
+ * um handicap 0 ali é o PRÓPRIO vencedor da partida, não um DNB. Rotulá-lo 'Empate Anula'
+ * carimbaria o mercado errado (canônico DNB_FT) num mercado que é Resultado Final.
+ */
+const SPORTS_COM_EMPATE = new Set(['1']);
+
 const MERCADOS: Record<string, Record<string, MercadoCfg>> = {
-  // Futebol: 1x2 fora (Diretrizes); BTTS/DNB não existem no feed.
+  // Futebol: 1x2 fora (Diretrizes). BTTS não existe no feed; o DNB não existe como mercado
+  // próprio, mas o HANDICAP 0 do mercado 16 é o mesmo mercado (ver conversão no parser).
   '1': {
     '18': { tipo: 'total', label: 'Total de Gols' },
     '16': { tipo: 'handicap', label: 'Handicap' },
@@ -106,15 +123,30 @@ interface BbEvent {
     competitors?: BbCompetitor[];
   };
   markets?: Record<string, Record<string, Record<string, { k?: string }>>>;
+  // no feed live vêm também score/clock/match_status; não são usados (o consumidor
+  // deduz "ao vivo" pelo dataHora no passado e o ScrapedOdd é tipo compartilhado).
   state?: { status?: number };
 }
 interface BbBlob { sports?: Record<string, { name?: string }>; events?: Record<string, BbEvent>; }
 
 export class BetBoomScraper implements OddsScraper {
   private maxEventosPorEsporte = 200; // o parse é local (sem request por evento) — cap generoso
+  // Agente de IA / cashout ao vivo: quando true, soma o feed /live ao /prematch e NÃO
+  // descarta partida já iniciada. O scanner de surebets constrói SEM esta opção (só
+  // pré-jogo, resultado idêntico ao de antes da flag).
+  private incluirAoVivo: boolean;
+
+  constructor(opts?: { incluirAoVivo?: boolean }) {
+    this.incluirAoVivo = !!opts?.incluirAoVivo;
+  }
 
   getNome(): string {
     return 'BetBoom';
+  }
+
+  /** Rotas irmãs do sptpub: agendados (/prematch) × em andamento (/live). */
+  private base(modo: 'prematch' | 'live'): string {
+    return `${HOST}/api/v4/${modo}/brand/${BRAND}/pt-BR`;
   }
 
   private headers() {
@@ -127,18 +159,22 @@ export class BetBoomScraper implements OddsScraper {
     };
   }
 
-  /** Baixa índice + todas as páginas do snapshot e devolve os eventos unificados. */
-  private async baixarEventos(rapido = false): Promise<Record<string, BbEvent>> {
+  /** Baixa índice + todas as páginas de UM modo e devolve os eventos daquele snapshot. */
+  private async baixarSnapshot(
+    modo: 'prematch' | 'live',
+    rapido: boolean
+  ): Promise<Record<string, BbEvent>> {
+    const base = this.base(modo);
     const tent = rapido ? 1 : 3;
     const tmo = rapido ? 10000 : 20000;
-    const rIdx = await fetchTextoComRetry(`${BASE}/0`, { headers: this.headers() }, tent, 'BetBoom/idx', tmo);
+    const rIdx = await fetchTextoComRetry(`${base}/0`, { headers: this.headers() }, tent, `BetBoom/idx-${modo}`, tmo);
     if (rIdx.status !== 200) throw new Error(`índice HTTP ${rIdx.status}`);
     const idx = JSON.parse(rIdx.body);
     const versoes: number[] = [...(idx.top_events_versions || []), ...(idx.rest_events_versions || [])];
     const eventos: Record<string, BbEvent> = {};
     for (const v of versoes) {
       try {
-        const r = await fetchTextoComRetry(`${BASE}/${v}`, { headers: this.headers() }, rapido ? 1 : 2, 'BetBoom/blob', tmo);
+        const r = await fetchTextoComRetry(`${base}/${v}`, { headers: this.headers() }, rapido ? 1 : 2, `BetBoom/blob-${modo}`, tmo);
         if (r.status !== 200) continue;
         const blob: BbBlob = JSON.parse(r.body);
         Object.assign(eventos, blob.events || {});
@@ -146,6 +182,24 @@ export class BetBoomScraper implements OddsScraper {
         /* página indisponível — segue com as demais */
       }
     }
+    return eventos;
+  }
+
+  /** Snapshot unificado: /prematch sempre; + /live quando incluirAoVivo. */
+  private async baixarEventos(rapido = false): Promise<Record<string, BbEvent>> {
+    // Live DEPOIS do prematch: os dois feeds repetem o mesmo id na virada do kickoff e
+    // o Object.assign deixa por cima a versão em andamento (state/odds atuais).
+    const modos: ('prematch' | 'live')[] = this.incluirAoVivo ? ['prematch', 'live'] : ['prematch'];
+    const eventos: Record<string, BbEvent> = {};
+    let erro: any = null;
+    for (const modo of modos) {
+      try {
+        Object.assign(eventos, await this.baixarSnapshot(modo, rapido));
+      } catch (e) {
+        erro = e; // uma rota fora do ar não pode derrubar a outra
+      }
+    }
+    if (erro && Object.keys(eventos).length === 0) throw erro;
     return eventos;
   }
 
@@ -202,9 +256,13 @@ export class BetBoomScraper implements OddsScraper {
       const sport = d.sport || '';
       if (!sportIdsAlvo.has(sport) || !SPORT_LABEL[sport]) continue;
       if (d.virtual || d.type !== 'match') continue;
-      if ((ev.state?.status ?? 0) !== 0) continue; // 0 = agendado (pré-jogo)
+      // status: 0 = agendado, 1 = em andamento, 3 = encerrado. O 3 vem com match_status
+      // 100 e ZERO mercados (conferido no feed live 31/07), então nunca é aceito.
+      const status = ev.state?.status ?? 0;
+      if (status !== 0 && !(this.incluirAoVivo && status === 1)) continue;
       const t = (d.scheduled || 0) * 1000;
-      if (!t || t <= agora) continue; // só PRÉ-JOGO
+      if (!t) continue;
+      if (!this.incluirAoVivo && t <= agora) continue; // sem a flag: só PRÉ-JOGO
       if ((d.competitors || []).length !== 2) continue;
       const lista = porEsporte.get(sport) || [];
       lista.push(ev);
@@ -214,7 +272,13 @@ export class BetBoomScraper implements OddsScraper {
     const out: ScrapedOdd[] = [];
     for (const [sport, lista] of porEsporte) {
       lista.sort((a, b) => (a.desc.scheduled || 0) - (b.desc.scheduled || 0));
-      for (const ev of lista.slice(0, this.maxEventosPorEsporte)) out.push(...this.parseEvento(ev, sport));
+      // Os jogos em andamento têm scheduled no passado, então entram na FRENTE do cap.
+      // O teto ganha esse extra para o ao vivo não empurrar pré-jogo fora da varredura
+      // (sem a flag o extra é 0 e o corte fica idêntico ao de antes).
+      const extra = this.incluirAoVivo
+        ? lista.filter((e) => (e.desc.scheduled || 0) * 1000 <= agora).length
+        : 0;
+      for (const ev of lista.slice(0, this.maxEventosPorEsporte + extra)) out.push(...this.parseEvento(ev, sport));
     }
     return out;
   }
@@ -266,10 +330,38 @@ export class BetBoomScraper implements OddsScraper {
           });
         } else if (cfg.tipo === 'handicap' || cfg.tipo === 'mapa_handicap') {
           const linha = parseFloat(kv.hcp || '');
-          if (!Number.isFinite(linha) || !linhaArbitravel(linha)) continue;
+          if (!Number.isFinite(linha)) continue;
           const oH = odd(outs['1714']);
           const oA = odd(outs['1715']);
           if (!oH || !oA) continue;
+
+          // HANDICAP ASIÁTICO 0 = EMPATE ANULA (Draw No Bet). Não é "quase" igual: é o
+          // MESMO mercado. Com handicap 0 o empate devolve as duas pernas (push), que é
+          // exatamente a liquidação do DNB — mesma estrutura de pagamento, mesmo risco.
+          //
+          // Por que isso importa: `linhaArbitravel(0)` é false (linha inteira → push), então
+          // TODO handicap 0 era descartado em silêncio. Medido em 03/08/2026: 477 dos 801
+          // jogos de futebol da BetBoom (60%) publicam handicap 0 e nenhum entrava no motor.
+          // E o DNB é um dos mercados de maior cobertura cruzada do sistema (574 clusters
+          // com 2+ casas numa varredura de 8 casas), do qual a BetBoom não participava.
+          //
+          // O "profit or zero" do empate não é novidade nem exceção: é assim que todo DNB
+          // do sistema já funciona (Kambi/Altenar/Superbet emitem 'Empate Anula' há tempo,
+          // e a Diretriz libera DNB explicitamente). Emitimos no MESMO formato deles —
+          // rótulo 'Empate Anula', nomes dos times e SEM linha — senão o canônico não bate
+          // (DNB_FT) e não cruzaria com ninguém.
+          //
+          // Só a linha EXATAMENTE 0 vira DNB. Os outros handicaps inteiros seguem fora: em
+          // -1, por exemplo, o push acontece quando o mandante vence por exatamente 1 gol,
+          // e aí não há mercado equivalente com que cruzar.
+          if (linha === 0 && cfg.tipo === 'handicap' && SPORTS_COM_EMPATE.has(sport)) {
+            out.push({
+              esporte, evento, dataHora, mercado: 'Empate Anula',
+              opcaoA: home, opcaoB: away, oddA: oH, oddB: oA,
+            });
+            continue;
+          }
+          if (!linhaArbitravel(linha)) continue;
           const mercado = cfg.tipo === 'mapa_handicap' ? `Mapa ${kv.mapnr || '?'} - Handicap de rodadas` : cfg.label!;
           out.push({
             esporte, evento, dataHora, mercado, linha,

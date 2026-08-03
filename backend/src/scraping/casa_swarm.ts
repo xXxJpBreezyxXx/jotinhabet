@@ -16,6 +16,9 @@ import { areEventsSame } from '../arbitrage/matcher';
  *    → árvore { game: { id: { market: { id: { event: {...} } } } } }.
  *  - SEM filtro de market.type a resposta explode (Soccer tem 851 mercados/jogo) —
  *    sempre filtrar pelos tipos da whitelist.
+ *  - is_live é BUCKET, não estado: 0 = pré-jogo, 1 = ao vivo (mas com jogos "notstarted"
+ *    prestes a começar). O estado real está em game.info (current_game_state/score1/score2/
+ *    current_game_time), pedido só quando incluirAoVivo. Tipos de mercado ao vivo = os mesmos.
  *
  * Convenções do feed (validadas em jogos reais):
  *  - Totais: market.base = linha; events type_1 Over/Under (mesmo base).
@@ -33,12 +36,19 @@ interface SwarmConfig {
   wsUrl: string;
   siteId: number;
   origin: string;
+  // Varredura ao vivo (agente/cashout): quando true o `where` pede is_live @in [0,1] e o
+  // parser NÃO exige início no futuro — o scanner de surebet pré-match constrói SEM esta
+  // opção e continua vendo exatamente os mesmos jogos de antes.
+  incluirAoVivo?: boolean;
 }
 
 interface SwarmEventOdd { id: number; price?: number; base?: number; type_1?: string; }
 interface SwarmMarket { id: number; type?: string; name?: string; base?: number; event?: Record<string, SwarmEventOdd>; }
+/** info só vem quando incluirAoVivo (pedido a mais no `what.game`); traz estado/placar/tempo. */
+interface SwarmGameInfo { current_game_state?: string; current_game_time?: string; score1?: string; score2?: string; }
 interface SwarmGame {
   id: number; team1_name?: string; team2_name?: string; start_ts?: number; is_blocked?: number;
+  is_live?: number; info?: SwarmGameInfo;
   market?: Record<string, SwarmMarket>;
 }
 
@@ -163,9 +173,11 @@ class SwarmClient {
 export class SwarmScraper implements OddsScraper {
   private cfg: SwarmConfig;
   private maxEventosPorEsporte = 150;
+  private incluirAoVivo: boolean;
 
   constructor(cfg: SwarmConfig) {
     this.cfg = cfg;
+    this.incluirAoVivo = !!cfg.incluirAoVivo;
   }
 
   getNome(): string {
@@ -222,18 +234,24 @@ export class SwarmScraper implements OddsScraper {
   private async extrairSport(cli: SwarmClient, sportId: number, timeoutMs = 25000): Promise<ScrapedOdd[]> {
     const tipos = Object.keys(tiposDoSport(sportId));
     if (tipos.length === 0) return [];
+    // O servidor filtra por bucket: is_live 0 = pré-jogo, 1 = ao vivo. Ao vivo pedimos os
+    // DOIS (@in) — o bucket live traz jogos ainda "notstarted" perto do kickoff, então
+    // quem manda no "está rolando?" é info.current_game_state, não o bucket. Sem a flag o
+    // request fica idêntico ao de sempre (nem is_live/info no what) → mesmo resultado.
     const r = await cli.send(
       'get',
       {
         source: 'betting',
         what: {
-          game: ['id', 'team1_name', 'team2_name', 'start_ts', 'is_blocked'],
+          game: this.incluirAoVivo
+            ? ['id', 'team1_name', 'team2_name', 'start_ts', 'is_blocked', 'is_live', 'info']
+            : ['id', 'team1_name', 'team2_name', 'start_ts', 'is_blocked'],
           market: ['id', 'type', 'name', 'base'],
           event: ['id', 'price', 'base', 'type_1'],
         },
         where: {
           sport: { id: sportId },
-          game: { is_live: 0 },
+          game: this.incluirAoVivo ? { is_live: { '@in': [0, 1] } } : { is_live: 0 },
           market: { type: { '@in': tipos } },
         },
         subscribe: false,
@@ -257,9 +275,11 @@ export class SwarmScraper implements OddsScraper {
     const lista = games
       .filter((g) => {
         if (!g.team1_name || !g.team2_name || g.is_blocked) return false;
+        if (this.incluirAoVivo) return true; // ao vivo: mantém partida em andamento + pré-jogo
         const t = (g.start_ts || 0) * 1000;
         return t > agora; // só PRÉ-JOGO
       })
+      // ao vivo primeiro (start_ts no passado ordena antes) — o teto por esporte não corta jogo rolando.
       .sort((a, b) => (a.start_ts || 0) - (b.start_ts || 0))
       .slice(0, this.maxEventosPorEsporte);
 
@@ -299,6 +319,24 @@ export class SwarmScraper implements OddsScraper {
           const a = evs.find((e) => e.type_1 === 'Away');
           if (!h || !a || !okOdd(h.price) || !okOdd(a.price)) continue;
           const linha = typeof h.base === 'number' ? h.base : undefined;
+          // HANDICAP 0 = EMPATE ANULA (Draw No Bet): o empate devolve as duas pernas
+          // (push), que é exatamente a liquidação do DNB. `linhaArbitravel(0)` é false
+          // (linha inteira), então todo handicap 0 era descartado em silêncio — e o DNB é
+          // um dos mercados de maior cobertura cruzada do sistema (574 clusters com 2+ casas
+          // numa varredura de 8 casas). Nem SeuBet nem Vbet têm mercado de DNB
+          // próprio no feed, então sem isto elas não participam do melhor mercado.
+          // Emitido no formato dos outros emissores ('Empate Anula', nomes dos times, SEM
+          // linha) para o canônico bater em DNB_FT.
+          // SÓ no futebol (sportId 1): é o único esporte aqui em que a partida pode
+          // EMPATAR. Em tênis/basquete/vôlei/mesa handicap 0 é o próprio vencedor da
+          // partida, e rotulá-lo DNB carimbaria o mercado errado.
+          if (linha === 0 && sportId === 1) {
+            out.push({
+              esporte, evento, dataHora, mercado: 'Empate Anula',
+              opcaoA: home, opcaoB: away, oddA: h.price!, oddB: a.price!,
+            });
+            continue;
+          }
           if (typeof linha !== 'number' || !linhaArbitravel(linha)) continue;
           out.push({
             esporte, evento, dataHora, mercado: cfg.label!, linha,
@@ -314,12 +352,13 @@ export class SwarmScraper implements OddsScraper {
 
 /** SeuBet — Swarm da BetConstruct em seu.bet.br (site_id capturado do próprio site). */
 export class SeuBetScraper extends SwarmScraper {
-  constructor() {
+  constructor(opts?: { incluirAoVivo?: boolean }) {
     super({
       nome: 'SeuBet',
       wsUrl: 'wss://eu-swarm-springre.trexname.com/',
       siteId: 18749911,
       origin: 'https://www.seu.bet.br',
+      incluirAoVivo: opts?.incluirAoVivo,
     });
   }
 }
@@ -332,12 +371,13 @@ export class SeuBetScraper extends SwarmScraper {
  * inclui o endpoint do CMS p/ re-verificação e as ressalvas de DQ/1ª liquidação).
  */
 export class VbetScraper extends SwarmScraper {
-  constructor() {
+  constructor(opts?: { incluirAoVivo?: boolean }) {
     super({
       nome: 'Vbet',
       wsUrl: 'wss://eu-swarm-newm.vbet.bet.br/',
       siteId: 692,
       origin: 'https://www.vbet.bet.br',
+      incluirAoVivo: opts?.incluirAoVivo,
     });
   }
 }

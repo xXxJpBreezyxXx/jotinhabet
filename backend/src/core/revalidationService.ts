@@ -10,7 +10,7 @@ import { generateWithFallback } from '../IA/aiProvider';
 import { ScrapedOdd } from '../scraping/scraper_base';
 import { KtoScraper, BetWarriorScraper } from '../scraping/casa_kambi';
 import { SuperbetScraper } from '../scraping/casa_superbet';
-import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper, FourPlayScraper, LuvabetScraper } from '../scraping/casa_altenar';
+import { Aposta1Scraper, BetPix365Scraper, EstrelaBetScraper, MCGamesScraper, FourPlayScraper, LuvabetScraper, OnabetScraper, BrBetScraper } from '../scraping/casa_altenar';
 import { PinnacleScraper } from '../scraping/casa_pinnacle';
 import { BetBoomScraper } from '../scraping/casa_betboom';
 import { SeuBetScraper, VbetScraper } from '../scraping/casa_swarm';
@@ -22,27 +22,55 @@ import { OneXBetScraper } from '../scraping/casa_1xbet';
 import { StakeScraper } from '../scraping/casa_stake';
 import { RivaloScraper } from '../scraping/casa_rivalo';
 import { Brazino777Scraper, ApostaGanhaScraper } from '../scraping/casa_nsoft';
+import { BetssonScraper } from '../scraping/casa_betsson';
+import { BetEsporteScraper } from '../scraping/casa_betesporte';
+import { MarjoSportsScraper } from '../scraping/casa_ngx';
+
+/**
+ * Opções de coleta pedidas na hora (não são config de scanner).
+ *
+ * `aoVivo` é o que destrava a varredura de partidas EM ANDAMENTO: o pipeline de surebet
+ * pré-match descarta tudo que já começou (`start > now`), então sem esta opção o agente
+ * respondia "não achei esse jogo" para qualquer pergunta sobre jogo ao vivo. As casas que
+ * ainda não sabem coletar live simplesmente ignoram a opção (ver `CASAS_AO_VIVO`).
+ */
+export interface OpcoesColeta {
+  aoVivo?: boolean;
+}
+
+/** O que o factory devolve: busca dirigida sempre; feed completo quando a casa tem. */
+interface ScraperConsultavel {
+  oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]>;
+  executarCrawler?(esportes: string[], datas: string[], headless?: boolean): Promise<ScrapedOdd[]>;
+}
 
 /** Casas com scraper próprio que sabem re-buscar UM evento (oddsDoEvento). */
-const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> }> = {
-  kto: () => new KtoScraper(),
-  betwarrior: () => new BetWarriorScraper(),
-  superbet: () => new SuperbetScraper(),
-  aposta1: () => new Aposta1Scraper(),
-  pinnacle: () => new PinnacleScraper(),
-  betboom: () => new BetBoomScraper(),
-  seubet: () => new SeuBetScraper(),
-  vbet: () => new VbetScraper(),
+const SCRAPER_FACTORY: Record<string, (opts?: OpcoesColeta) => ScraperConsultavel> = {
+  kto: (o) => new KtoScraper({ incluirAoVivo: o?.aoVivo }),
+  betwarrior: (o) => new BetWarriorScraper({ incluirAoVivo: o?.aoVivo }),
+  superbet: (o) => new SuperbetScraper({ incluirAoVivo: o?.aoVivo }),
+  aposta1: (o) => new Aposta1Scraper({ incluirAoVivo: o?.aoVivo }),
+  pinnacle: (o) => new PinnacleScraper({ incluirAoVivo: o?.aoVivo }),
+  betboom: (o) => new BetBoomScraper({ incluirAoVivo: o?.aoVivo }),
+  seubet: (o) => new SeuBetScraper({ incluirAoVivo: o?.aoVivo }),
+  vbet: (o) => new VbetScraper({ incluirAoVivo: o?.aoVivo }),
   esportesdasorte: () => new EsportesDaSorteScraper(),
   betnacional: () => new BetnacionalScraper(),
-  betpix365: () => new BetPix365Scraper(), // Altenar (só revalidação; não é fonte do scanner)
-  estrelabet: () => new EstrelaBetScraper(), // Altenar (fonte do scanner + revalidação)
-  '4play': () => new FourPlayScraper(), // Altenar "4play" (fonte do scanner + revalidação)
-  mcgames: () => new MCGamesScraper(), // Altenar "mcgames2" (só revalidação; não é fonte do scanner)
-  luvabet: () => new LuvabetScraper(), // Altenar "luvabet" (fonte do scanner + revalidação)
+  betpix365: (o) => new BetPix365Scraper({ incluirAoVivo: o?.aoVivo }), // Altenar (só revalidação; não é fonte do scanner)
+  estrelabet: (o) => new EstrelaBetScraper({ incluirAoVivo: o?.aoVivo }), // Altenar (fonte do scanner + revalidação)
+  '4play': (o) => new FourPlayScraper({ incluirAoVivo: o?.aoVivo }), // Altenar "4play" (fonte do scanner + revalidação)
+  mcgames: (o) => new MCGamesScraper({ incluirAoVivo: o?.aoVivo }), // Altenar "mcgames2" (só revalidação; não é fonte do scanner)
+  luvabet: (o) => new LuvabetScraper({ incluirAoVivo: o?.aoVivo }), // Altenar "luvabet" (fonte do scanner + revalidação)
+  onabet: (o) => new OnabetScraper({ incluirAoVivo: o?.aoVivo }), // Altenar "onabet" (domínio ona.bet.br)
+  brbet: (o) => new BrBetScraper({ incluirAoVivo: o?.aoVivo }), // Altenar "brbet"
+  betesporte: (o) => new BetEsporteScraper({ incluirAoVivo: o?.aoVivo }), // própria "SA Esportes" (feed Sportradar)
+  marjosports: (o) => new MarjoSportsScraper({ incluirAoVivo: o?.aoVivo }), // NGX/BetPlus (licença LOTERJ)
+  // Sportsbook PRÓPRIO do Betsson Group (/api/sb/v1) — NÃO é Digitain, e não precisa de
+  // browser: as páginas têm AWS WAF, a API não. Busca dirigida usa competitionIds.
+  betsson: (o) => new BetssonScraper({ incluirAoVivo: o?.aoVivo }),
   // Casas de BROWSER (Playwright) — só mercado principal (Resultado Final). oddsDoEvento
   // sobe um chromium por revalidação (memo 60s dedup a; contrato de falha = throw p/ infra).
-  betano: () => new BetanoScraper(),
+  betano: (o) => new BetanoScraper({ incluirAoVivo: o?.aoVivo }),
   blaze: () => new BlazeScraper(),
   '1xbet': () => new OneXBetScraper(),
   stake: () => new StakeScraper(), // browser-intercept (API JSON só dentro do browser; só Futebol 1X2)
@@ -50,6 +78,54 @@ const SCRAPER_FACTORY: Record<string, () => { oddsDoEvento(evento: string, espor
   brazino777: () => new Brazino777Scraper(), // NSoft AIO (API pública, sem browser)
   apostaganha: () => new ApostaGanhaScraper(), // NSoft AIO (mesmo parser da Brazino777)
 };
+
+/**
+ * Casas que sabem coletar partida EM ANDAMENTO na BUSCA DIRIGIDA (`oddsDoEvento`).
+ * Quem não está aqui devolve só pré-jogo mesmo com `aoVivo: true` — e o agente precisa
+ * DIZER isso ao usuário, em vez de afirmar "não tem jogo ao vivo nessa casa".
+ */
+export const CASAS_AO_VIVO = new Set([
+  'kto', 'betwarrior', 'pinnacle', 'superbet', 'betano',
+  'aposta1', 'betpix365', 'estrelabet', '4play', 'mcgames', 'luvabet', 'onabet', 'brbet',
+  'seubet', 'vbet', 'betboom', 'betesporte', 'marjosports', 'betsson',
+]);
+
+/**
+ * Casas cujo FEED (`executarCrawler`, usado por `feedDaCasa`) devolve jogo em andamento.
+ *
+ * É um conjunto SEPARADO porque a capacidade não é a mesma: na Betano a flag só vale na
+ * busca por nome — o caminho de LISTA navega as páginas de pré-jogo e nunca vê partida em
+ * andamento. Anunciar varredura ao vivo lá devolveria lista vazia com cara de "não tem
+ * jogo".
+ */
+export const CASAS_FEED_AO_VIVO = new Set(
+  [...CASAS_AO_VIVO].filter((c) => c !== 'betano')
+);
+
+/**
+ * Casas em que a flag TROCA o feed em vez de somar: com `aoVivo: true` vem SÓ o jogo em
+ * andamento. São as Altenar — o feed pré-jogo (`GetEvents?champIds`) não tem partida
+ * iniciada e o `GetLiveEvents` não tem pré-jogo, são dois endpoints disjuntos.
+ * Quem quer os dois recortes nessas casas precisa coletar duas vezes.
+ */
+export const CASAS_FEED_LIVE_EXCLUSIVO = new Set([
+  'aposta1', 'betpix365', 'estrelabet', '4play', 'mcgames', 'luvabet', 'onabet', 'brbet',
+]);
+
+/** True se, com `aoVivo: true`, o feed da casa devolve SÓ jogo em andamento. */
+export function casaFeedLiveExclusivo(casa: string): boolean {
+  return CASAS_FEED_LIVE_EXCLUSIVO.has(normalizarCasa(canonizarCasa(casa || '')));
+}
+
+/** True se a BUSCA POR EVENTO da casa aceita partida em andamento. */
+export function casaColetaAoVivo(casa: string): boolean {
+  return CASAS_AO_VIVO.has(normalizarCasa(canonizarCasa(casa || '')));
+}
+
+/** True se a VARREDURA DE FEED da casa devolve partida em andamento. */
+export function casaVarreAoVivo(casa: string): boolean {
+  return CASAS_FEED_AO_VIVO.has(normalizarCasa(canonizarCasa(casa || '')));
+}
 
 /** True se a casa tem scraper próprio capaz de re-buscar um evento (oddsDoEvento).
  *  Aceita nome canônico do motor OU label da SureRadar ("Betnacional (BR)"). */
@@ -164,21 +240,40 @@ export class RevalidationService {
   }
 
   /** Público: odds AO VIVO de UM evento numa casa (busca dirigida + memo 60s). Usado
-   *  pelo "Validar" do Radar Cashout — reusa o mesmo caminho da revalidação de surebet. */
-  async oddsDaCasa(casa: string, evento: string, esporte?: string): Promise<ScrapedOdd[]> {
-    return this.oddsDoEventoMemo(casa, evento, esporte);
+   *  pelo "Validar" do Radar Cashout e pelas skills de odds do Agente — reusa o mesmo
+   *  caminho da revalidação de surebet.
+   *  @param opts `aoVivo: true` mantém partidas EM ANDAMENTO no feed (o default do
+   *  pipeline de surebet é só pré-jogo, e era por isso que o agente não achava jogo ao
+   *  vivo). Casas fora de CASAS_AO_VIVO ignoram a opção. */
+  async oddsDaCasa(casa: string, evento: string, esporte?: string, opts?: OpcoesColeta): Promise<ScrapedOdd[]> {
+    return this.oddsDoEventoMemo(casa, evento, esporte, opts);
   }
 
-  /** Memo por varredura das odds re-buscadas (casa|evento|esporte → odds, TTL 60s). */
+  /** Memo por varredura das odds re-buscadas (casa|evento|esporte|aoVivo → odds, TTL 60s). */
   private memoOdds = new Map<string, { at: number; odds: ScrapedOdd[] }>();
-  private async oddsDoEventoMemo(casa: string, evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+  private async oddsDoEventoMemo(
+    casa: string,
+    evento: string,
+    esporte?: string,
+    opts?: OpcoesColeta
+  ): Promise<ScrapedOdd[]> {
     const chave = this.chaveCasa(casa);
-    const key = `${chave}|${this.norm(evento)}|${this.norm(esporte)}`;
+    // aoVivo entra na chave: o mesmo evento tem resultado DIFERENTE com e sem live
+    // (com live o feed traz a partida em andamento) — compartilhar o memo dava resposta
+    // vazia para a consulta ao vivo depois de uma consulta pré-jogo.
+    const key = `${chave}|${this.norm(evento)}|${this.norm(esporte)}|${opts?.aoVivo ? 'live' : 'pre'}`;
     const hit = this.memoOdds.get(key);
     if (hit && Date.now() - hit.at < 60_000) return hit.odds;
     const fab = SCRAPER_FACTORY[chave];
     if (!fab) return [];
-    const odds = await fab().oddsDoEvento(evento, esporte);
+    let odds = await fab(opts).oddsDoEvento(evento, esporte);
+    // Nas casas em que a flag TROCA o feed (Altenar: GetLiveEvents não tem pré-jogo), uma
+    // busca ao vivo que volta vazia NÃO significa "a casa não tem esse jogo" — significa que
+    // ele não está em andamento. Sem este fallback, o agente afirmava "a casa não tem o
+    // evento" para um jogo que está lá, só pré-jogo.
+    if (!odds.length && opts?.aoVivo && CASAS_FEED_LIVE_EXCLUSIVO.has(chave)) {
+      odds = await fab({ ...opts, aoVivo: false }).oddsDoEvento(evento, esporte);
+    }
     // NÃO memoiza lista vazia: [] tanto vem de falha transitória quanto de ausência real,
     // e cachear por 60s envenenaria a revalidação (perna some do gate por engano). Só
     // cacheia resultado com conteúdo — o vazio é re-buscado na próxima chamada.
@@ -186,6 +281,47 @@ export class RevalidationService {
       this.memoOdds.set(key, { at: Date.now(), odds });
       // higiene: não deixa o memo crescer sem limite entre varreduras
       if (this.memoOdds.size > 200) this.memoOdds.clear();
+    }
+    return odds;
+  }
+
+  /** Memo do FEED completo por casa|esporte|situação (varredura sob demanda). */
+  private memoFeed = new Map<string, { at: number; odds: ScrapedOdd[] }>();
+
+  /**
+   * FEED COMPLETO de um esporte numa casa — a varredura que o scanner faz, mas sob
+   * demanda e para UMA casa. É o que permite ao agente responder "quais jogos tem na KTO
+   * agora?" sem o usuário informar o nome do jogo (a busca dirigida `oddsDoEvento`
+   * exige o nome).
+   *
+   * TTL curto e diferente por situação: odd ao vivo muda em segundos (45s), pré-jogo
+   * aguenta mais (180s). O memo é o que evita que "lista os jogos" seguido de "compara
+   * esses dois" pague a coleta duas vezes.
+   *
+   * Lança se a casa não tiver coleta de feed (o chamador precisa distinguir "casa não
+   * suporta" de "não tem jogo") — casas de browser são caras: quem chama decide.
+   */
+  async feedDaCasa(casa: string, esporte: string, opts?: OpcoesColeta): Promise<ScrapedOdd[]> {
+    const chave = this.chaveCasa(casa);
+    const fab = SCRAPER_FACTORY[chave];
+    if (!fab) throw new Error(`casa "${casa}" não tem scraper integrado`);
+    const scraper = fab(opts);
+    if (typeof scraper.executarCrawler !== 'function') {
+      throw new Error(`casa "${casa}" não sabe varrer o feed (só busca por evento)`);
+    }
+    const key = `${chave}|${this.norm(esporte)}|${opts?.aoVivo ? 'live' : 'pre'}`;
+    const ttl = opts?.aoVivo ? 45_000 : 180_000;
+    const hit = this.memoFeed.get(key);
+    if (hit && Date.now() - hit.at < ttl) return hit.odds;
+
+    const odds = await scraper.executarCrawler([esporte], ['hoje', 'amanha']);
+    if (odds.length > 0) {
+      this.memoFeed.set(key, { at: Date.now(), odds });
+      // Feed inteiro é grande (centenas de linhas por casa): não deixa o memo crescer.
+      if (this.memoFeed.size > 12) {
+        const maisVelha = [...this.memoFeed.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        if (maisVelha) this.memoFeed.delete(maisVelha[0]);
+      }
     }
     return odds;
   }
