@@ -26,8 +26,15 @@ services:
       - PORT=4000
       - FRONTEND_ORIGIN=https://jotinhabet.eurekmind.com
       - SURERADAR_COOKIES_PATH=/app/sureradar.json
-      # Proxy só-Pinnacle via sidecar Tailscale (serviço jotinhabet_tsproxy, exit node
-      # = celular residencial) — contorna o bloqueio de ASN da Pinnacle (HTTP 403).
+      # Túneis residenciais (sidecars Tailscale) em ORDEM DE PREFERÊNCIA — contornam o
+      # bloqueio de ASN da Pinnacle (403) e o CF comportamental da Stake. O backend testa
+      # e escolhe um que esteja de fato saindo por IP residencial (utils/tunelResidencial.ts):
+      #   jotinhabet_tsproxy2 → exit node = desktop (DESKTOP-SH8BVOR, 100.115.26.17)
+      #   jotinhabet_tsproxy  → exit node = celular (S21, 100.97.159.64)
+      # DESKTOP PRIMEIRO de propósito: o celular já caiu duas vezes (21h fora em 02→03/08,
+      # Android matando a VPN); o desktop tem link fixo. O celular é o reserva.
+      - TSPROXY_URLS=http://jotinhabet_tsproxy2:1055,http://jotinhabet_tsproxy:1055
+      # Legado: scripts antigos usam a presença desta var como flag de "tem túnel".
       - PINNACLE_PROXY=http://jotinhabet_tsproxy:1055
     volumes:
       - ./sureradar.json:/app/sureradar.json:ro   # cookies do SureRadar (arquivo na raiz do projeto)

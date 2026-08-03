@@ -2,16 +2,15 @@ import { ScrapedOdd, OddsScraper } from './scraper_base';
 import { rotuloOver, rotuloUnder, linhaArbitravel } from '../arbitrage/markets';
 import { areEventsSame } from '../arbitrage/matcher';
 import { fetchTextoComRetry } from '../utils/http';
-import { ProxyAgent } from 'undici';
+import { resolverTunel, marcarFalhaTunel, seletorTuneis, TunelAtivo } from '../utils/tunelResidencial';
 
 /**
- * A Pinnacle bloqueia por ASN o IP do datacenter da VPS (HTTP 403). PINNACLE_PROXY
- * (ex.: http://jotinhabet_tsproxy:1055) aponta pro sidecar Tailscale que sai por um
- * exit node residencial (celular). O dispatcher é passado SÓ nas requisições da
- * Pinnacle — o resto do backend continua saindo direto.
+ * A Pinnacle bloqueia por ASN o IP do datacenter da VPS (HTTP 403). O egress sai por um
+ * sidecar Tailscale preso a um exit node residencial — hoje são DOIS (celular e desktop),
+ * e `resolverTunel()` escolhe um que esteja realmente roteando pelo IP residencial. O
+ * dispatcher é passado SÓ nas requisições da Pinnacle — o resto do backend sai direto.
+ * Ver utils/tunelResidencial.ts.
  */
-const PINNACLE_PROXY = process.env.PINNACLE_PROXY || '';
-const pinnacleDispatcher = PINNACLE_PROXY ? new ProxyAgent(PINNACLE_PROXY) : undefined;
 
 /**
  * Pinnacle — via API "arcadia" guest (pública, X-API-Key estática do próprio site).
@@ -110,6 +109,8 @@ export class PinnacleScraper implements OddsScraper {
    * de jogo já começado — ler o pai é pior que não ler nada, porque parece odd válida.
    */
   private incluirAoVivo: boolean;
+  /** Túnel residencial em uso nesta execução (resolvido no início da varredura). */
+  private tunel: TunelAtivo | null = null;
 
   constructor(opts?: { incluirAoVivo?: boolean }) {
     this.incluirAoVivo = !!opts?.incluirAoVivo;
@@ -201,10 +202,10 @@ export class PinnacleScraper implements OddsScraper {
     };
   }
 
-  /** Init do fetch: headers + dispatcher do proxy (quando PINNACLE_PROXY configurado). */
+  /** Init do fetch: headers + dispatcher do túnel residencial em uso (quando houver). */
   private fetchInit(): RequestInit {
     const init: any = { headers: this.headers() };
-    if (pinnacleDispatcher) init.dispatcher = pinnacleDispatcher;
+    if (this.tunel) init.dispatcher = this.tunel.dispatcher;
     return init as RequestInit;
   }
 
@@ -215,9 +216,13 @@ export class PinnacleScraper implements OddsScraper {
   }
 
   async executarCrawler(esportes: string[], _datas: string[], _headless = true): Promise<ScrapedOdd[]> {
-    console.log(
-      `🤖 [Pinnacle] Extração via API arcadia (guest)${PINNACLE_PROXY ? ` [proxy Tailscale: ${PINNACLE_PROXY}]` : ''}...`
-    );
+    this.tunel = await resolverTunel();
+    const rotulo = seletorTuneis().configurado
+      ? this.tunel
+        ? ` [túnel ${this.tunel.url} → IP ${this.tunel.ip}]`
+        : ' [SEM TÚNEL — nenhum exit node residencial de pé, esperando 403]'
+      : '';
+    console.log(`🤖 [Pinnacle] Extração via API arcadia (guest)${rotulo}...`);
     const todas: ScrapedOdd[] = [];
     for (const esporte of esportes) {
       const sid = SPORT_ID[esporte];
@@ -228,18 +233,43 @@ export class PinnacleScraper implements OddsScraper {
         todas.push(...odds);
       } catch (err: any) {
         console.error(`   ⚠️ [Pinnacle] Falha em ${esporte}: ${err.message}`);
+        // Falha aqui costuma ser o túnel (exit node caiu no meio da varredura), não a
+        // Pinnacle: castiga o túnel, troca de exit node e refaz ESTE esporte uma vez.
+        if (await this.trocarTunel(err.message)) {
+          try {
+            const odds = await this.extrairEsporte(sid);
+            console.log(`   [Pinnacle] ${esporte}: ${odds.length} odds (após trocar de túnel)`);
+            todas.push(...odds);
+          } catch (err2: any) {
+            console.error(`   ⚠️ [Pinnacle] ${esporte} falhou também no túnel novo: ${err2.message}`);
+          }
+        }
       }
     }
     console.log(`✅ [Pinnacle] Total: ${todas.length} odds.`);
     return todas;
   }
 
+  /**
+   * Castiga o túnel atual e resolve outro. Devolve true só quando REALMENTE trocou de
+   * exit node — sem isso o retry repetiria a mesma falha pelo mesmo caminho.
+   */
+  private async trocarTunel(motivo: string): Promise<boolean> {
+    if (!this.tunel) return false;
+    const anterior = this.tunel.url;
+    marcarFalhaTunel(anterior, motivo);
+    this.tunel = await resolverTunel();
+    return !!this.tunel && this.tunel.url !== anterior;
+  }
 
   /**
    * Busca DIRIGIDA (revalidação pré-alerta): odds atuais de UM evento, 2-3 requests
    * (matchups do esporte + markets só do matchup casado). Reusa o parser de produção.
    */
   async oddsDoEvento(evento: string, esporte?: string): Promise<ScrapedOdd[]> {
+    // Gate pré-alerta: usa o túnel JÁ conhecido, sem probe — aqui um probe de 8s entraria
+    // direto na latência do alerta. Quem re-testa os exit nodes é a varredura.
+    this.tunel = await resolverTunel(false);
     const sids = esporte && SPORT_ID[esporte] ? [SPORT_ID[esporte]] : [...new Set(Object.values(SPORT_ID))];
     for (const sid of sids) {
       try {

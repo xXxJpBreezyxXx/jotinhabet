@@ -1,6 +1,7 @@
 import { ScraperBase, ScrapedOdd } from './scraper_base';
 import { chromium, Page, Browser } from 'playwright';
 import { areEventsSame } from '../arbitrage/matcher';
+import { resolverTunel } from '../utils/tunelResidencial';
 
 /**
  * Stake (stake.bet.br) — plataforma própria. As odds vêm de uma API REST JSON
@@ -16,16 +17,14 @@ import { areEventsSame } from '../arbitrage/matcher';
  *
  * TRANSPORTE: o CF da Stake é COMPORTAMENTAL — o IP datacenter da VPS carrega no começo
  * mas passa a tomar 403 ("Attention Required") após acessos repetidos. Então roteia pelo
- * tsproxy (residencial BR, PINNACLE_PROXY=http://jotinhabet_tsproxy:1055) quando disponível
- * — mesmo túnel da Pinnacle; FRÁGIL se o celular cair da tailnet. Sem o proxy, tenta direto
- * (funciona esporádico). Se o feed não carrega, oddsDoEvento LANÇA (infra → re-gate).
+ * túnel residencial (mesmos sidecars Tailscale da Pinnacle, com fallback entre celular e
+ * desktop — ver utils/tunelResidencial.ts). Sem túnel de pé, tenta direto (funciona
+ * esporádico). Se o feed não carrega, oddsDoEvento LANÇA (infra → re-gate).
  */
 const ROTAS_STAKE: Record<string, string> = {
   Futebol: 'sports/soccer',
 };
 const MARKET_1X2 = '1000316018';
-// Mesmo túnel Tailscale (celular exit node) usado pela Pinnacle — ver [[pinnacle-asn-bloqueio]].
-const STAKE_PROXY = process.env.TSPROXY_URL || process.env.PINNACLE_PROXY || '';
 
 export class StakeScraper extends ScraperBase {
   private urlBase = 'https://stake.bet.br/';
@@ -47,9 +46,11 @@ export class StakeScraper extends ScraperBase {
       headless,
       args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage'],
     };
-    // Roteia pelo tsproxy (residencial BR) quando configurado — o CF da Stake bloqueia o
-    // IP datacenter após acessos repetidos. Só resolve dentro do container (host da tailnet).
-    if (STAKE_PROXY) launchOpts.proxy = { server: STAKE_PROXY };
+    // Roteia pelo túnel residencial quando houver um de pé — o CF da Stake bloqueia o IP
+    // datacenter após acessos repetidos. O probe vale a pena aqui: subir um Chromium para
+    // depois tomar 403 é bem mais caro que 8s de verificação.
+    const tunel = await resolverTunel();
+    if (tunel) launchOpts.proxy = { server: tunel.url };
     // Prod (container) só tem o chromium bundled; tenta o channel e cai no bundled.
     try {
       this.browserEfemero = await chromium.launch({ ...launchOpts, channel: 'chrome' });

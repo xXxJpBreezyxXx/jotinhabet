@@ -16,6 +16,7 @@ import { RevalidationService } from './core/revalidationService';
 import { getValorAtivas, deleteValor, getMiddlesAtivos, deleteMiddle } from './core/valorRepo';
 import { getResumoCalibracao, getAlertasRecentes } from './core/calibracaoRepo';
 import { requireApiToken } from './auth/apiToken';
+import { seletorTuneis } from './utils/tunelResidencial';
 import { generateWithFallback, statusProvedores, cadeiaTexto } from './IA/aiProvider';
 import { rodarAgente, pediuEscritaExplicita } from './IA/agent/agentLoop';
 import { WhatsAppAgentBridge, tokenWebhookValido, chatsPermitidos } from './IA/agent/whatsappBridge';
@@ -135,6 +136,10 @@ app.get('/api/health', async (req, res) => {
     timestamp: new Date().toISOString(),
     services: {
       database: dbStatus,
+      // Túneis residenciais (exit nodes Tailscale) — quem está ativo e por que os outros
+      // não estão. Visão em CACHE de propósito: quem re-testa é a varredura, o health não
+      // pode pagar 8s de probe. Ver utils/tunelResidencial.ts.
+      tuneis: seletorTuneis().status(),
       ai: {
         gemini: process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY.includes('your-') ? 'configured' : 'mock-mode',
         openai: process.env.OPENAI_API_KEY && !process.env.OPENAI_API_KEY.includes('your-') ? 'configured' : 'mock-mode',

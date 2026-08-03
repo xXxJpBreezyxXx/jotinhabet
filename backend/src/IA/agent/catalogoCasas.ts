@@ -60,7 +60,7 @@ const META: Record<string, MetaCasa> = {
     nome: 'Pinnacle', plataforma: 'própria (API)', transporte: 'api',
     esportes: ['Futebol', 'Basquete', 'Tênis', 'E-sports (sportId 12)'],
     mercados: 'linha AFIADA — é a bússola de odd justa (devig) do Radar Cashout e das value bets',
-    limitacoes: 'bloqueio de ASN: sai por túnel Tailscale (PINNACLE_PROXY). Se o exit node cair, a fonte para.',
+    limitacoes: 'bloqueio de ASN: sai por túnel Tailscale com 2 exit nodes residenciais (celular e desktop) e fallback automático. Se OS DOIS caírem, a fonte para.',
     url: 'https://www.pinnacle.com',
   },
   aposta1: {
