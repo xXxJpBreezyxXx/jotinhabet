@@ -28,6 +28,16 @@ backend/tests/chrome-profile-*/
 # === Vídeos de mapeamento (pesados, não precisam no repo) ===
 docs/*.mp4
 
+# === Sujeira de recon/depuração (dumps de resposta de casa, nunca são código) ===
+# out_*.json costuma nem ser JSON: os quatro que estavam na raiz do backend eram páginas de
+# erro do nginx (307/403) salvas durante o recon de casa nova.
+out_*.json
+**/out_*.json
+int.html
+**/int.html
+blank.pdf
+**/blank.pdf
+
 # === SO / editor ===
 .DS_Store
 Thumbs.db
