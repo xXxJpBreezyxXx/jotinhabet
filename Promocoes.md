@@ -173,7 +173,7 @@ Acima de `D0` o lucro é travado; abaixo, o prejuízo é garantido. `D0` cai rá
 4. **Condição de placar** ("perdeu por 1 gol") **não** é este tipo — ver seção 9.
 
 ### Estado
-Rodando em produção desde 04/08/2026, com a **migration 021 aplicada no banco** (`promo_type = 'PROTECAO'`, `cashback_pct`, `cashback_teto`, `cashback_eh_bonus`, `valor_bonus_pct`) — o `cashback_so_se_perder` é da 022. O código ainda **não está commitado**. A **migration 022** (SRR + super odd + lucro extra — escrita, ainda a aplicar no banco) acrescenta campos de regulamento que valem **também para a proteção**: `teto_ganho` + `teto_incide_sobre` (`GANHO` limita o lucro, `RETORNO` limita o pagamento inteiro) e `teto_stake` (a conta roda na stake elegível). O bônus da proteção cai no cenário de **red**; nos tipos com boost (seções 7 e 8) ele cai no **green** — são ramos opostos e o core mantém os dois campos de caixa (`lucroEmCaixaSePromoGanha` / `lucroEmCaixaSeCoberturaGanha`) separados por isso.
+Rodando em produção desde 04/08/2026, com a **migration 021 aplicada no banco** (`promo_type = 'PROTECAO'`, `cashback_pct`, `cashback_teto`, `cashback_eh_bonus`, `valor_bonus_pct`) — o `cashback_so_se_perder` é da 022. A **migration 022** (SRR + super odd + lucro extra) também **já está aplicada** (verificado em 05/08/2026) e acrescenta campos de regulamento que valem **também para a proteção**: `teto_ganho` + `teto_incide_sobre` (`GANHO` limita o lucro, `RETORNO` limita o pagamento inteiro) e `teto_stake` (a conta roda na stake elegível). O bônus da proteção cai no cenário de **red**; nos tipos com boost (seções 7 e 8) ele cai no **green** — são ramos opostos e o core mantém os dois campos de caixa (`lucroEmCaixaSePromoGanha` / `lucroEmCaixaSeCoberturaGanha`) separados por isso.
 
 ---
 
@@ -342,21 +342,31 @@ Regra de corte da doutrina: pedágio acima de ~35% do valor do bônus pede outro
 |---|---|---|---|
 | 1. Qualificativa | `QUALIFYING` | ✅ produção | `core/promocoes.ts` |
 | 2. SNR | `FREEBET_SNR` | ✅ produção | idem |
-| 3. SRR (stake retorna) | `FREEBET_SRR` | ✅ implementado (migration 022) | `core/promocoes.ts` (`valorFichaPct`) + aba Promoções + skill; `R = S×(odd−1+v)`, e a fórmula antiga era só o caso v=1 |
+| 3. SRR (stake retorna) | `FREEBET_SRR` | ✅ produção (022 aplicada) | `core/promocoes.ts` (`valorFichaPct`) + aba Promoções + skill; `R = S×(odd−1+v)`, e a fórmula antiga era só o caso v=1 |
 | 4. Aposta Sem Risco (100%) | `PROTECAO` com `cashback_pct = 100` | ✅ produção | `refund_type=BONUS` → `cashback_eh_bonus`; `max_refund_limit` → `cashback_teto` |
 | 5. Bônus com rollover | — (campanha, não entrada) | ⏳ pendente | calculadora de valor líquido + progresso |
-| 6. Proteção parcial | `PROTECAO` | ✅ rodando em produção (021 aplicada no banco; código não commitado) | `core/promocoes.ts` + aba Promoções |
-| 7. Super odd | `SUPERODD` | ✅ implementado (migration 022) | `odd_padrao` + `teto_stake` + `extra_em_bonus`; odd efetiva (`oddEfetivaPromo`) → mesma conta do motor |
-| 8. Lucro extra | `LUCRO_EXTRA` | ✅ implementado (migration 022) | `boost_pct`, `boost_sobre_stake`, `teto_extra`; odd efetiva + piso do extra (`extraParaZerar`) |
+| 6. Proteção parcial | `PROTECAO` | ✅ produção (021 aplicada; código commitado em 05/08) | `core/promocoes.ts` + aba Promoções |
+| 7. Super odd | `SUPERODD` | ✅ produção (022 aplicada) | `odd_padrao` + `teto_stake` + `extra_em_bonus`; odd efetiva (`oddEfetivaPromo`) → mesma conta do motor |
+| 8. Lucro extra | `LUCRO_EXTRA` | ✅ produção (022 aplicada) | `boost_pct`, `boost_sobre_stake`, `teto_extra`; odd efetiva + piso do extra (`extraParaZerar`) |
 | 9. Seguro de múltipla | — (extensão da múltipla) | ⏳ pendente | `calcularMultiplaQualificadora` |
 | 10. Devolução por placar | `DEVOLUCAO_PLACAR` | ⏳ pendente | empate = DNB trava; resto é EV |
 | 11. Cashback do período | — (acompanhamento) | ⏳ pendente | por casa/janela |
 | 12. Cashout promocional | — | ⏳ pendente | Radar Cashout |
 | 13. Campanhas | — (agregação) | ⏳ pendente | id de campanha no histórico |
 
-Prioridade sugerida: ~~3 (SRR)~~ → ~~7/8 (odd efetiva)~~ **FEITOS na migration 022** → **9 (seguro de múltipla)** → **5 (rollover)** → resto.
+Prioridade sugerida: ~~3 (SRR)~~ → ~~7/8 (odd efetiva)~~ **FEITOS: 022 aplicada e em produção (05/08)** → **9 (seguro de múltipla)** → **5 (rollover)** → resto.
 
-"Implementado" aqui = core + endpoint + frontend + skills + migration escritos e com teste. Estado exato em 04/08/2026: a **021 foi aplicada no banco de produção** (psql no container `afiliadodb_supabase_db` + `GRANT` + reinício do PostgREST) e a imagem com o código da proteção **está rodando** na VPS — mas **nada disso está commitado no git ainda**, então um clone novo ou um rebuild a partir do repositório remoto não tem a proteção. A **022 depende de aplicar a migration + deploy**. Até lá o app degrada sem quebrar: o `POST /api/promocoes` traduz erro de coluna/CHECK ausente em instrução do que falta aplicar.
+"Implementado" aqui = core + endpoint + frontend + skills + migration escritos e com teste.
+
+**Estado exato em 05/08/2026 — fechado nas três pontas** (era o buraco: até 04/08 o código rodava na VPS sem estar no git, e um clone do remoto não tinha a proteção):
+
+1. **Banco**: 021 e 022 **aplicadas** no Postgres de produção. Conferido coluna por coluna: as 15 da 022 existem (`valor_ficha_pct`, `odd_padrao`, `teto_stake`, `boost_pct`, `boost_sobre_stake`, `teto_extra`, `extra_em_bonus`, `valor_extra_pct`, `teto_ganho`, `teto_incide_sobre`, `cashback_so_se_perder`, `extra_nominal`, `extra_efetivo`, `odd_efetiva_promo`, `stake_elegivel`), os dois CHECK são os da 022 e o `GRANT` cobre `anon`/`authenticated`/`service_role`/`postgres`.
+2. **PostgREST**: cache atualizado — `select` das 15 colunas pelo REST devolve 200. É o ponto de falha que engana: coluna existe no Postgres e falta no cache do PostgREST → o INSERT morre com "column not found in schema cache". `NOTIFY pgrst` não basta; o que resolve é reiniciar o serviço (`docker service update --force afiliadodb_supabase_rest`).
+3. **Git + imagem**: commitado (`b8b1729`) e deployado em 05/08 (backend e frontend rebuildados e rolados com `service update --force`).
+
+Escrita validada em transação revertida: os três tipos da 022 gravaram com os campos novos preenchidos, e os CHECK rejeitaram `promo_type` inexistente e `teto_incide_sobre` fora de `GANHO`/`RETORNO`.
+
+Se um ambiente novo ficar sem alguma migration, o app degrada sem quebrar: o `POST /api/promocoes` traduz erro de coluna/CHECK ausente em instrução do que falta aplicar.
 
 O que a migration 022 entregou (os 6 tipos do `CHECK` de `promo_type` = `PROMO_TYPES_BANCO` do core): `valor_ficha_pct` (SRR), `odd_padrao` (super odd), `boost_pct` + `boost_sobre_stake` + `teto_extra` + `extra_em_bonus` + `valor_extra_pct` (lucro extra), `teto_stake`, `teto_ganho` + `teto_incide_sobre` (qualquer tipo) e os derivados gravados do core (`extra_nominal`, `extra_efetivo`, `odd_efetiva_promo`) — para o histórico não reimplementar o boost. O `POST /api/promocoes` mantém coluna nova **fora do INSERT** quando o tipo não a usa, então um banco sem a 022 continua gravando SNR/qualificativa/proteção.
 
