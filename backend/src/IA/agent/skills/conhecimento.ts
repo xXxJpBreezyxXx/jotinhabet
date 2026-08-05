@@ -23,10 +23,13 @@ export const skillBuscarConhecimento: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      consulta: { type: 'string', description: 'Termos da busca (ex.: "retenção freebet odd alta", "cobertura sequencial múltipla").' },
-      limite: { type: 'number', description: 'Quantos trechos retornar (default 3, teto 8).' },
-      id: { type: 'string', description: 'Pega um trecho específico por id (ex.: "cobertura-sequencial", "conversa-14").' },
-      listar: { type: 'boolean', description: 'true = devolve só o índice (ids + títulos) de tudo que existe na base.' },
+      consulta: { type: 'string', description: 'Ex.: "retenção freebet odd alta".' },
+      // Anunciava "default 3, teto 8" e o código faz Math.min(4, x || 2): o modelo pedia 8
+      // trechos, recebia 4 e a diferença ficava sem explicação (o teto é baixo por causa da
+      // cota — cada trecho volta no histórico de toda rodada seguinte).
+      limite: { type: 'number', description: 'default 2, teto 4' },
+      id: { type: 'string', description: 'Ex.: "cobertura-sequencial".' },
+      listar: { type: 'boolean', description: 'true = só o índice (ids + títulos).' },
     },
     additionalProperties: false,
   },

@@ -47,21 +47,54 @@ agente mais produz (comparador de odds, cobertura de promoção). A bolha virou 
 | radar | `radar_cashout` | dropping odds recentes |
 | banca | `banca_e_saldos` | banca ativa + saldo por casa |
 | banca | `historico_entradas` | operações lançadas, com período/esporte/casa e agregados |
-| banca | `historico_promocoes` | freebets/qualificativas registradas + retenção média |
+| banca | `historico_promocoes` | promoções registradas nos 6 tipos + lucro, ROI e retenção média das freebets |
 | regras | `checar_regras_do_par` | Diretrizes: mercado proibido, grupos de W.O., regra da KTO |
 | regras | `regras_de_anulacao_da_casa` | política de void por casa/esporte |
 | cálculo | `calcular_surebet` | distribuição de stake, lucro e ROI garantido |
-| cálculo | `calcular_cobertura_promocao` | freebet SNR / qualificativa / cashback |
-| cálculo | `otimizar_odd_freebet` | curva de retenção e odd ótima √(1+1/m) |
+| cálculo | `calcular_cobertura_promocao` | cobertura nos **6 tipos** de promoção (ver abaixo): aporte, os 2 cenários, garantido, ROI, retenção, odd efetiva e piso do boost |
+| cálculo | `otimizar_odd_freebet` | curva de retenção e odd ótima √(1+1/m) — na SRR o ótimo é a MENOR odd (sem pico) |
 | cálculo | `calcular_multipla_qualificadora` | regulamento + cobertura sequencial de uma múltipla JÁ escolhida |
 | cálculo | `montar_multipla_promocao` ⏳ | MONTA a múltipla: escolhe pernas com odd real, acha a cobertura em outra casa e calcula a sequencial |
 | conhecimento | `buscar_conhecimento` | doutrina + conversa do Gemini (blank.pdf) |
 | ação | `criar_oportunidade_no_radar` ✍️ | registra surebet (via SignalPipeline: gates + dedup + revalidação) |
-| ação | `registrar_promocao` ✍️ | grava no histórico de promoções |
+| ação | `registrar_promocao` ✍️ | grava no histórico de promoções (os 6 tipos, incl. SRR / super odd / lucro extra) |
 | ação | `avisar_no_whatsapp` ✍️ | uma mensagem no grupo de alertas (desligada por padrão) |
 
 ⏳ = consulta lenta (rede/scraper). ✍️ = escrita; só roda se a mensagem do usuário pedir
 explicitamente (gate no `agentLoop`, além da instrução no prompt).
+
+### Os 6 tipos de promoção (o que `calcular_cobertura_promocao` e `registrar_promocao` cobrem)
+
+A matemática dos seis vive em `core/promocoes.ts` (fonte única). Cada tipo é uma definição
+diferente de **retorno bruto (R)** e de **custo real**; o resto da conta é comum.
+`S` = stake **elegível** (`min(valor, teto_stake)`), `v` = quanto vale R$ 1 de bônus/ficha
+devolvida (default 70%), `b` = percentual do boost.
+
+| tipo (core) | `promo_type` (banco) | como o usuário fala | R (retorno bruto) | custo real |
+|---|---|---|---|---|
+| `FREEBET_SNR` | `FREEBET_SNR` | "aposta grátis", "aposta extra", "prêmio", "bônus de R$ X" | `S×(odd−1)` | R$ 0 |
+| `FREEBET_SRR` | `FREEBET_SRR` | "devolve a ficha", "com retorno do stake" | `S×(odd−1+v)` | R$ 0 |
+| `QUALIFICATIVA` | **`QUALIFYING`** | "aposta qualificadora", "com meu dinheiro" | `S×odd` | `S` |
+| `PROTECAO` | `PROTECAO` | "50% da aposta perdida de volta", "seguro", "cashback se perder" | `S×odd` + devolução **no red** | `S` |
+| `SUPERODD` | `SUPERODD` | "super odd", "odd turbinada/aumentada" | `S×odd` (em caixa a odd JÁ contém o excedente) ou `S×odd_padrao + v×S×(odd−odd_padrao)` (em bônus) | `S` |
+| `LUCRO_EXTRA` | `LUCRO_EXTRA` | "lucro extra", "+30% de lucro", "ganhos turbinados" | `S×odd + v×min(b×S×(odd−1), teto_extra)` | `S` |
+
+Três coisas que valem para quem mexer nisso:
+
+- **`QUALIFICATIVA` ↔ `QUALIFYING`** é a única divergência entre core e banco (herança). Use
+  `tipoDoPromoType()` / `promoTypeDoTipo()` do core — os tradutores espalhados já fizeram
+  filtro de histórico devolver zero em silêncio.
+- **Escada de tipo exaustiva.** O `else` de qualquer escada de tipo significa hoje "freebet";
+  tipo novo esquecido num `else` não dá erro, ele se **disfarça de freebet** na tela e nos
+  números. `calcularPromocao` usa whitelist e avisa quando o tipo é desconhecido.
+- **Bônus cai em ramos opostos:** na proteção, no cenário de **red**; na SRR com ficha em
+  bônus e no boost pago em bônus, no cenário de **green**. Por isso o core devolve
+  `lucroEmCaixaSePromoGanha` e `lucroEmCaixaSeCoberturaGanha` separados — "lucro travado" e
+  "caixa de hoje" são números diferentes e os dois precisam aparecer na resposta.
+
+Detalhe matemático e armadilhas de cada tipo: `Promocoes.md` (seções 1–8) e a doutrina
+(`buscar_conhecimento` com `tipos-de-promocao`, `freebet-srr`, `superodd-lucro-extra`,
+`protecao-aposta-perdida`, `odd-ideal-freebet`).
 
 ## Varredura de jogos (lote de 31/07/2026)
 
@@ -188,10 +221,16 @@ para isso em `tests/unit/regras.test.ts`).
 
 As Diretrizes (mercado proibido, grupos de W.O. do tênis) existem para SUREBET: num
 mercado 3-vias ou num cruzamento A×B, o lucro garantido vira prejuízo garantido. Em
-operação de PROMOÇÃO — freebet SNR, aposta qualificativa, cashback, "aposte e ganhe",
-múltipla qualificadora — não há lucro garantido a proteger e o mercado é o que o
+operação de PROMOÇÃO — freebet SNR/SRR, aposta qualificativa, proteção/cashback, "aposte e
+ganhe", múltipla qualificadora — não há lucro garantido a proteger e o mercado é o que o
 regulamento da casa exige (1X2 no futebol é o caso comum). Aplicá-las ali só impedia
 operação legítima.
+
+Ressalva de doutrina para os tipos com **boost** (super odd e lucro extra): ali existe lucro
+travado de verdade (`1/odd_efetiva + 1/odd_cob < 1`), então o `risco_residual` que a skill
+devolve como aviso — void divergente, grupo de W.O. no tênis — pesa como numa surebet. O
+gate continua permitindo (bloqueio por mercado é regra de surebet), mas a resposta deve dizer
+que a perna coberta pode ser anulada e deixar a outra exposta.
 
 O que mudou:
 
@@ -359,6 +398,32 @@ saíram daí:
    `AI_PROVIDER_CHAIN_VISION=openai,gemini,groq` e `generateFromImage` lança erro explícito
    em vez de devolver texto inventado.
 
+### Teto do payload de ferramentas: 14.000 caracteres
+
+O array de tools (`ferramentasParaModelo()`) é reenviado **em toda rodada** do loop, junto
+com o system prompt — e o gargalo da Groq é TPM, não requisição. Daí o gate em
+`tests/unit/agente.test.ts` (a suíte falha se estourar):
+
+| invariante | valor | por quê |
+|---|---|---|
+| `JSON.stringify(tools).length` | **< 14.000** | ~3,5k tokens só de schema; com 6k–12k TPM por modelo, cada rodada acima disso encosta no 413/429 e força a escada de modelos |
+| `descricao` de cada skill | < 220 chars | é a linha que o modelo lê para escolher a skill; a versão LONGA vai só para a UI (`skillsParaUI()`) |
+| `description` de cada parâmetro | ≤ 90 chars no teste, mas o `registry` **trunca em 70** (`slice(0,67) + '...'`) na projeção para o modelo | um parâmetro exposto custa ~110 chars **por rodada**; passar de 70 chega cortado no modelo |
+
+Medido em 04/08/2026: **13.186 caracteres com 23 skills** — ~800 de folga, ou seja ~7
+parâmetros novos antes de estourar. Por isso a régua não é "cabe?", é "vale o custo em toda
+rodada?".
+
+Consequência prática ao adicionar campo em skill de promoção: **exponha o essencial e deixe
+o resto no default do core**. Em `calcular_cobertura_promocao`, `valor_bonus_pct`,
+`valor_extra_pct`, `valor_ficha_pct`, `teto_extra`, `teto_ganho`/`teto_incide_sobre` e
+`boost_sobre_stake` existem no core mas ficam **fora** do schema; um único flag
+`cashback_eh_bonus` cobre "o benefício vem em bônus" na devolução e no extra do boost, que é
+o mesmo fato do regulamento. O `tipo` é `enum` com os 6 valores em vez de lista em prosa:
+além de custar menos, a lista dos seis passa de 70 caracteres e chegaria **truncada** pelo
+corte do `registry` — o último tipo simplesmente desapareceria do schema. O `enum` ainda
+restringe a saída do provedor ao vocabulário do core.
+
 ## Travas que saíram da revisão adversarial (30/07)
 
 O subsistema passou por uma revisão em 4 lentes (loop, skills, matemática, rota/frontend)
@@ -393,29 +458,48 @@ tem teste em `tests/unit/{agente,promocoes}.test.ts`:
 
 ## Base de conhecimento
 
-- `IA/conhecimento/doutrinaPromocoes.ts` — 13 seções destiladas (freebet SNR, retenção,
-  qualificativa, cashback, "aposte e ganhe", múltipla, cobertura sequencial, escalonamento
-  1ºT/2ºT, adiar cobertura, abuso de bônus, surebet e seus riscos, condução da operação).
+- `IA/conhecimento/doutrinaPromocoes.ts` — 17 seções destiladas (os 6 tipos de promoção,
+  proteção/cashback de aposta perdida, cobertura e retenção da freebet SNR, **freebet SRR**,
+  **super odd + lucro extra**, qualificativa, cashback, "aposte e ganhe", múltipla, cobertura
+  sequencial, escalonamento 1ºT/2ºT, adiar cobertura, abuso de bônus, surebet e seus riscos,
+  condução da operação). `RESUMO_DOUTRINA_PROMOCOES` (~2,6k chars) vai no system prompt em
+  toda rodada; o detalhe fica por `buscar_conhecimento`, que é busca por palavra-chave.
 - `IA/conhecimento/corpusPromocoes.ts` — a conversa completa com o agente do Gemini
   (26 trocas, exportada de `blank.pdf`; versão legível em
   `docs/conhecimento/promocoes_freebets_gemini_2026-07-30.md`).
 - Busca por palavra-chave (sem embeddings) em `IA/conhecimento/index.ts` — não depende de
   crédito de IA, que é exatamente o que faltou em 29/07.
 
-Duas correções que fizemos sobre o material original, com teste em
+Três correções que fizemos sobre o material original, com teste em
 `tests/unit/promocoes.test.ts`:
 
-- **A retenção da freebet tem PICO.** `R(O) = (O−1)·(1 − m·(O−1))/O`, ótimo em
+- **A retenção da freebet SNR tem PICO.** `R(O) = (O−1)·(1 − m·(O−1))/O`, ótimo em
   `O* = √(1 + 1/m)`. Com m≈6% o ótimo é ~4,2 — a odd 7.75 do caso real rendeu ~38% de
   retenção (R$ 3,82 de R$ 10), não os "75% a 85%" projetados.
+- **Na SRR o ótimo é o INVERSO: a MENOR odd elegível.** Como a ficha volta, a retenção é
+  `1 − m·(O−1)` — reta decrescente, sem pico (`oddIdealFreebet(m, 1)` devolve `NaN` de
+  propósito e a curva marca `direcaoDoOtimo: 'menor-odd'`). Com m = 6%: odd 1,50 → 97%,
+  2,00 → 94%, 4,00 → 82%, e o aporte da cobertura ainda é proporcional a `(odd−1)`. Aplicar
+  a doutrina da SNR aqui é perder retenção de propósito; **calcular** uma pela outra
+  sub-hedgeia a operação em `O/(O−1)` (metade do aporte em odd 2,00).
 - **A cobertura sequencial tem caixa de pico.** `x_k = (S + Σx anteriores − perda aceita)/(h_k − 1)`
   cresce a cada green; o app agora avisa o total antes de começar.
 
 ## Matemática de promoções
 
-`core/promocoes.ts` é a fonte única (usada pela skill e pelo `POST /api/promocoes`, que
-antes tinha a fórmula duplicada): `calcularPromocao`, `calcularMultiplaQualificadora`,
-`curvaRetencaoFreebet`, `margemImplicita`, `oddIdealFreebet`, `retencaoTeorica`.
+`core/promocoes.ts` é a fonte única dos **6 tipos** (usada pela skill, pela aba Promoções e
+pelo `POST /api/promocoes`, que antes tinha a fórmula duplicada): `calcularPromocao`,
+`calcularMultiplaQualificadora`, `curvaRetencaoFreebet`, `margemImplicita`,
+`oddIdealFreebet`, `retencaoTeorica`, mais os helpers que evitam reimplementação —
+`TIPOS_PROMOCAO`/`PROMO_TYPES_BANCO`, `tipoDoPromoType`/`promoTypeDoTipo` (tradutores
+únicos), `tipoPromocaoDeTexto` (vocabulário livre → tipo), `ehFreebetSemCusto` (a regra de
+"investimento real": a ficha da freebet não sai do bolso) e `ehTipoComBoost`.
+
+Nos tipos com boost a resposta tem de trazer a **odd efetiva** (`oddEfetivaPromo`, já com
+boost e tetos) e o **piso do extra** (`extraParaZerar = S·(H/(H−1) − odd base)`): abaixo dele
+o boost não paga o par de odds. Com margem de 6% no mercado de cobertura e boost de 30% em
+dinheiro, o rendimento tem pico em odd ~2,02 (8,1% da stake) e em odd 5,00 já é prejuízo
+garantido (−5,8%) — o agente não deve sugerir "use o boost na odd mais alta".
 
 ## Como adicionar uma skill
 

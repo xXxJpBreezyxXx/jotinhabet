@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useRef, lazy, Suspense } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, CSSProperties } from 'react';
 import { 
   TrendingUp, 
   Cpu, 
@@ -28,7 +28,8 @@ import {
   Menu,
   Wrench,
   Image as ImageIcon,
-  ChevronDown
+  ChevronDown,
+  Info
 } from 'lucide-react';
 
 // Markdown das respostas do agente (aba IA & Automação) em CHUNK SEPARADO: as libs
@@ -459,6 +460,547 @@ function CashoutGapBadge({ gapPct }: { gapPct: number }) {
     </span>
   );
 }
+
+/**
+ * Espelho SÓ DE TIPO do SnapshotSincronia de backend/src/core/sureradarSync.ts (os campos que
+ * esta tela usa). Nada é calculado aqui: cadência, defasagem e previsões vêm do backend, que é
+ * quem mede. O painel só converte segundos em texto e desconta o desvio de relógio.
+ */
+interface SyncSnapshot {
+  geradoEm: string;
+  deles: {
+    ultimaAtualizacao: string | null;
+    idadeSeg: number | null;
+    cadenciaSeg: number | null;
+    cadenciaConfiavel: boolean;
+    cadenciaAmostras: number;
+    proximaAtualizacaoPrevista: string | null;
+    vidaRestanteSeg: number | null;
+    total: number | null;
+    conectado: boolean | null;
+  };
+  nosso: {
+    ultimaVarredura: string | null;
+    duracaoUltimaSeg: number | null;
+    intervaloSeg: number | null;
+    proximaVarredura: string | null;
+    segundosParaProxima: number | null;
+    ajusteFaseSeg: number | null;
+    alinhamentoAtivo: boolean;
+    importadasUltima: number | null;
+    fonteUltima: 'api' | 'browser' | 'none' | null;
+  };
+  sincronia: {
+    estado: 'sincronizado' | 'desalinhado' | 'desatualizado' | 'sem-dados';
+    alvoSeg: number;
+    defasagemUltimaSeg: number | null;
+    defasagemMedianaSeg: number | null;
+    atualizacoesPerdidas: number;
+    atualizacoesPendentes: number;
+    ciclosObservados: number;
+    atualizacoesObservadas: number;
+    recomendacao: string | null;
+  };
+  dados: {
+    /** Idade da linha mais nova: a idade REAL das odds (o carimbo do painel deles é outro). */
+    legIdadeMinSeg: number | null;
+    legIdadeMedianaSeg: number | null;
+    legIdadeMaxSeg: number | null;
+    eventoMaisAntigo: string | null;
+  };
+  avisos: string[];
+}
+
+/** Segundos → "45s" / "4m20s" / "1h05m". null/negativo viram "—"/"0s". */
+function durSeg(seg: number | null | undefined): string {
+  if (seg == null || !Number.isFinite(seg)) return '—';
+  const s = Math.max(0, Math.round(seg));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+}
+
+/**
+ * Faixa de SINCRONIA com o SureRadar (topo do radar).
+ *
+ * O número que importa é "vida restante": o painel deles recalcula a cada ~10 min e, quando a
+ * nossa varredura cai pouco antes do recálculo, a surebet entra no banco com a vida quase toda
+ * gasta — some do site antes de alguém clicar. Aqui dá para ver a cadência DELES, a nossa, e a
+ * defasagem entre as duas (o backend é quem mede; ver core/sureradarSync.ts).
+ *
+ * `agoraServidorMs` é o "agora" do BACKEND (Date.now() do navegador menos o desvio medido no
+ * último poll): os instantes do snapshot estão na base de tempo do servidor, e comparar com o
+ * relógio do navegador faria um PC atrasado exibir contagem negativa com tudo em ordem.
+ */
+function SincroniaSureRadar({ sync, agoraServidorMs, onEscanear }: { sync: SyncSnapshot; agoraServidorMs: number; onEscanear: () => void }) {
+  const [aberto, setAberto] = useState(false);
+  const desde = (iso: string | null): number | null => (iso ? (agoraServidorMs - Date.parse(iso)) / 1000 : null);
+  const ate = (iso: string | null): number | null => (iso ? (Date.parse(iso) - agoraServidorMs) / 1000 : null);
+
+  const estado = sync.sincronia.estado;
+  const visual = {
+    sincronizado: { cor: '#10b981', rotulo: 'sincronizado', dica: `A varredura cai logo depois do recálculo do SureRadar (alvo: ${sync.sincronia.alvoSeg}s).` },
+    desalinhado: { cor: '#f59e0b', rotulo: 'fora de fase', dica: 'Capturamos tarde no ciclo deles: as surebets entram no banco com boa parte da vida já gasta.' },
+    desatualizado: { cor: '#ef4444', rotulo: 'dado vencido', dica: 'O SureRadar já recalculou depois da nossa última captura — o que está na tela pode não existir mais no site.' },
+    'sem-dados': { cor: 'var(--text-muted)', rotulo: 'medindo', dica: 'Ainda sem leitura do relógio do painel: a medição começa na próxima varredura.' },
+  }[estado];
+
+  // Vida restante recontada no cliente a partir da previsão (o poll é a cada 15s; sem isso o
+  // número ficaria congelado entre polls e pareceria travado).
+  const vidaRestante = ate(sync.deles.proximaAtualizacaoPrevista) ?? sync.deles.vidaRestanteSeg;
+  const idadeDeles = desde(sync.deles.ultimaAtualizacao) ?? sync.deles.idadeSeg;
+  const proximaNossa = ate(sync.nosso.proximaVarredura) ?? sync.nosso.segundosParaProxima;
+  const vidaCurta = vidaRestante != null && vidaRestante <= 60;
+
+  const celula = (rotulo: string, valor: string, dica: string, cor?: string) => (
+    <div className="sync-celula" title={dica}>
+      <span className="sync-rotulo">{rotulo}</span>
+      <strong style={cor ? { color: cor } : undefined}>{valor}</strong>
+    </div>
+  );
+
+  return (
+    <div className="glass-panel sync-faixa">
+      <div className="sync-linha">
+        <button className="sync-badge" style={{ borderColor: visual.cor, color: visual.cor }} onClick={() => setAberto((a) => !a)} title={visual.dica}>
+          🕒 Sincronia SureRadar · {visual.rotulo}
+          <ChevronDown size={11} style={{ transform: aberto ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
+        </button>
+
+        {celula(
+          'Vida restante do dado',
+          durSeg(vidaRestante),
+          'Tempo até o próximo recálculo do painel deles (previsto pela cadência medida). Chegando a zero, as odds da tela podem já ter mudado no site.',
+          vidaCurta ? '#ef4444' : undefined
+        )}
+        {celula('Painel deles atualizou', `há ${durSeg(idadeDeles)}`, 'Última vez que o SureRadar recalculou, pelo relógio do próprio painel (campo idade_seg da API deles).')}
+        {/* O carimbo do painel e o `updated_at` das linhas divergem (numa leitura de 05/08:
+            painel há 59s, linhas com 204s). A idade que vale para a ODD é a da linha. */}
+        {sync.dados.legIdadeMinSeg != null &&
+          celula(
+            'Odds mais novas',
+            `há ${durSeg(sync.dados.legIdadeMinSeg + (desde(sync.nosso.ultimaVarredura) ?? 0))}`,
+            'Idade da surebet mais fresca da última leitura (updated_at da própria linha) somada ao tempo desde a nossa varredura. ' +
+              'O painel deles pode se dizer atualizado agora com as linhas mais velhas que isso.'
+          )}
+        {celula(
+          'Cadência deles',
+          `~${durSeg(sync.deles.cadenciaSeg)}${sync.deles.cadenciaConfiavel ? '' : '?'}`,
+          `Medida por nós em ${sync.deles.cadenciaAmostras} intervalo(s) observado(s).` +
+            (sync.deles.cadenciaConfiavel ? '' : ' Ainda sem confiança: previsões e alinhamento automático seguem suspensos.')
+        )}
+        {celula(
+          'Nossa varredura',
+          `há ${durSeg(desde(sync.nosso.ultimaVarredura))} · próxima em ${durSeg(proximaNossa)}`,
+          `Intervalo de ${durSeg(sync.nosso.intervaloSeg)}` +
+            (sync.nosso.alinhamentoAtivo ? ' com alinhamento de fase ATIVO.' : ' (alinhamento de fase inativo).')
+        )}
+        {celula(
+          'Defasagem da captura',
+          `${durSeg(sync.sincronia.defasagemUltimaSeg)} após o recálculo`,
+          `Idade do dado quando a nossa varredura terminou. Alvo: ${sync.sincronia.alvoSeg}s. Mediana das últimas: ${durSeg(sync.sincronia.defasagemMedianaSeg)}.`
+        )}
+
+        {(estado === 'desatualizado' || vidaCurta) && (
+          <button
+            className="btn sync-acao"
+            onClick={onEscanear}
+            title="Recapturar agora, antes de operar: o dado que está na tela nasceu no ciclo anterior do SureRadar."
+          >
+            <RefreshCw size={11} /> Recapturar
+          </button>
+        )}
+      </div>
+
+      {aberto && (
+        <div className="sync-detalhe">
+          {sync.sincronia.recomendacao && <div className="sync-reco">{sync.sincronia.recomendacao}</div>}
+          <div className="sync-grade">
+            <span>Ciclos observados: <strong>{sync.sincronia.ciclosObservados}</strong> (desde o último restart do backend)</span>
+            <span>Atualizações deles vistas: <strong>{sync.sincronia.atualizacoesObservadas}</strong></span>
+            <span>Atualizações perdidas: <strong>{sync.sincronia.atualizacoesPerdidas}</strong></span>
+            <span>Recálculos pendentes de captura: <strong>{sync.sincronia.atualizacoesPendentes}</strong></span>
+            <span>Última leitura: <strong>{sync.nosso.fonteUltima || '—'}</strong>{sync.nosso.importadasUltima != null ? ` · ${sync.nosso.importadasUltima} surebets em ${durSeg(sync.nosso.duracaoUltimaSeg)}` : ''}</span>
+            <span>Ajuste de fase aplicado: <strong>{sync.nosso.ajusteFaseSeg != null ? `${sync.nosso.ajusteFaseSeg > 0 ? '+' : ''}${sync.nosso.ajusteFaseSeg}s` : '—'}</strong></span>
+            <span>Total no painel deles: <strong>{sync.deles.total ?? '—'}</strong></span>
+            {/* Painel recalculado ≠ odd recalculada: cada surebet tem o seu próprio updated_at. */}
+            <span>Idade das linhas na leitura: <strong>mais nova {durSeg(sync.dados.legIdadeMinSeg)} · mediana {durSeg(sync.dados.legIdadeMedianaSeg)} · máx {durSeg(sync.dados.legIdadeMaxSeg)}</strong>{sync.dados.eventoMaisAntigo ? ` (mais velha: ${sync.dados.eventoMaisAntigo})` : ''}</span>
+          </div>
+          {sync.avisos.map((a, i) => (
+            <div key={i} className="sync-aviso">⚠️ {a}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Vocabulário do BANCO (coluna promo_type), idêntico ao do core exceto QUALIFYING (no core é
+ * QUALIFICATIVA, herança de antes do core existir). O frontend não traduz nada: a mesma
+ * string vai no POST e volta no histórico — tradutor a mais nesta borda já fez filtro
+ * devolver zero em silêncio.
+ *
+ * Vive no escopo do módulo (e não dentro de App) porque PROMO_GUIA é tipado por ele.
+ */
+type PromoTipo = 'FREEBET_SNR' | 'FREEBET_SRR' | 'QUALIFYING' | 'PROTECAO' | 'SUPERODD' | 'LUCRO_EXTRA';
+
+/** Uma linha do exemplo numérico do guia: rótulo à esquerda, número/afirmação à direita. */
+interface GuiaLinha {
+  rotulo: string;
+  valor: string;
+  /** Destaca o resultado da operação (lucro travado / custo). */
+  forte?: boolean;
+}
+interface PromoGuia {
+  /** Nome completo, com o termo em inglês que aparece no regulamento. */
+  titulo: string;
+  /** Como a CASA anuncia — é por aqui que se identifica a modalidade sem errar. */
+  anuncio: string[];
+  /** O que é, em 2–3 frases. */
+  oQueE: string;
+  /** Fórmula em texto simples (bloco monoespaçado). Mesma da doutrina/core. */
+  formula: string[];
+  /** Exemplo numérico: setup, linhas da conta e o veredito. */
+  exemplo: { titulo: string; linhas: GuiaLinha[]; leitura: string };
+  /** Um segundo exemplo (teto, bônus, odd errada) — opcional. */
+  exemplo2?: { titulo: string; linhas: GuiaLinha[]; leitura: string };
+  /** A armadilha do tipo: o erro que dá número plausível e errado. */
+  armadilhas: string[];
+  /** Contra o que ESTE tipo é confundido, e como diferenciar na hora. */
+  naoConfundaCom: string;
+}
+
+/**
+ * Guia das modalidades — conteúdo do modal "i" da aba Promoções.
+ *
+ * TODO número daqui saiu de `calcularPromocao()` (backend/src/core/promocoes.ts) rodado nas
+ * entradas descritas em cada exemplo, e não de conta feita à mão neste arquivo: guia que
+ * discorda do preview da própria tela ensina a modalidade errada. Coberturas "de mercado"
+ * usam a convenção da doutrina — cob = O/((O−1)·(1+m)) com margem m = 6% —, então dá para
+ * comparar as odds de um mesmo tipo entre si.
+ *
+ * É um Record<PromoTipo, …> de propósito: tipo novo sem verbete aqui NÃO COMPILA.
+ */
+const PROMO_GUIA: Record<PromoTipo, PromoGuia> = {
+  QUALIFYING: {
+    titulo: 'Aposta qualificativa (qualifying bet)',
+    anuncio: [
+      '"Aposte R$ 50 e ganhe R$ 50 em freebet"',
+      '"Deposite e aposte X para liberar seu bônus"',
+      'Regulamento fala em aposta ELEGÍVEL/qualificadora, com odd mínima',
+    ],
+    oQueE:
+      'Dinheiro real nas duas pernas. Não é para lucrar: é o pedágio para destravar o bônus. ' +
+      'O objetivo é fechar com o MENOR custo garantido possível — e o custo é o mesmo nos dois cenários.',
+    formula: [
+      'R (retorno bruto)   = S × odd_promo        (dinheiro real: a stake volta no green)',
+      'Cobertura           = R / odd_cob',
+      'Custo garantido     = cobertura × (odd_cob − 1) − S     (igual nos dois cenários)',
+      'Investimento real   = S + cobertura',
+    ],
+    exemplo: {
+      titulo: 'R$ 50 @ 2,00 · cobertura @ 1,95',
+      linhas: [
+        { rotulo: 'Retorno bruto da perna promo', valor: 'R$ 100,00  (50 × 2,00)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 51,28  (100 ÷ 1,95)' },
+        { rotulo: 'Se a promo ganha', valor: '−R$ 1,28' },
+        { rotulo: 'Se a cobertura ganha', valor: '−R$ 1,28' },
+        { rotulo: 'Custo garantido', valor: '−R$ 1,28  (2,6% da stake)', forte: true },
+      ],
+      leitura:
+        'Se esses R$ 50 destravam uma freebet de R$ 50 que rende ~47% (SNR @2,00), o pedágio come 5% do bônus: ' +
+        'operação ótima. Com um par pior (cobertura @1,8868) o mesmo qualificador custa R$ 3,00.',
+    },
+    armadilhas: [
+      'Pedágio acima de ~35% do valor extraível do bônus: pare e troque o par de casas/mercado — a doutrina é essa.',
+      'Odd mínima do regulamento manda no par: qualificar em odd 1,20 porque "é mais barato" costuma não ser elegível.',
+      'A freebet que a qualificativa libera é OUTRA operação (SNR ou SRR). Lançar as duas como uma só esconde o pedágio.',
+    ],
+    naoConfundaCom:
+      'Proteção: lá a casa devolve parte da aposta se ela PERDER, e é a devolução que paga o lucro. Se não há devolução ' +
+      'prometida, é qualificativa e o resultado é negativo por construção — prejuízo garantido não é bug da conta.',
+  },
+  FREEBET_SNR: {
+    titulo: 'Freebet SNR (stake not returned)',
+    anuncio: [
+      '"Aposta grátis de R$ 50"',
+      'Regulamento: "o valor da aposta grátis NÃO é devolvido / não integra o retorno"',
+      'No bilhete, o retorno exibido é menor que stake × odd',
+    ],
+    oQueE:
+      'A ficha é grátis e NÃO volta no green: a casa paga só o lucro, S × (odd − 1). Perder a ficha custa R$ 0, ' +
+      'então o dinheiro que sai do bolso é apenas a cobertura. O jogo aqui é converter a ficha em dinheiro real ' +
+      '(retenção = lucro travado ÷ valor da ficha).',
+    formula: [
+      'R (retorno bruto)   = S × (odd_promo − 1)        ← a ficha NÃO volta',
+      'Cobertura           = R / odd_cob',
+      'Lucro travado       = cobertura × (odd_cob − 1)   (igual nos dois cenários)',
+      'Retenção            = lucro travado / S           ← sempre < 100%',
+      'Odd ótima           ≈ √(1 + 1/margem)  →  ~4,00 com margem de 6%',
+    ],
+    exemplo: {
+      titulo: 'Freebet R$ 50 @ 2,00 · cobertura de mercado @ 1,8868',
+      linhas: [
+        { rotulo: 'Retorno bruto da ficha', valor: 'R$ 50,00  (50 × 1,00)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 26,50' },
+        { rotulo: 'Lucro travado', valor: '+R$ 23,50 nos dois cenários', forte: true },
+        { rotulo: 'Retenção da ficha', valor: '47%' },
+      ],
+      leitura: 'Investimento real R$ 26,50 (a ficha não sai do bolso) — ROI de 88,7% sobre o dinheiro aportado.',
+    },
+    exemplo2: {
+      titulo: 'A MESMA ficha em odd alta: R$ 50 @ 4,00 · cobertura @ 1,2579',
+      linhas: [
+        { rotulo: 'Retorno bruto da ficha', valor: 'R$ 150,00  (50 × 3,00)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 119,25' },
+        { rotulo: 'Lucro travado', valor: '+R$ 30,75', forte: true },
+        { rotulo: 'Retenção da ficha', valor: '61,5%' },
+      ],
+      leitura:
+        'Mesma ficha, +R$ 7,25 de lucro só por esticar a odd: na SNR a retenção tem PICO em odd alta. O preço é caixa — ' +
+        'a cobertura salta de R$ 26,50 para R$ 119,25.',
+    },
+    armadilhas: [
+      'Se a casa devolve a stake no green, NÃO é SNR: é SRR, e a conta da SNR aporta metade do necessário.',
+      'Odd alta exige caixa na casa de cobertura: sem saldo lá, a odd ótima é teórica.',
+      'Validade curta e odd mínima da ficha limitam o "estique a odd" — o regulamento manda mais que a fórmula.',
+    ],
+    naoConfundaCom:
+      'SRR. O teste é único: no green, o retorno é stake × odd (SRR) ou stake × (odd − 1) (SNR)? Confira no cupom ' +
+      'antes de apostar; é o mesmo botão "aposta grátis" nas duas.',
+  },
+  FREEBET_SRR: {
+    titulo: 'Freebet SRR (stake returned)',
+    anuncio: [
+      '"Aposta grátis com o valor devolvido" / "stake returned"',
+      '"Devolvemos o valor da aposta grátis junto com o lucro"',
+      'No bilhete, o retorno exibido é stake × odd (igual a uma aposta normal)',
+    ],
+    oQueE:
+      'A ficha é grátis E volta no green, junto do lucro. Isso muda o retorno bruto — e portanto TODA a cobertura: ' +
+      'ela fica quase o dobro da SNR. Se a ficha devolvida vier como bônus/nova freebet, ela não vale a face: ' +
+      'informe quanto vale (campo "valor da ficha").',
+    formula: [
+      'v = valor da ficha devolvida  (1 = dinheiro sacável · 0,7 = volta como bônus)',
+      'R (retorno bruto)   = S × (odd_promo − 1 + v)     ← com v=1: S × odd_promo',
+      'Cobertura           = R / odd_cob',
+      'Retenção            ≈ 1 − margem × (odd − 1)      ← só DESCE: sem pico',
+      'Odd ótima           = a MENOR odd elegível pelo regulamento',
+    ],
+    exemplo: {
+      titulo: 'Freebet R$ 50 @ 2,00 · cobertura @ 2,05 (caso base validado em produção)',
+      linhas: [
+        { rotulo: 'Retorno bruto da ficha', valor: 'R$ 100,00  (50 × 2,00 — a ficha volta)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 48,78' },
+        { rotulo: 'Lucro travado', valor: '+R$ 51,22 nos dois cenários', forte: true },
+        { rotulo: 'Retenção da ficha', valor: '102,4%  (passa de 100% porque a ficha volta)' },
+      ],
+      leitura:
+        'A mesma ficha calculada como SNR pediria R$ 24,39 de cobertura — metade. E o erro não aparece: os dois ' +
+        'cenários seguem positivos (+R$ 75,61 no green contra +R$ 25,61 no red), só que o resultado passa a ser decidido pelo jogo.',
+    },
+    exemplo2: {
+      titulo: 'Curva da odd (cobertura de mercado, m = 6%) e ficha em BÔNUS',
+      linhas: [
+        { rotulo: 'R$ 50 @ 1,50 (cob. 2,8302)', valor: 'aporte R$ 26,50 → +R$ 48,50 · retenção 97%', forte: true },
+        { rotulo: 'R$ 50 @ 4,00 (cob. 1,2579)', valor: 'aporte R$ 159,00 → +R$ 41,00 · retenção 82%' },
+        { rotulo: 'R$ 100 @ 2,00 com ficha em bônus (v=70%)', valor: 'aporte R$ 90,10 → lucro travado R$ 79,90' },
+        { rotulo: '↳ caixa do dia no green', valor: 'R$ 9,90 (R$ 70 voltaram como bônus)' },
+      ],
+      leitura:
+        'Odd curta rende MAIS e imobiliza MENOS caixa: é o oposto da SNR. Aplicar aqui o "estique a odd" da SNR ' +
+        'é perder retenção de propósito.',
+    },
+    armadilhas: [
+      'Usar a fórmula da SNR (odd ÷ (odd−1)) sub-hedgeia: em odd 2,00 aporta metade — e "lucro nos dois lados" esconde o erro.',
+      'Ficha devolvida em bônus não é caixa: o lucro travado continua, mas o dinheiro do dia é menor (o app separa os dois).',
+      'Teto de GANHO ≠ teto de RETORNO: numa SRR de R$ 100 @4,00, "ganhe até R$ 100" dá cobertura R$ 159 e lucro R$ 41; ' +
+      '"retorno máximo R$ 100" dá cobertura R$ 79,50 e lucro R$ 20,50. Ler um pelo outro fecha o green em −R$ 59.',
+    ],
+    naoConfundaCom:
+      'SNR (o retorno do bilhete é o teste) e super odd (lá a ficha é dinheiro SEU e o que turbina é a odd, não a devolução).',
+  },
+  PROTECAO: {
+    titulo: 'Proteção / cashback de aposta perdida (parcial ou total)',
+    anuncio: [
+      '"Perdeu? Devolvemos 50% até R$ 50"',
+      '"Seguro da aposta" / "aposta sem risco" (sem risco = o caso 100%)',
+      '"Cashback da primeira aposta" — confira se cai em dinheiro ou em bônus',
+    ],
+    oQueE:
+      'Dinheiro real nas duas pernas + devolução SE A PERNA DA PROMOÇÃO PERDER. É o único tipo em que a promoção paga ' +
+      'justamente no cenário de red: a cobertura recupera o principal e a devolução sobra como lucro.',
+    formula: [
+      'Devolução (face)     = min( S × %, teto )',
+      'Devolução (efetiva)  = face × (bônus ? valor_do_bônus : 1)',
+      'Cobertura            = (S × odd_promo − devolução efetiva) / odd_cob',
+      'Se a promo ganha     = S × (odd_promo − 1) − cobertura',
+      'Se a promo perde     = cobertura × (odd_cob − 1) − S + devolução efetiva',
+      'Piso (D₀)            = S × ( odd_promo − odd_cob × (odd_promo − 1) )   ← abaixo dele é prejuízo garantido',
+    ],
+    exemplo: {
+      titulo: 'R$ 100 @ 2,00 · 50% de volta se perder · cobertura @ 2,05 (caso base de produção)',
+      linhas: [
+        { rotulo: 'Devolução prometida', valor: 'R$ 50,00 (efetiva: R$ 50,00 — cai em dinheiro)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 73,17  ((200 − 50) ÷ 2,05)' },
+        { rotulo: 'Se a promo ganha', valor: '+R$ 26,83' },
+        { rotulo: 'Se a promo perde', valor: '+R$ 26,83  (aqui entra a devolução)' },
+        { rotulo: 'Lucro travado', valor: '+R$ 26,83 · ROI 15,5% sobre R$ 173,17 na mesa', forte: true },
+      ],
+      leitura:
+        'O piso desse par é R$ 10 de devolução (D₀ = 100 × (2,00 − 2,05 × 1,00)); com 50% prometidos, a folga é enorme. ' +
+        'Cashback abaixo do piso = prejuízo travado, e o app avisa.',
+    },
+    exemplo2: {
+      titulo: 'O teto manda na stake: "50% até R$ 50" com R$ 200 apostados',
+      linhas: [
+        { rotulo: 'Devolução', valor: 'R$ 50,00 (o teto corta — NÃO são R$ 100)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 170,73' },
+        { rotulo: 'Lucro travado', valor: '+R$ 29,27 · ROI 7,9%', forte: true },
+        { rotulo: 'Stake que aproveita 50% cheios', valor: 'R$ 100,00  (teto ÷ %)' },
+      ],
+      leitura:
+        'Dobrar a stake rendeu +R$ 2,44 e cortou o ROI pela metade: cada real acima de teto ÷ % entra na mesa SEM proteção.',
+    },
+    armadilhas: [
+      'Devolução em BÔNUS não é dinheiro: equalizar pela face infla o cenário de red. Informe quanto o bônus vale (default 70%).',
+      'Devolução INCONDICIONAL (cai ganhando ou perdendo) não é proteção: não muda o aporte, só soma no lucro dos dois cenários.',
+      'Sem informar o %, isto é uma qualificativa — e o resultado é prejuízo garantido.',
+    ],
+    naoConfundaCom:
+      'Devolução condicionada a PLACAR ("perdeu por 1 gol", "0x0 devolve") — ali não existe cobertura universal e a conta ' +
+      'desta tela não se aplica. Exceção: "empate devolve" no futebol é literalmente um DNB, e a cobertura correta é DNB na outra casa.',
+  },
+  SUPERODD: {
+    titulo: 'Super odd / odd turbinada (enhanced odds)',
+    anuncio: [
+      '"Super odd: de 1,60 para 2,00 neste jogo"',
+      '"Odd turbinada / odds aumentadas", quase sempre com teto (ex.: até R$ 30)',
+      'Vem na vitrine do site ou no push, fora do feed padrão',
+    ],
+    oQueE:
+      'Dinheiro real, mas com a odd ACIMA do preço de mercado. O que paga a operação é o excedente sobre a odd normal — ' +
+      'e o regulamento quase sempre limita a stake. A conta roda na stake ELEGÍVEL, min(valor, teto).',
+    formula: [
+      'S = min(stake, teto_stake)          ← stake elegível: a conta é NELA',
+      'Excedente em DINHEIRO:  R = S × odd_promo        ← a odd turbinada já contém o excedente',
+      'Excedente em BÔNUS:     R = S × odd_padrao + v × min( S × (odd_promo − odd_padrao), teto_extra )',
+      'Cobertura           = R / odd_cob        ·        odd efetiva = R / S',
+      'Trava lucro se      odd_efetiva > odd_cob / (odd_cob − 1)',
+    ],
+    exemplo: {
+      titulo: 'R$ 30 @ 2,00 (odd padrão 1,60) · cobertura @ 2,50 — excedente em dinheiro',
+      linhas: [
+        { rotulo: 'Excedente sobre a odd normal', valor: 'R$ 12,00  (30 × 0,40)' },
+        { rotulo: 'Retorno bruto', valor: 'R$ 60,00  (30 × 2,00)' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 24,00' },
+        { rotulo: 'Lucro travado', valor: '+R$ 6,00 nos dois cenários · ROI 11,1%', forte: true },
+      ],
+      leitura:
+        'Com o excedente em dinheiro é surebet clássica: 1/2,00 + 1/2,50 = 0,90 < 1. O excedente de R$ 12 é MEDIDA do boost, ' +
+        'não uma parcela a somar — somá-lo por cima daria R$ 72 de retorno onde a casa paga R$ 60.',
+    },
+    exemplo2: {
+      titulo: 'Teto de stake e excedente em BÔNUS (70%)',
+      linhas: [
+        { rotulo: 'R$ 100 digitados, teto de R$ 30', valor: 'a conta é a de R$ 30: aporte R$ 24,00 → +R$ 6,00' },
+        { rotulo: 'Excedente em bônus: face R$ 12', valor: 'efetivo R$ 8,40 → R = R$ 56,40' },
+        { rotulo: '↳ aporte / lucro travado', valor: 'R$ 22,56 → +R$ 3,84', forte: true },
+        { rotulo: '↳ caixa do dia no green', valor: '−R$ 4,56 (o bônus só vira dinheiro depois de convertido)' },
+      ],
+      leitura:
+        'Escrever a fórmula com os R$ 100 (teto só no custo) infla o aporte ~3,3× e vira prejuízo travado nos dois cenários. ' +
+        'Aposte só o valor elegível: o excedente entraria na odd NORMAL, virando uma qualificativa com prejuízo colada na operação.',
+    },
+    armadilhas: [
+      'Sem a odd PADRÃO não há como medir o boost — e, se o excedente vem em bônus, a conta trata bônus como dinheiro.',
+      'O bônus aqui cai no GREEN (ramo oposto ao da proteção, onde a devolução cai no red).',
+      'Boost que não paga a margem é prejuízo: o excedente efetivo precisa passar de S × (odd_cob/(odd_cob−1) − odd_base).',
+      'Ordene por LUCRO EM REAIS, não por ROI: uma super odd de R$ 30 raramente paga o tempo de execução.',
+    ],
+    naoConfundaCom:
+      'Lucro extra: lá a odd é a normal e a casa paga +X% por cima do retorno. Aqui a própria odd já está turbinada. ' +
+      'Se a promoção mostra as duas odds (de/para), é super odd.',
+  },
+  LUCRO_EXTRA: {
+    titulo: 'Lucro extra / ganhos turbinados (profit boost)',
+    anuncio: [
+      '"Ganhe +30% de lucro extra nesta aposta"',
+      '"Ganhos turbinados" / "profit boost", com teto em reais',
+      'Token/opt-in aplicado ao bilhete ANTES de confirmar',
+    ],
+    oQueE:
+      'Dinheiro real na odd normal, e a casa paga um acréscimo POR CIMA do retorno. A leitura padrão do regulamento é ' +
+      '% sobre o LUCRO; há casa que aplica sobre o VALOR APOSTADO — são números diferentes, e coincidem só em odd 2,00.',
+    formula: [
+      'b = boost %          ·        v = valor do extra (1 = dinheiro · 0,7 = bônus)',
+      'base = S × (odd_promo − 1)     ← % sobre o LUCRO (padrão)     |     base = S ← % sobre a STAKE',
+      'extra (face)        = min( b × base, teto_extra )     ← o teto corta a FACE, antes de valorizar o bônus',
+      'R (retorno bruto)   = S × odd_promo + v × extra',
+      'Cobertura           = R / odd_cob        ·        odd efetiva = R / S',
+      'Condição necessária: b × v > margem  ·  ótimo perto de odd 2,00',
+    ],
+    exemplo: {
+      titulo: 'R$ 100 @ 2,00 · cobertura @ 1,90 · boost de 30% sobre o lucro',
+      linhas: [
+        { rotulo: 'Extra', valor: 'R$ 30,00  (30% de R$ 100 de lucro)' },
+        { rotulo: 'Retorno bruto / odd efetiva', valor: 'R$ 230,00 · 2,30' },
+        { rotulo: 'Aporte na cobertura', valor: 'R$ 121,05' },
+        { rotulo: 'Lucro travado', valor: '+R$ 8,95 nos dois cenários · ROI 4,0%', forte: true },
+      ],
+      leitura: 'Depois da odd efetiva (2,30) é a mesma conta da super odd: trava lucro porque 1/2,30 + 1/1,90 < 1.',
+    },
+    exemplo2: {
+      titulo: '% do lucro ≠ % da stake, e odd alta mata o boost',
+      linhas: [
+        { rotulo: 'R$ 100 @ 3,00 (cob. 1,50) — sobre o LUCRO', valor: 'extra R$ 60,00 → +R$ 20,00', forte: true },
+        { rotulo: 'O mesmo, mas sobre a STAKE', valor: 'extra R$ 30,00 → +R$ 10,00' },
+        { rotulo: 'R$ 100 @ 5,00 (cob. de mercado 1,1792)', valor: '−R$ 5,78 TRAVADO: precisaria de boost de ~39,5%' },
+        { rotulo: 'Teto mordendo: R$ 500 @ 2,00, boost 30% até R$ 50', valor: '−R$ 2,63 (contra +R$ 8,95 dos mesmos R$ 100)' },
+      ],
+      leitura:
+        'Em odd 1,50 a relação inverte (R$ 15 sobre o lucro contra R$ 30 sobre a stake). E é o erro simétrico ao da SNR: ' +
+        'aqui esticar a odd DESTRÓI o boost — o ótimo fica perto de 2,00.',
+    },
+    armadilhas: [
+      'Extra em bônus valendo 0% é entrada válida (bônus que não converte) — aí a operação é uma qualificativa crua.',
+      'Com o teto do extra mordendo, aumentar a stake PIORA: o extra congela e só o pedágio da cobertura cresce.',
+      'Boost de 5% em mercado com 6% de margem não paga em NENHUMA odd (b × v > m é condição necessária).',
+    ],
+    naoConfundaCom:
+      'Super odd (lá a odd exibida já está turbinada) e SRR (lá a ficha é grátis). Se você apostou dinheiro seu na odd ' +
+      'normal e a casa promete um acréscimo, é lucro extra.',
+  },
+};
+
+/**
+ * Como escolher a modalidade — a árvore que evita o erro caro (usar a doutrina de um tipo
+ * em outro). Fica no topo do modal "i", antes dos verbetes.
+ */
+const PROMO_GUIA_ARVORE: Array<{ pergunta: string; sim: string; nao: string }> = [
+  {
+    pergunta: 'A ficha que você vai apostar é GRÁTIS (nenhum real sai do bolso)?',
+    sim: 'No green a casa devolve o valor da ficha junto do lucro? SIM → 🎟️ SRR · NÃO → 🎟️ SNR (confira o retorno do cupom)',
+    nao: 'É dinheiro real: siga para as perguntas de baixo.',
+  },
+  {
+    pergunta: 'A casa devolve parte/tudo da aposta se ela PERDER?',
+    sim: '🛡️ Proteção (100% de volta = "aposta sem risco"). Informe o %, o teto e se cai em dinheiro ou bônus.',
+    nao: 'Sem devolução no red: veja se algo turbina o retorno.',
+  },
+  {
+    pergunta: 'A odd exibida está ACIMA do mercado (a promoção mostra "de 1,60 por 2,00")?',
+    sim: '🚀 Super odd. Informe a odd padrão e o teto de stake — a conta roda na stake elegível.',
+    nao: 'A odd é a normal da casa.',
+  },
+  {
+    pergunta: 'A casa promete +X% POR CIMA do retorno/lucro?',
+    sim: '📈 Lucro extra. Confira se o % incide sobre o LUCRO (padrão) ou sobre o valor apostado, e o teto do extra.',
+    nao: '💵 Qualificativa: a aposta só serve para destravar o bônus, e o resultado é um CUSTO por construção.',
+  },
+];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'radar-cashout' | 'valor' | 'calibracao' | 'calculadora' | 'juros-compostos' | 'saldos' | 'ai-test'>('dashboard');
@@ -1034,16 +1576,212 @@ export default function App() {
   const [loadingOperation, setLoadingOperation] = useState(false);
 
   // Histórico de surebets de PROMOÇÃO (inserção manual — tabela promo_surebets).
-  // promoTipo define a matemática: FREEBET_SNR (ficha não retorna → custo da
-  // promoção R$ 0, investimento real = só a cobertura) ou QUALIFYING (dinheiro
-  // real nas duas pernas). Cobertura, lucro e ROI se calculam sozinhos a partir
-  // de valor+odd; digitar um valor próprio nos campos desliga a sugestão.
-  const PROMO_FORM_VAZIO = { promoTipo: 'FREEBET_SNR' as 'FREEBET_SNR' | 'QUALIFYING', casaPromocao: '', valorPromocao: '', oddPromocao: '', evento: '', mercado: '', casaCobertura: '', valorCobertura: '', oddCobertura: '', roiPct: '', lucro: '' };
+  //
+  // A MATEMÁTICA NÃO VIVE AQUI: cada tipo é uma fórmula diferente de retorno bruto e de
+  // custo real, e a fonte única é backend/src/core/promocoes.ts (testada). Esta tela só
+  // manda os campos para POST /api/promocoes/calcular e exibe o ResultadoPromocao que
+  // volta. Havia um "espelho" da conta neste arquivo e ele já divergia: na freebet SRR a
+  // cobertura saía certa por acidente e o lucro saía errado.
+  //
+  // `promoTipo` usa o vocabulário do BANCO (coluna promo_type) — o tipo `PromoTipo` vive no
+  // escopo do MÓDULO (acima), porque PROMO_GUIA (o modal "i") também é tipado por ele.
+  type PromoGrupo = 'freebet' | 'dinheiro' | 'turbinada';
+  interface PromoMeta {
+    /** Rótulo curto do chip (6 tipos têm de caber em ~480px de viewport). */
+    chip: string;
+    /** Rótulo do badge na tabela do histórico. */
+    badge: string;
+    cor: string;
+    grupo: PromoGrupo;
+    /** O campo de valor muda de nome por tipo (ficha grátis ≠ dinheiro apostado). */
+    rotuloValor: string;
+    /** Uma linha ao lado dos chips, explicando o tipo ativo. */
+    resumo: string;
+    /** title: a ARMADILHA do tipo — é o que evita usar a doutrina do tipo errado. */
+    dica: string;
+    /** true = a ficha da promoção não sai do bolso (espelha ehFreebetSemCusto do core). */
+    semCustoDaFicha: boolean;
+  }
+  // Metadados de exibição dos 6 tipos. É um Record<PromoTipo, …> de propósito: tipo novo
+  // sem entrada aqui NÃO COMPILA. Antes existia uma escada com `else`, e o `else` rotulava
+  // qualquer tipo como "freebet" — inclusive afirmando no tooltip que a ficha não retorna,
+  // mentira na SRR e na super odd.
+  const PROMO_META: Record<PromoTipo, PromoMeta> = {
+    FREEBET_SNR: {
+      chip: '🎟️ SNR',
+      badge: 'freebet SNR',
+      cor: 'var(--color-primary)',
+      grupo: 'freebet',
+      rotuloValor: 'Valor da Freebet (R$)',
+      resumo: 'A ficha NÃO volta no green (ganho = ficha × (odd − 1)); investimento real = só a cobertura.',
+      dica:
+        'Freebet SNR (stake not returned): no green a casa paga só o lucro, ficha × (odd − 1), e perder a ficha custa R$ 0 — ' +
+        'o investimento real é apenas a cobertura. Doutrina: aqui a retenção tem PICO em odd alta (≈ √(1 + 1/margem)).',
+      semCustoDaFicha: true,
+    },
+    FREEBET_SRR: {
+      chip: '🎟️ SRR',
+      badge: 'freebet SRR',
+      cor: '#a78bfa',
+      grupo: 'freebet',
+      rotuloValor: 'Valor da Freebet (R$)',
+      resumo: 'A ficha VOLTA no green (ganho = ficha × (odd − 1 + valor da ficha)); a cobertura é quase o dobro da SNR.',
+      dica:
+        'Freebet SRR (stake returned): no green a ficha volta junto do lucro, então o retorno é ficha × (odd − 1 + v) e a ' +
+        'cobertura fica quase o dobro da SNR. ARMADILHA: o ótimo é INVERTIDO — na SRR a retenção cai com a odd (≈ 1 − m·(odd−1)), ' +
+        'então busque a MENOR odd elegível; aplicar a doutrina da SNR ("estique a odd") aqui perde retenção de propósito. ' +
+        'Se a ficha volta em BÔNUS, informe quanto ela vale.',
+      semCustoDaFicha: true,
+    },
+    QUALIFYING: {
+      chip: '💵 Qualificativa',
+      badge: 'qualificativa',
+      cor: 'var(--color-accent)',
+      grupo: 'dinheiro',
+      rotuloValor: 'Valor Apostado (R$)',
+      resumo: 'Dinheiro real nas duas pernas; investimento = promoção + cobertura.',
+      dica:
+        'Aposta qualificativa: dinheiro real nas duas pernas (surebet clássica). Quase sempre fecha com CUSTO garantido — ' +
+        'ele é o pedágio para liberar o bônus, e a doutrina manda trocar o par de casas quando passa de ~35% do bônus.',
+      semCustoDaFicha: false,
+    },
+    PROTECAO: {
+      chip: '🛡️ Proteção',
+      badge: 'proteção',
+      cor: '#3b82f6',
+      grupo: 'dinheiro',
+      rotuloValor: 'Valor Apostado (R$)',
+      resumo: 'A casa devolve X% se a aposta PERDER: a cobertura recupera o principal e a devolução é o lucro.',
+      dica:
+        'Proteção / cashback de aposta perdida: dinheiro real nas duas pernas + devolução de X% se a perna da promoção PERDER. ' +
+        'ARMADILHA: a devolução cai no cenário do RED (ramo oposto ao do boost) e é ela que paga o lucro — sem o % informado ' +
+        'isso é uma qualificativa com prejuízo garantido. Devolução em bônus vale menos que a face.',
+      semCustoDaFicha: false,
+    },
+    SUPERODD: {
+      chip: '🚀 Super odd',
+      badge: 'super odd',
+      cor: '#f59e0b',
+      grupo: 'turbinada',
+      rotuloValor: 'Valor da Promoção (R$)',
+      resumo: 'Odd turbinada com dinheiro real; informe a odd PADRÃO do mercado para medir o boost e a margem.',
+      dica:
+        'Super odd / odd turbinada: dinheiro real, mas a odd está acima do mercado. Se o excedente é pago em DINHEIRO, a odd ' +
+        'turbinada já o contém (retorno = stake × odd). Se é pago em BÔNUS, a casa paga só a odd PADRÃO em caixa e credita a ' +
+        'diferença como bônus — aí a odd padrão é obrigatória, senão a conta trata bônus como dinheiro. Costuma ter teto de stake.',
+      semCustoDaFicha: false,
+    },
+    LUCRO_EXTRA: {
+      chip: '📈 Lucro extra',
+      badge: 'lucro extra',
+      cor: '#ec4899',
+      grupo: 'turbinada',
+      rotuloValor: 'Valor da Promoção (R$)',
+      resumo: 'Dinheiro real + X% de lucro extra por cima do retorno normal da odd.',
+      dica:
+        'Lucro extra / profit boost: dinheiro real e a casa paga +X% POR CIMA do retorno normal. ARMADILHAS: o % costuma incidir ' +
+        'sobre o LUCRO (em odd 2,00 vale metade do que incidir sobre o valor apostado); o teto corta a FACE do extra, e a partir ' +
+        'do teto aumentar a stake só aumenta o pedágio da cobertura (o ROI CAI). Sem o % informado é uma qualificativa crua.',
+      semCustoDaFicha: false,
+    },
+  };
+  const PROMO_GRUPO_TITULO: Record<PromoGrupo, string> = {
+    freebet: 'Freebet (ficha grátis)',
+    dinheiro: 'Dinheiro real',
+    turbinada: 'Turbinada',
+  };
+  // Chips de um grupo saem do próprio PROMO_META (não de uma lista paralela): tipo novo
+  // aparece na tela só declarando seu `grupo`, e não existe segunda lista para esquecer.
+  const promoTiposDoGrupo = (g: PromoGrupo): PromoTipo[] =>
+    (Object.keys(PROMO_META) as PromoTipo[]).filter((t) => PROMO_META[t].grupo === g);
+  // promo_type que esta tela não conhece (linha antiga, tipo novo do banco): badge de AVISO.
+  // Cair no rótulo "freebet" aqui era o bug — e ele mentia sobre o dinheiro investido.
+  const PROMO_META_DESCONHECIDO: PromoMeta = {
+    chip: '❓ desconhecido',
+    badge: '❓ tipo desconhecido',
+    cor: 'var(--color-warning)',
+    grupo: 'dinheiro',
+    rotuloValor: 'Valor da Promoção (R$)',
+    resumo: 'Tipo não reconhecido por esta tela.',
+    dica:
+      'Esta tela não reconhece o promo_type desta linha — a matemática dela pode não ser a que o rótulo sugere. ' +
+      'Confira o registro antes de confiar no lucro/ROI (a linha conta como DINHEIRO REAL no card "Investido", por prudência).',
+    semCustoDaFicha: false,
+  };
+  const metaPromo = (promoType: any): PromoMeta => {
+    const t = `${promoType ?? ''}`.toUpperCase();
+    // 'QUALIFICATIVA' é o nome do core e 'QUALIFYING' o do banco: normalizo só esse apelido
+    // para o badge/rótulo. Nenhuma outra conversão de tipo acontece nesta tela.
+    const chave = (t === 'QUALIFICATIVA' ? 'QUALIFYING' : t) as PromoTipo;
+    return PROMO_META[chave] ?? PROMO_META_DESCONHECIDO;
+  };
+  // A ficha da promoção sai do bolso? UMA função para toda a tela (card "Investido", rótulos).
+  // Espelha ehFreebetSemCusto() do core na MESMA polaridade (whitelist de freebet) — o
+  // frontend não pode importar o core (build separado), e a regra existia duplicada com
+  // polaridade oposta nas duas pontas. Tipo desconhecido conta como dinheiro real: errar por
+  // excesso de prudência é melhor que declarar que a operação foi de graça.
+  const promoSemCustoDaFicha = (promoType: any): boolean => metaPromo(promoType).semCustoDaFicha;
+
+  const PROMO_FORM_VAZIO = {
+    promoTipo: 'FREEBET_SNR' as PromoTipo,
+    casaPromocao: '', valorPromocao: '', oddPromocao: '', evento: '', mercado: '',
+    casaCobertura: '', valorCobertura: '', oddCobertura: '', roiPct: '', lucro: '',
+    // PROTEÇÃO — devolução da aposta perdida
+    cashbackPct: '', cashbackTeto: '', cashbackEhBonus: false, valorBonusPct: '70',
+    // FREEBET_SRR — 100 = a ficha volta em DINHEIRO; menos que isso, volta em bônus
+    valorFichaPct: '100',
+    // SUPERODD / LUCRO_EXTRA
+    oddPadrao: '', tetoStake: '', boostPct: '', boostSobreStake: false, tetoExtra: '',
+    extraEmBonus: false, valorExtraPct: '70',
+    // Regulamento (qualquer tipo)
+    tetoGanho: '', tetoIncideSobre: 'GANHO' as 'GANHO' | 'RETORNO',
+  };
   const [promoHistory, setPromoHistory] = useState<any[]>([]);
   const [promoForm, setPromoForm] = useState({ ...PROMO_FORM_VAZIO });
   const [promoRoiEditado, setPromoRoiEditado] = useState(false);
   const [promoLucroEditado, setPromoLucroEditado] = useState(false);
   const [promoSalvando, setPromoSalvando] = useState(false);
+  // Guia das modalidades (modal do "i"): null = fechado; senão, o verbete aberto.
+  const [promoGuiaTipo, setPromoGuiaTipo] = useState<PromoTipo | null>(null);
+
+  // Espelho SÓ DE TIPO do ResultadoPromocao de backend/src/core/promocoes.ts (os campos que
+  // esta tela exibe). Nenhuma conta acontece aqui: todo número abaixo vem do endpoint.
+  interface PromoCalculo {
+    tipo: string;
+    promoStake: number;
+    promoOddEfetiva: number;
+    coverOddEfetiva: number;
+    coverStake: number;
+    coverStakeEqualizado: number;
+    investimentoReal: number;
+    stakeElegivel: number;
+    retornoBrutoPromo: number;
+    oddEfetivaPromo: number;
+    extraNominal: number;
+    extraEfetivo: number;
+    extraEmBonus: boolean;
+    extraParaZerar: number | null;
+    bonusSePromoGanha: number;
+    bonusSePromoPerde: number;
+    cashbackNominal: number;
+    cashbackEfetivo: number;
+    cashbackEhBonus: boolean;
+    lucroSePromoGanha: number;
+    lucroSeCoberturaGanha: number;
+    lucroEmCaixaSePromoGanha: number;
+    lucroEmCaixaSeCoberturaGanha: number;
+    lucroGarantido: number;
+    roiPct: number | null;
+    retencaoPct: number | null;
+    equalizado: boolean;
+    avisos: string[];
+  }
+  const [promoCalculo, setPromoCalculo] = useState<PromoCalculo | null>(null);
+  const [promoCalcEstado, setPromoCalcEstado] = useState<'idle' | 'calculando' | 'ok' | 'erro'>('idle');
+  const [promoCalcErro, setPromoCalcErro] = useState('');
+  // Sequência dos pedidos: resposta lenta de um corpo ANTIGO não pode sobrescrever o
+  // cálculo do corpo atual (o usuário digita mais rápido que a rede responde).
+  const promoCalcSeqRef = useRef(0);
 
   // Fetch health status from backend on mount
   useEffect(() => {
@@ -1124,85 +1862,297 @@ export default function App() {
       });
   };
 
-  // Cálculo automático da promoção a partir de valor+odd das duas pernas, na
-  // fórmula do TIPO (refatoracao promocoes.md): freebet SNR não devolve a ficha
-  // (ganho = stake×(odd−1)) e a ficha perdida custa R$ 0 — investimento real é
-  // só a cobertura. Qualificativa é a surebet clássica com dinheiro real.
-  // Cobertura equalizada sugerida: o valor que iguala o lucro dos dois cenários
-  // — SNR: vp×(op−1)/oc (só o ganho da ficha precisa de hedge); qualificativa:
-  // vp×op/oc (retorno cheio dos dois lados). Vira placeholder do campo e vale
-  // quando ele fica em branco.
-  const promoCoberturaSugerida = (() => {
-    const vp = parseFloat(promoForm.valorPromocao);
-    const op = parseFloat(promoForm.oddPromocao);
-    const oc = parseFloat(promoForm.oddCobertura);
-    if (![vp, op, oc].every(Number.isFinite) || op <= 1 || oc <= 1) return '';
-    const vc = promoForm.promoTipo === 'FREEBET_SNR' ? (vp * (op - 1)) / oc : (vp * op) / oc;
-    return vc.toFixed(2);
+  // ── Sincronia com o SureRadar (faixa no topo do radar) ───────────────────────────────
+  // Estado null = faixa escondida (backend antigo sem o endpoint, ou offline): a tela nunca
+  // deve inventar "sincronizado" quando não sabe.
+  const [sync, setSync] = useState<SyncSnapshot | null>(null);
+  // Desvio entre o relógio do NAVEGADOR e o do backend, medido no último poll. Os instantes do
+  // snapshot são do servidor; sem descontar isso, um PC com relógio atrasado mostra "vida
+  // restante" negativa (e um adiantado, dado vencido) com a operação perfeitamente em ordem.
+  const syncSkewRef = useRef(0);
+  const [syncTick, setSyncTick] = useState(() => Date.now());
+  const fetchSync = () => {
+    fetch('/api/sureradar/sync')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d || !d.deles || !d.sincronia) return; // payload estranho: mantém o que havia
+        const gerado = Date.parse(d.geradoEm);
+        syncSkewRef.current = Number.isFinite(gerado) ? Date.now() - gerado : 0;
+        setSync(d as SyncSnapshot);
+      })
+      .catch(() => {
+        /* endpoint ausente/offline: a faixa simplesmente não aparece */
+      });
+  };
+  // Poll de 15s + tique de 5s só enquanto o radar está aberto: o countdown precisa andar entre
+  // polls, mas um tique de 1s re-renderizaria a árvore inteira do dashboard sem necessidade
+  // (a cadência medida é de minutos).
+  useEffect(() => {
+    if (activeTab !== 'dashboard' || dashboardSubTab !== 'radar') return;
+    fetchSync();
+    const poll = setInterval(fetchSync, 15000);
+    const tique = setInterval(() => setSyncTick(Date.now()), 5000);
+    return () => {
+      clearInterval(poll);
+      clearInterval(tique);
+    };
+  }, [activeTab, dashboardSubTab]);
+
+  // Campo de texto → número do corpo da API. Vazio é AUSENTE (o core aplica o default do
+  // regulamento), mas '0' é um valor VÁLIDO e tem de chegar como 0: "bônus que não vale
+  // nada" (valor_extra_pct: 0) virando null seria o core assumindo 70% em silêncio.
+  const numCampo = (bruto: string): number | null => {
+    const t = bruto.trim();
+    if (!t) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  };
+  const txtCampo = (bruto: string): string | null => (bruto.trim() ? bruto.trim() : null);
+
+  // Corpo canônico da promoção: o MESMO objeto vai para /api/promocoes/calcular (preview) e
+  // para /api/promocoes (registro, que ainda soma lucro/roi digitados à mão). Um builder só
+  // porque preview e gravado montados em dois lugares divergem no primeiro campo novo — e aí
+  // a tela mostra uma conta e o banco guarda outra.
+  //
+  // Só vão os campos do TIPO ATIVO (degradação): campo de tipo que não é este viraria coluna
+  // nova no INSERT e quebraria os tipos que já funcionam em banco sem a migration nova.
+  //
+  // Contrato de nomes (snake_case do corpo ↔ EntradaPromocao do core):
+  //   valor_ficha_pct↔valorFichaPct, odd_padrao↔oddPadrao, teto_stake↔tetoStake,
+  //   boost_pct↔boostPct, boost_sobre_stake↔boostSobreStake, teto_extra↔tetoExtra,
+  //   extra_em_bonus↔extraEmBonus, valor_extra_pct↔valorExtraPct,
+  //   teto_ganho↔tetoGanho, teto_incide_sobre↔tetoIncideSobre.
+  const corpoPromocao = () => {
+    const f = promoForm;
+    const ehSuperOdd = f.promoTipo === 'SUPERODD';
+    const ehLucroExtra = f.promoTipo === 'LUCRO_EXTRA';
+    const comBoost = ehSuperOdd || ehLucroExtra;
+    return {
+      promo_type: f.promoTipo,
+      casa_promocao: txtCampo(f.casaPromocao),
+      valor_promocao: numCampo(f.valorPromocao),
+      evento: txtCampo(f.evento),
+      mercado: txtCampo(f.mercado),
+      casa_cobertura: txtCampo(f.casaCobertura),
+      // Vazio → o backend deriva a cobertura EQUALIZADA (core). Não derivo aqui.
+      valor_cobertura: numCampo(f.valorCobertura),
+      odd_promocao: numCampo(f.oddPromocao),
+      odd_cobertura: numCampo(f.oddCobertura),
+      ...(f.promoTipo === 'PROTECAO'
+        ? {
+            cashback_pct: numCampo(f.cashbackPct),
+            cashback_teto: numCampo(f.cashbackTeto),
+            cashback_eh_bonus: f.cashbackEhBonus,
+            valor_bonus_pct: f.cashbackEhBonus ? numCampo(f.valorBonusPct) : null,
+          }
+        : {}),
+      ...(f.promoTipo === 'FREEBET_SRR' ? { valor_ficha_pct: numCampo(f.valorFichaPct) } : {}),
+      ...(ehSuperOdd ? { odd_padrao: numCampo(f.oddPadrao) } : {}),
+      ...(ehLucroExtra ? { boost_pct: numCampo(f.boostPct), boost_sobre_stake: f.boostSobreStake } : {}),
+      // teto_extra vale nos DOIS tipos com boost: ele corta a face do extra do lucro extra e
+      // também a do excedente da super odd paga em bônus.
+      ...(comBoost
+        ? {
+            teto_extra: numCampo(f.tetoExtra),
+            extra_em_bonus: f.extraEmBonus,
+            valor_extra_pct: f.extraEmBonus ? numCampo(f.valorExtraPct) : null,
+          }
+        : {}),
+      // Tetos do REGULAMENTO valem para qualquer tipo (existe "aposta protegida até R$ 50 de
+      // stake" e freebet com stake elegível limitada), e o core aplica stakeElegivel em todos.
+      // Só entram no corpo quando preenchidos — assim tipo antigo só passa a exigir a 022 se
+      // o usuário de fato usar o campo.
+      ...(numCampo(f.tetoStake) !== null ? { teto_stake: numCampo(f.tetoStake) } : {}),
+      ...(numCampo(f.tetoGanho) !== null
+        ? { teto_ganho: numCampo(f.tetoGanho), teto_incide_sobre: f.tetoIncideSobre }
+        : {}),
+    };
+  };
+
+  // Há dados suficientes para o servidor calcular? É a MESMA pré-condição do core (stake > 0,
+  // odds > 1, onde ele devolve null) — checar aqui evita um POST que só pode falhar. Não é
+  // fórmula: nenhum número de resultado sai daqui.
+  const promoTemDadosParaCalcular = (() => {
+    const s = Number(promoForm.valorPromocao);
+    const op = Number(promoForm.oddPromocao);
+    const oc = Number(promoForm.oddCobertura);
+    return Number.isFinite(s) && s > 0 && Number.isFinite(op) && op > 1 && Number.isFinite(oc) && oc > 1;
   })();
 
-  const promoCalc = (() => {
-    const vp = parseFloat(promoForm.valorPromocao);
-    const op = parseFloat(promoForm.oddPromocao);
-    const vc = parseFloat(promoForm.valorCobertura || promoCoberturaSugerida);
-    const oc = parseFloat(promoForm.oddCobertura);
-    if (![vp, op, vc, oc].every(Number.isFinite) || op <= 1 || oc <= 1) return null;
-    const ehFreebet = promoForm.promoTipo === 'FREEBET_SNR';
-    const investido = ehFreebet ? vc : vp + vc;
-    const seGanhaPromo = ehFreebet ? vp * (op - 1) - vc : vp * op - investido;
-    const seGanhaCobertura = ehFreebet ? vc * (oc - 1) : vc * oc - investido;
-    return { investido, seGanhaPromo, seGanhaCobertura, lucro: Math.min(seGanhaPromo, seGanhaCobertura) };
-  })();
+  // O corpo serializado É a chave do efeito: assim o que dispara o recálculo e o que é
+  // enviado NÃO PODEM divergir. Inclui campo que não muda a conta (evento/mercado) de
+  // propósito — um POST a mais custa nada, e esquecer um campo que MUDA a conta deixaria o
+  // preview velho na tela com cara de atual.
+  const promoCorpoChave = JSON.stringify(corpoPromocao());
 
-  // Lucro efetivo: o digitado (se o usuário editou) ou o garantido do cálculo.
-  const promoLucroEfetivo = (promoLucroEditado && promoForm.lucro.trim())
-    ? parseFloat(promoForm.lucro)
-    : (promoCalc ? promoCalc.lucro : (promoForm.lucro.trim() ? parseFloat(promoForm.lucro) : NaN));
+  // Só aceita payload com cara de ResultadoPromocao. Campo numérico ausente viraria
+  // `undefined.toFixed(...)` e derrubaria a aba inteira no primeiro render — pior ainda,
+  // um payload meio preenchido exibiria número parcial como se fosse o cálculo.
+  const pareceCalculoPromocao = (c: any): c is PromoCalculo =>
+    !!c &&
+    Array.isArray(c.avisos) &&
+    ['lucroSePromoGanha', 'lucroSeCoberturaGanha', 'lucroGarantido', 'coverStake', 'coverStakeEqualizado', 'stakeElegivel', 'promoStake', 'oddEfetivaPromo', 'extraNominal', 'extraEfetivo', 'cashbackNominal', 'cashbackEfetivo', 'bonusSePromoGanha', 'bonusSePromoPerde', 'lucroEmCaixaSePromoGanha', 'lucroEmCaixaSeCoberturaGanha'].every(
+      // `typeof === 'number'` e não Number(x): "12.30" passaria na coerção e quebraria no
+      // .toFixed() lá na tela.
+      (k) => typeof c[k] === 'number' && Number.isFinite(c[k])
+    );
 
-  // ROI sugerido: lucro efetivo / investimento real do tipo (freebet: só cobertura).
-  const promoRoiSugerido = (() => {
-    const promo = parseFloat(promoForm.valorPromocao);
-    const cob = parseFloat(promoForm.valorCobertura || promoCoberturaSugerida);
-    const investido = promoForm.promoTipo === 'FREEBET_SNR'
-      ? (Number.isFinite(cob) ? cob : 0)
-      : (Number.isFinite(promo) ? promo : 0) + (Number.isFinite(cob) ? cob : 0);
-    if (!Number.isFinite(promoLucroEfetivo) || investido <= 0) return '';
-    return ((promoLucroEfetivo / investido) * 100).toFixed(2);
-  })();
+  // Preview do cálculo: sempre do servidor (core/promocoes.ts é a fonte única da matemática).
+  // Debounce de 350ms porque cada tecla muda a chave; enquanto a resposta nova não chega, o
+  // último resultado FICA na tela (piscar o painel a cada dígito é pior que 350ms de atraso).
+  useEffect(() => {
+    if (!promoTemDadosParaCalcular) {
+      // Sem stake/odds válidas não existe cálculo — limpa em vez de deixar na tela o
+      // resultado de OUTROS valores. Invalida também o pedido em voo.
+      promoCalcSeqRef.current += 1;
+      setPromoCalculo(null);
+      setPromoCalcEstado('idle');
+      setPromoCalcErro('');
+      return;
+    }
+    const seq = ++promoCalcSeqRef.current;
+    setPromoCalcEstado('calculando');
+    const timer = setTimeout(() => {
+      fetch('/api/promocoes/calcular', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: promoCorpoChave,
+      })
+        .then((r) => r.json().then((d: any) => ({ ok: r.ok, d })).catch(() => ({ ok: false, d: null as any })))
+        .then(({ ok, d }) => {
+          if (seq !== promoCalcSeqRef.current) return; // resposta de um corpo já superado
+          if (ok && d?.ok && pareceCalculoPromocao(d.calculo)) {
+            setPromoCalculo(d.calculo);
+            setPromoCalcEstado('ok');
+            setPromoCalcErro('');
+            return;
+          }
+          // Falhou: o resultado que estava na tela é de OUTRO conjunto de campos, então sai.
+          // Lucro e ROI continuam editáveis à mão — inventar número aqui seria gravar ficção.
+          setPromoCalculo(null);
+          setPromoCalcEstado('erro');
+          setPromoCalcErro(
+            d?.error || (d?.ok ? 'resposta sem os campos do cálculo' : 'o servidor não devolveu o cálculo')
+          );
+        })
+        .catch(() => {
+          if (seq !== promoCalcSeqRef.current) return;
+          setPromoCalculo(null);
+          setPromoCalcEstado('erro');
+          setPromoCalcErro('sem resposta do backend');
+        });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [promoCorpoChave, promoTemDadosParaCalcular]);
+
+  // Formatação (só isto: R$ com sinal e a cor do sinal).
+  const promoReais = (v: number) => `${v >= 0 ? '+' : '−'}R$ ${Math.abs(v).toFixed(2)}`;
+  const promoCorValor = (v: number) => (v >= 0 ? 'var(--color-success)' : 'var(--color-danger)');
+  const promoMetaAtiva = PROMO_META[promoForm.promoTipo];
+  // Quais linhas do painel fazem sentido (decisão de EXIBIÇÃO, não de conta). A odd efetiva
+  // só informa algo quando o retorno foi mexido — nos tipos sem boost nem teto ela repete a
+  // odd digitada, e na SNR ela é odd−1, o que confunde mais do que ajuda.
+  const promoMostrarOddEfetiva = promoMetaAtiva.grupo === 'turbinada' || numCampo(promoForm.tetoGanho) !== null;
+  const promoAporteEmBranco = !promoForm.valorCobertura.trim();
+
+  // Aparência dos controles do formulário de promoção (nada de matemática daqui para baixo).
+  const promoChipStyle = (ativo: boolean): CSSProperties => ({
+    padding: '6px 10px',
+    borderRadius: '999px',
+    fontSize: '11px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    border: ativo ? '1px solid var(--color-primary)' : '1px solid var(--panel-border)',
+    background: ativo ? 'var(--color-primary)' : 'rgba(255,255,255,0.03)',
+    color: ativo ? '#fff' : 'var(--text-secondary)',
+    transition: 'all 0.15s ease',
+  });
+  const promoBlocoStyle = (cor: string): CSSProperties => ({
+    padding: '10px 12px',
+    marginBottom: '12px',
+    background: `rgba(${cor}, 0.06)`,
+    border: `1px solid rgba(${cor}, 0.25)`,
+    borderRadius: '8px',
+  });
+  const promoBlocoTituloStyle: CSSProperties = {
+    fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700,
+    textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '8px',
+  };
+  // Toggle de duas opções (dinheiro|bônus, ganho|retorno, lucro|valor apostado). O mesmo
+  // controle aparece 4 vezes no formulário: uma função só, e cada opção carrega no title a
+  // armadilha da escolha (as duas leituras do regulamento NÃO são a mesma fórmula).
+  const promoToggle = <T,>(valor: T, opcoes: Array<[T, string, string]>, aplicar: (v: T) => void) => (
+    <div style={{ display: 'flex', gap: '6px' }}>
+      {opcoes.map(([v, rotulo, dica]) => (
+        <button
+          key={rotulo}
+          onClick={() => aplicar(v)}
+          title={dica}
+          style={{
+            flex: 1, padding: '7px 8px', borderRadius: '8px', fontSize: '11px', fontWeight: 700, cursor: 'pointer',
+            border: valor === v ? '1px solid var(--color-primary)' : '1px solid var(--panel-border)',
+            background: valor === v ? 'var(--color-primary)' : 'rgba(255,255,255,0.03)',
+            color: valor === v ? '#fff' : 'var(--text-secondary)',
+          }}
+        >
+          {rotulo}
+        </button>
+      ))}
+    </div>
+  );
 
   const salvarPromocao = () => {
-    // Cobertura efetiva: a digitada ou, em branco, a equalizada sugerida.
-    const valorCoberturaEfetivo = promoForm.valorCobertura.trim() || promoCoberturaSugerida;
+    const lucroDigitado = !!(promoLucroEditado && promoForm.lucro.trim());
     const obrigatorios: Array<[string, string]> = [
       [promoForm.casaPromocao, 'Casa da promoção'], [promoForm.valorPromocao, 'Valor da promoção'],
       [promoForm.evento, 'Evento'], [promoForm.casaCobertura, 'Casa de cobertura'],
-      [valorCoberturaEfetivo, 'Valor de cobertura (ou odds das duas pernas p/ o cálculo automático)'],
     ];
     const faltando = obrigatorios.filter(([v]) => !String(v).trim()).map(([, nome]) => nome);
     if (faltando.length) {
       alert(`Preencha os campos obrigatórios: ${faltando.join(', ')}.`);
       return;
     }
-    const lucroDigitado = promoLucroEditado && promoForm.lucro.trim();
-    if (!lucroDigitado && !promoCalc) {
-      alert('Informe as odds das duas pernas (para o cálculo automático) OU digite o lucro manualmente.');
+    // Aporte em branco = o BACKEND deriva a cobertura equalizada (core), e para isso precisa
+    // das duas odds. Esta tela não deriva mais nada.
+    if (!promoForm.valorCobertura.trim() && !promoTemDadosParaCalcular) {
+      alert('Informe o valor de cobertura OU o valor/odds das duas pernas (valor > 0, odds > 1) para o backend derivar a cobertura equalizada.');
+      return;
+    }
+    if (!lucroDigitado && !promoCalculo) {
+      alert(
+        promoCalcEstado === 'erro'
+          ? `O cálculo automático não respondeu (${promoCalcErro}). Tente de novo ou digite o lucro à mão.`
+          : promoCalcEstado === 'calculando'
+            ? 'O cálculo automático ainda está rodando — aguarde um instante e salve de novo.'
+            : 'Informe valor e odds das duas pernas (para o cálculo automático) OU digite o lucro manualmente.'
+      );
+      return;
+    }
+    // Campo de que o LUCRO do tipo DEPENDE: sem ele, o que fica gravado é uma qualificativa
+    // com prejuízo garantido usando o rótulo do tipo escolhido. O core avisa; aqui a gravação
+    // para, porque depois de gravado o número já entrou na banca.
+    // Testo o VALOR (> 0), não só o preenchimento: "0" preenche o campo e continua sendo
+    // "promoção que não paga nada".
+    const exigencia =
+      promoForm.promoTipo === 'PROTECAO' && !(Number(promoForm.cashbackPct) > 0)
+        ? 'o percentual de devolução da proteção (ex.: 50) — é ele que paga o lucro dessa operação'
+        : promoForm.promoTipo === 'LUCRO_EXTRA' && !(Number(promoForm.boostPct) > 0)
+          ? 'o percentual do lucro extra (ex.: 30) — é ele que paga a operação nesse tipo'
+          : promoForm.promoTipo === 'SUPERODD' && promoForm.extraEmBonus && !(Number(promoForm.oddPadrao) > 1)
+            ? 'a odd PADRÃO do mercado (maior que 1) — com o excedente em bônus, sem ela a conta trata bônus como dinheiro sacável'
+            : null;
+    if (exigencia && !lucroDigitado) {
+      alert(`Informe ${exigencia}.`);
       return;
     }
     setPromoSalvando(true);
     fetch('/api/promocoes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      // MESMO corpo do preview + lucro/ROI digitados à mão (vazios, o backend deriva do core).
       body: JSON.stringify({
-        promo_type: promoForm.promoTipo,
-        casa_promocao: promoForm.casaPromocao,
-        valor_promocao: promoForm.valorPromocao,
-        evento: promoForm.evento,
-        mercado: promoForm.mercado || null,
-        casa_cobertura: promoForm.casaCobertura,
-        valor_cobertura: valorCoberturaEfetivo,
-        odd_promocao: promoForm.oddPromocao || null,
-        odd_cobertura: promoForm.oddCobertura || null,
-        // lucro/ROI digitados vão como estão; vazios, o backend deriva das odds
+        ...corpoPromocao(),
         lucro: lucroDigitado ? promoForm.lucro : null,
         roi_pct: (promoRoiEditado && promoForm.roiPct.trim()) ? promoForm.roiPct : null,
       }),
@@ -1216,7 +2166,22 @@ export default function App() {
           const lucroPromo = Number(data.promocao?.lucro) || 0;
           const novaBanca = (parseFloat(userBancaRef.current) + lucroPromo).toFixed(2);
           aplicarBanca(novaBanca, true); // ref + state + localStorage + banco
-          alert(`Promoção registrada! Lucro de R$ ${lucroPromo.toFixed(2)} aplicado à banca ativa (R$ ${novaBanca}).`);
+          // O lucro garantido do core INCLUI bônus valorizado (ficha da SRR que volta em
+          // bônus, extra do boost, devolução da proteção). Creditar isso na banca sem dizer
+          // qual parte ainda não é caixa faz o painel prometer dinheiro que só existe depois
+          // de converter o bônus — então a diferença vai explícita no aviso.
+          const bonusGanha = Number(promoCalculo?.bonusSePromoGanha) || 0;
+          const bonusPerde = Number(promoCalculo?.bonusSePromoPerde) || 0;
+          const bonusNaLinha = Math.max(bonusGanha, bonusPerde);
+          const avisosDoCore: string[] = Array.isArray(data.avisos) ? data.avisos : [];
+          alert(
+            `Promoção registrada! Lucro de R$ ${lucroPromo.toFixed(2)} aplicado à banca ativa (R$ ${novaBanca}).` +
+              (bonusNaLinha > 0
+                ? `\n\n⚠️ Desse total, R$ ${bonusNaLinha.toFixed(2)} é BÔNUS a converter — o caixa do dia no cenário com bônus é ` +
+                  `R$ ${(lucroPromo - bonusNaLinha).toFixed(2)}.`
+                : '') +
+              (avisosDoCore.length ? `\n\n${avisosDoCore.map((a) => `• ${a}`).join('\n')}` : '')
+          );
           setPromoForm({ ...PROMO_FORM_VAZIO });
           setPromoRoiEditado(false);
           setPromoLucroEditado(false);
@@ -1242,9 +2207,27 @@ export default function App() {
     fetch(`/api/promocoes/${p.id}`, { method: 'DELETE' }).catch(() => { /* já removi localmente */ });
   };
 
-  // Métricas dos cards do histórico de promoções. Investido = dinheiro REAL:
-  // linhas freebet contam só a cobertura (a ficha não é dinheiro do usuário).
-  const promoInvestido = promoHistory.reduce((s, p) => s + (p.promo_type === 'QUALIFYING' ? (Number(p.valor_promocao) || 0) : 0) + (Number(p.valor_cobertura) || 0), 0);
+  // Métricas dos cards do histórico. Investido = dinheiro REAL que saiu do bolso: a cobertura
+  // sempre conta e a perna da promoção conta em TODO tipo que não é freebet (qualificativa,
+  // proteção, super odd, lucro extra). Quem decide é promoSemCustoDaFicha — a whitelist de
+  // tipos "com dinheiro real" que existia aqui zerava a perna dos tipos novos, declarando de
+  // graça uma operação que custou o valor apostado.
+  // A stake que foi à MESA é a elegível, não a digitada: com "super odd até R$ 30" o usuário
+  // digita 100 e só 30 entram. O backend grava stake_elegivel (migration 022); para linhas
+  // antigas/sem a coluna, min(valor, teto) é a mesma regra do fallback do endpoint. Somar a
+  // digitada inflava o card em R$ 70 e o ROI implícito do total não fechava com o roi_pct
+  // gravado na própria linha.
+  const promoStakeNaMesa = (p: any): number => {
+    const elegivel = Number(p.stake_elegivel);
+    if (Number.isFinite(elegivel) && elegivel > 0) return elegivel;
+    const valor = Number(p.valor_promocao) || 0;
+    const teto = Number(p.teto_stake);
+    return Number.isFinite(teto) && teto > 0 ? Math.min(valor, teto) : valor;
+  };
+  const promoInvestido = promoHistory.reduce(
+    (s, p) => s + (promoSemCustoDaFicha(p.promo_type) ? 0 : promoStakeNaMesa(p)) + (Number(p.valor_cobertura) || 0),
+    0
+  );
   const promoLucroTotal = promoHistory.reduce((s, p) => s + (Number(p.lucro) || 0), 0);
   const promoRoisValidos = promoHistory.map((p) => Number(p.roi_pct)).filter((v) => Number.isFinite(v));
   const promoRoiMedio = promoRoisValidos.length ? promoRoisValidos.reduce((a, b) => a + b, 0) / promoRoisValidos.length : 0;
@@ -2598,6 +3581,17 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Sincronia com o SureRadar: eles recalculam a cada ~10 min e a nossa varredura
+                    roda a cada 5. Esta faixa mostra quanto de vida resta ao que está na tela e
+                    se as duas varreduras estão em fase (medição em core/sureradarSync.ts). */}
+                {sync && (
+                  <SincroniaSureRadar
+                    sync={sync}
+                    agoraServidorMs={syncTick - syncSkewRef.current}
+                    onEscanear={() => handleRunScan(false)}
+                  />
+                )}
+
                 {/* Filtro rápido por esporte (chips) na barra de filtros */}
                 {availableSports.length > 0 && (
                   <div className="glass-panel" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -3236,56 +4230,225 @@ export default function App() {
 
               {/* Formulário de inserção manual */}
               <div style={{ padding: '14px 16px', marginBottom: '16px', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--panel-border)', borderRadius: '10px' }}>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
-                  Registrar surebet de promoção
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Registrar surebet de promoção
+                  </span>
+                  {/* "i": guia das 6 modalidades (o que é, fórmula, exemplo com números e a
+                      armadilha de cada uma). Abre no tipo que está selecionado — é ali que a
+                      dúvida aparece — e o modal deixa trocar de verbete. */}
+                  <button
+                    className="promo-guia-btn"
+                    onClick={() => setPromoGuiaTipo(promoForm.promoTipo)}
+                    title="Guia das modalidades: o que é cada promoção, com fórmula e exemplo numérico"
+                    aria-label="Abrir o guia das modalidades de promoção"
+                  >
+                    <Info size={12} />
+                  </button>
                 </div>
-                {/* Tipo da promoção — muda a matemática do lucro/ROI */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '12px' }}>
-                  <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Tipo</span>
-                  {(() => {
-                    const chip = (active: boolean) => ({
-                      padding: '5px 12px',
-                      borderRadius: '999px',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      border: active ? '1px solid var(--color-primary)' : '1px solid var(--panel-border)',
-                      background: active ? 'var(--color-primary)' : 'rgba(255,255,255,0.03)',
-                      color: active ? '#fff' : 'var(--text-secondary)',
-                      transition: 'all 0.15s ease'
-                    });
-                    return (
-                      <>
-                        <button
-                          style={chip(promoForm.promoTipo === 'FREEBET_SNR')}
-                          onClick={() => setPromoForm((f) => ({ ...f, promoTipo: 'FREEBET_SNR' }))}
-                          title="Aposta Extra/Freebet: a ficha NÃO retorna no ganho (ganho = stake × (odd − 1)) e perdê-la custa R$ 0 — o investimento real é só a cobertura"
-                        >
-                          🎟️ Freebet (SNR)
-                        </button>
-                        <button
-                          style={chip(promoForm.promoTipo === 'QUALIFYING')}
-                          onClick={() => setPromoForm((f) => ({ ...f, promoTipo: 'QUALIFYING' }))}
-                          title="Aposta qualificativa: dinheiro real nas duas pernas (surebet clássica)"
-                        >
-                          💵 Qualificativa (dinheiro real)
-                        </button>
-                        <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                          {promoForm.promoTipo === 'FREEBET_SNR'
-                            ? 'Ficha não retorna no ganho; investimento real = só a cobertura'
-                            : 'Dinheiro real nas duas pernas; investimento = promoção + cobertura'}
+                {/* Tipo da promoção — cada tipo é uma fórmula diferente no core (retorno bruto e
+                    custo real). Os 6 chips vão AGRUPADOS (freebet / dinheiro real / turbinada):
+                    numa linha só eles não caberiam em ~480px de viewport. O empilhamento é da
+                    classe .promo-tipos (CSS, mobile-first) — o JSX não define display aqui. */}
+                <div style={{ marginBottom: '12px' }}>
+                  <div className="promo-tipos">
+                    {(Object.keys(PROMO_GRUPO_TITULO) as PromoGrupo[]).map((grupo) => (
+                      <div key={grupo} className="promo-tipo-grupo">
+                        <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          {PROMO_GRUPO_TITULO[grupo]}
                         </span>
-                      </>
-                    );
-                  })()}
+                        <div className="promo-tipo-chips">
+                          {promoTiposDoGrupo(grupo).map((tipo) => (
+                            <button
+                              key={tipo}
+                              style={promoChipStyle(promoForm.promoTipo === tipo)}
+                              onClick={() => setPromoForm((f) => ({ ...f, promoTipo: tipo }))}
+                              title={PROMO_META[tipo].dica}
+                            >
+                              {PROMO_META[tipo].chip}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }} title={promoMetaAtiva.dica}>
+                    {promoMetaAtiva.resumo}{' '}
+                    {/* Atalho no ponto da dúvida: o resumo é uma linha, o verbete tem fórmula,
+                        exemplo com números do core e "não confunda com". */}
+                    <button className="promo-guia-link" onClick={() => setPromoGuiaTipo(promoForm.promoTipo)}>
+                      <Info size={11} /> entender esta modalidade
+                    </button>
+                  </div>
                 </div>
+                {/* Termos da devolução — só na proteção, é o que paga o lucro da operação */}
+                {promoForm.promoTipo === 'PROTECAO' && (
+                  <div style={promoBlocoStyle('59,130,246')}>
+                    <div style={promoBlocoTituloStyle}>Devolução da aposta perdida</div>
+                    <div className="resp-grid-form">
+                      <div className="form-group">
+                        <label>Devolução (%)</label>
+                        <input
+                          className="form-control" type="number" step="1" placeholder="50"
+                          value={promoForm.cashbackPct}
+                          onChange={(e) => setPromoForm((f) => ({ ...f, cashbackPct: e.target.value }))}
+                          title="Percentual da aposta que a casa devolve SE ELA PERDER (ex.: 50 = metade de volta)"
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Teto da Devolução (R$)</label>
+                        <input
+                          className="form-control" type="number" step="0.01" placeholder="opcional — ex.: 50.00"
+                          value={promoForm.cashbackTeto}
+                          onChange={(e) => setPromoForm((f) => ({ ...f, cashbackTeto: e.target.value }))}
+                          title='Limite do regulamento ("50% até R$ 50"). Acima da stake que consome o teto, cada real entra SEM proteção.'
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Cai como</label>
+                        {promoToggle(
+                          promoForm.cashbackEhBonus,
+                          [
+                            [false, '💵 Dinheiro', 'Dinheiro real, sacável'],
+                            [true, '🎟️ Bônus', 'Bônus/freebet: NÃO é dinheiro sacável — vale o que você consegue extrair convertendo'],
+                          ],
+                          (v) => setPromoForm((f) => ({ ...f, cashbackEhBonus: v }))
+                        )}
+                      </div>
+                      {promoForm.cashbackEhBonus && (
+                        <div className="form-group">
+                          <label>Valor do Bônus (%)</label>
+                          <input
+                            className="form-control" type="number" step="1" placeholder="70"
+                            value={promoForm.valorBonusPct}
+                            onChange={(e) => setPromoForm((f) => ({ ...f, valorBonusPct: e.target.value }))}
+                            title="Quanto vale R$ 1 desse bônus na prática (retenção da conversão da freebet). 70% é o padrão da doutrina; 0 é resposta válida."
+                          />
+                        </div>
+                      )}
+                    </div>
+                    {/* Face (com o teto do regulamento já aplicado) e valor efetivo vêm do CORE —
+                        não são recalculados aqui. O aviso do teto (com a stake que o consome) sai
+                        no painel de cálculo, junto dos outros avisos. */}
+                    {promoCalculo && promoCalculo.cashbackNominal > 0 && (
+                      <div style={{ marginTop: '8px', fontSize: '11.5px', color: 'var(--text-secondary)', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                        <span>
+                          Devolução: <strong>R$ {promoCalculo.cashbackNominal.toFixed(2)}</strong>{' '}
+                          <span style={{ color: 'var(--text-muted)' }}>(face, teto já aplicado)</span>
+                        </span>
+                        {promoCalculo.cashbackEhBonus && (
+                          <span>Valor efetivo: <strong style={{ color: 'var(--color-accent)' }}>R$ {promoCalculo.cashbackEfetivo.toFixed(2)}</strong></span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Ficha devolvida — só na SRR. É o `v` de R = S·(odd − 1 + v), a única coisa que
+                    separa SRR de SNR: em odd 2,00, tratar uma como a outra sub-hedgeia metade do
+                    aporte. */}
+                {promoForm.promoTipo === 'FREEBET_SRR' && (
+                  <div style={promoBlocoStyle('167,139,250')}>
+                    <div style={promoBlocoTituloStyle}>Ficha devolvida (SRR)</div>
+                    <div className="resp-grid-form">
+                      <div className="form-group">
+                        <label>Valor da ficha devolvida (%)</label>
+                        <input
+                          className="form-control" type="number" step="1" placeholder="100"
+                          value={promoForm.valorFichaPct}
+                          onChange={(e) => setPromoForm((f) => ({ ...f, valorFichaPct: e.target.value }))}
+                          title="100 = a ficha volta em DINHEIRO sacável. Menos que isso = ela volta como BÔNUS e vale só o que der para converter (70 é o padrão da doutrina); 0 faz a SRR degenerar em SNR. Lembre que na SRR o ótimo é a MENOR odd elegível."
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* Termos do boost — super odd e lucro extra. É o excedente/extra que paga a
+                    operação nesses tipos, e ele cai no cenário em que a promoção GANHA: ramo
+                    OPOSTO ao da devolução da proteção. */}
+                {(promoForm.promoTipo === 'SUPERODD' || promoForm.promoTipo === 'LUCRO_EXTRA') && (
+                  <div style={promoBlocoStyle('245,158,11')}>
+                    <div style={promoBlocoTituloStyle}>
+                      {promoForm.promoTipo === 'SUPERODD' ? 'Termos da super odd' : 'Termos do lucro extra'}
+                    </div>
+                    <div className="resp-grid-form">
+                      {promoForm.promoTipo === 'SUPERODD' && (
+                        <div className="form-group">
+                          <label>Odd padrão (sem boost)</label>
+                          <input
+                            className="form-control" type="number" step="0.01" placeholder="1.80"
+                            value={promoForm.oddPadrao}
+                            onChange={(e) => setPromoForm((f) => ({ ...f, oddPadrao: e.target.value }))}
+                            title="Odd NORMAL do mesmo mercado, sem a promoção. Mede o excedente e a margem real do mercado de cobertura (medir a margem pela odd turbinada dá negativo, clampa em zero e esconde o pedágio). Se o excedente cai como BÔNUS ela é obrigatória: sem ela a conta trata bônus como dinheiro."
+                          />
+                        </div>
+                      )}
+                      {promoForm.promoTipo === 'LUCRO_EXTRA' && (
+                        <>
+                          <div className="form-group">
+                            <label>Lucro extra (%)</label>
+                            <input
+                              className="form-control" type="number" step="1" placeholder="30"
+                              value={promoForm.boostPct}
+                              onChange={(e) => setPromoForm((f) => ({ ...f, boostPct: e.target.value }))}
+                              title="Percentual que a casa paga POR CIMA do retorno normal da odd (ex.: 30). Sem ele a operação é uma qualificativa crua, com prejuízo garantido."
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label>Incide sobre</label>
+                            {promoToggle(
+                              promoForm.boostSobreStake,
+                              [
+                                [false, '📈 Lucro', 'Leitura padrão do regulamento: "+X% de LUCRO extra" — a base é stake × (odd − 1)'],
+                                [true, '💵 Valor apostado', 'Regulamento alternativo: o % incide sobre o VALOR APOSTADO. Em odd 2,00 isso vale o DOBRO da outra leitura — confirme no regulamento'],
+                              ],
+                              (v) => setPromoForm((f) => ({ ...f, boostSobreStake: v }))
+                            )}
+                          </div>
+                        </>
+                      )}
+                      <div className="form-group">
+                        <label>{promoForm.promoTipo === 'SUPERODD' ? 'Teto do excedente (R$)' : 'Teto do extra (R$)'}</label>
+                        <input
+                          className="form-control" type="number" step="0.01" placeholder="opcional — ex.: 50.00"
+                          value={promoForm.tetoExtra}
+                          onChange={(e) => setPromoForm((f) => ({ ...f, tetoExtra: e.target.value }))}
+                          title='Limite do extra/excedente em reais ("+30% até R$ 50"). O teto corta a FACE, ANTES de valorizar bônus; passando dele, aumentar a stake não aumenta o prêmio — só o pedágio da cobertura (o ROI cai).'
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>{promoForm.promoTipo === 'SUPERODD' ? 'Excedente cai como' : 'Extra cai como'}</label>
+                        {promoToggle(
+                          promoForm.extraEmBonus,
+                          [
+                            [false, '💵 Dinheiro', 'Pago em caixa. Na super odd a odd turbinada JÁ contém o excedente — ele não soma duas vezes'],
+                            [true, '🎟️ Bônus', 'Pago em bônus/freebet: a casa paga a odd PADRÃO em caixa e credita a diferença como bônus, que vale menos que a face'],
+                          ],
+                          (v) => setPromoForm((f) => ({ ...f, extraEmBonus: v }))
+                        )}
+                      </div>
+                      {promoForm.extraEmBonus && (
+                        <div className="form-group">
+                          <label>Valor do bônus (%)</label>
+                          <input
+                            className="form-control" type="number" step="1" placeholder="70"
+                            value={promoForm.valorExtraPct}
+                            onChange={(e) => setPromoForm((f) => ({ ...f, valorExtraPct: e.target.value }))}
+                            title="Quanto vale R$ 1 desse bônus na prática (70% é o padrão da doutrina). ZERO é resposta válida — bônus que não dá para converter; aí essa promoção não paga a operação."
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="resp-grid-form">
                   <div className="form-group">
                     <label>Casa da Promoção</label>
                     <input className="form-control" placeholder="Ex.: Betano" value={promoForm.casaPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, casaPromocao: e.target.value }))} />
                   </div>
                   <div className="form-group">
-                    <label>{promoForm.promoTipo === 'FREEBET_SNR' ? 'Valor da Freebet (R$)' : 'Valor da Promoção (R$)'}</label>
+                    {/* Rótulo por tipo vem do PROMO_META (ficha grátis ≠ dinheiro apostado): a
+                        escada de ternários que ficava aqui rotulava tipo novo de "Promoção". */}
+                    <label>{promoMetaAtiva.rotuloValor}</label>
                     <input className="form-control" type="number" step="0.01" placeholder="50.00" value={promoForm.valorPromocao} onChange={(e) => setPromoForm((f) => ({ ...f, valorPromocao: e.target.value }))} />
                   </div>
                   <div className="form-group">
@@ -3310,10 +4473,10 @@ export default function App() {
                       className="form-control"
                       type="number"
                       step="0.01"
-                      placeholder={promoCoberturaSugerida ? `${promoCoberturaSugerida} (auto)` : '45.00'}
+                      placeholder={promoCalculo ? `${promoCalculo.coverStakeEqualizado.toFixed(2)} (auto)` : '45.00'}
                       value={promoForm.valorCobertura}
                       onChange={(e) => setPromoForm((f) => ({ ...f, valorCobertura: e.target.value }))}
-                      title="Deixe em branco para usar a cobertura equalizada (calculada de valor+odd da promoção e odd de cobertura) — o valor que iguala o lucro dos dois cenários. Digite para sobrescrever."
+                      title="Deixe em branco para usar a cobertura equalizada que o backend calcula (core) — o aporte que iguala o lucro dos dois cenários. Digite para sobrescrever."
                     />
                   </div>
                   <div className="form-group">
@@ -3326,10 +4489,16 @@ export default function App() {
                       className="form-control"
                       type="number"
                       step="0.01"
-                      placeholder={promoCalc ? `${promoCalc.lucro.toFixed(2)} (auto)` : 'auto pelas odds'}
+                      placeholder={
+                        promoCalculo
+                          ? `${promoCalculo.lucroGarantido.toFixed(2)} (auto)`
+                          : promoCalcEstado === 'erro'
+                            ? 'digite à mão (cálculo indisponível)'
+                            : 'auto pelas odds'
+                      }
                       value={promoForm.lucro}
                       onChange={(e) => { setPromoLucroEditado(true); setPromoForm((f) => ({ ...f, lucro: e.target.value })); }}
-                      title="Deixe em branco para calcular pelas odds (pior cenário entre as duas pernas). Digite para sobrescrever — ex.: freebet que não devolve a stake."
+                      title="Em branco = o lucro garantido calculado pelo core (pior cenário entre as duas pernas). Digite para sobrescrever."
                     />
                   </div>
                   <div className="form-group">
@@ -3338,19 +4507,187 @@ export default function App() {
                       className="form-control"
                       type="number"
                       step="0.01"
-                      placeholder={promoRoiSugerido ? `${promoRoiSugerido} (auto)` : 'auto: lucro/investido'}
+                      placeholder={
+                        typeof promoCalculo?.roiPct === 'number'
+                          ? `${promoCalculo.roiPct.toFixed(2)} (auto)`
+                          : promoCalcEstado === 'erro'
+                            ? 'digite à mão (cálculo indisponível)'
+                            : 'auto: lucro/investido'
+                      }
                       value={promoForm.roiPct}
                       onChange={(e) => { setPromoRoiEditado(true); setPromoForm((f) => ({ ...f, roiPct: e.target.value })); }}
-                      title="Deixe em branco para calcular automaticamente: lucro ÷ (valor da promoção + cobertura)"
+                      title="Em branco = lucro garantido ÷ dinheiro REAL investido (na freebet a ficha não conta). Digite para sobrescrever."
                     />
                   </div>
                 </div>
-                {promoCalc && (
-                  <div style={{ marginTop: '10px', padding: '8px 12px', background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
-                    <span>Se a <strong>promoção</strong> ganhar: <strong style={{ color: promoCalc.seGanhaPromo >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{promoCalc.seGanhaPromo >= 0 ? '+' : '−'}R$ {Math.abs(promoCalc.seGanhaPromo).toFixed(2)}</strong></span>
-                    <span>Se a <strong>cobertura</strong> ganhar: <strong style={{ color: promoCalc.seGanhaCobertura >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{promoCalc.seGanhaCobertura >= 0 ? '+' : '−'}R$ {Math.abs(promoCalc.seGanhaCobertura).toFixed(2)}</strong></span>
-                    <span>Garantido (pior caso): <strong style={{ color: promoCalc.lucro >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{promoCalc.lucro >= 0 ? '+' : '−'}R$ {Math.abs(promoCalc.lucro).toFixed(2)}</strong></span>
-                    {promoRoiSugerido && <span>ROI: <strong style={{ color: 'var(--color-accent)' }}>{promoRoiSugerido}%</strong></span>}
+                {/* Teto de ganho/retorno — cláusula que aparece em QUALQUER tipo, por isso fica
+                    fora dos blocos condicionais (e DEPOIS dos campos principais: é opcional e não
+                    pode empurrar casa/valor/odd para baixo). As duas leituras não são a mesma
+                    fórmula, e é o title de cada opção que explica a diferença. */}
+                <div style={promoBlocoStyle('148,163,184')}>
+                  <div style={promoBlocoTituloStyle}>Teto do regulamento (opcional)</div>
+                  <div className="resp-grid-form">
+                    {/* Teto de STAKE também é cláusula de regulamento, não de tipo: existe
+                        "aposta protegida até R$ 50 de stake" e freebet com stake elegível
+                        limitada. Ficava só no bloco do boost, e nesses casos o usuário digitava
+                        a stake cheia e a conta rodava sobre dinheiro que não era elegível. */}
+                    <div className="form-group">
+                      <label>Teto de stake (R$)</label>
+                      <input
+                        className="form-control" type="number" step="0.01" placeholder="em branco = sem teto"
+                        value={promoForm.tetoStake}
+                        onChange={(e) => setPromoForm((f) => ({ ...f, tetoStake: e.target.value }))}
+                        title='Stake máxima que a promoção aceita ("super odd até R$ 30", "protegida até R$ 50"). A conta roda só na parte elegível: apostar acima disso cola uma qualificativa com prejuízo na operação e muda o aporte da cobertura.'
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Teto de ganho (R$)</label>
+                      <input
+                        className="form-control" type="number" step="0.01" placeholder="em branco = sem teto"
+                        value={promoForm.tetoGanho}
+                        onChange={(e) => setPromoForm((f) => ({ ...f, tetoGanho: e.target.value }))}
+                        title='Limite de ganho/retorno do regulamento, em reais. Em branco = sem teto. Confira no regulamento QUAL das duas cláusulas é a sua (o toggle ao lado).'
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Incide sobre</label>
+                      {/* Genérico explícito: sem ele o TS alarga os rótulos para `string` e o
+                          setPromoForm deixa de aceitar o valor. */}
+                      {promoToggle<'GANHO' | 'RETORNO'>(
+                        promoForm.tetoIncideSobre,
+                        [
+                          ['GANHO', '🏆 Ganho', '"Ganhe até R$ X": o teto limita só o LUCRO — o retorno ainda devolve a stake por cima disso'],
+                          ['RETORNO', '💰 Retorno', '"Retorno máximo R$ X": o teto limita o PAGAMENTO INTEIRO. Ler "ganho" onde é "retorno" faz o app mandar aportar mais do que a casa paga, e o green fecha negativo'],
+                        ],
+                        (v) => setPromoForm((f) => ({ ...f, tetoIncideSobre: v }))
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {/* Painel do cálculo. TODO número daqui vem de /api/promocoes/calcular (core) —
+                    inclusive os AVISOS, que antes eram produzidos no backend e nunca chegavam à
+                    tela. São eles que explicam teto mordendo, bônus que não é caixa, cobertura
+                    que queima retenção e boost insuficiente: é o produto, não decoração.
+                    Enquanto um cálculo novo não volta, o último fica na tela (não pisca). */}
+                {(promoCalculo || promoCalcEstado !== 'idle') && (
+                  <div style={{ marginTop: '10px', padding: '10px 12px', background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                    <div style={{ width: '100%', display: 'flex', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)' }}>
+                        Cálculo do core (servidor)
+                      </span>
+                      <span style={{ fontSize: '10.5px', color: promoCalcEstado === 'erro' ? 'var(--color-warning)' : 'var(--text-muted)' }}>
+                        {promoCalcEstado === 'calculando'
+                          ? 'calculando…'
+                          : promoCalcEstado === 'erro'
+                            ? '⚠️ indisponível'
+                            : promoCalcEstado === 'ok'
+                              ? '✓ atualizado'
+                              : ''}
+                      </span>
+                    </div>
+                    {/* Falhou o endpoint: nada de número estimado localmente (a tela não tem mais
+                        fórmula). O usuário registra digitando lucro/ROI à mão. */}
+                    {promoCalcEstado === 'erro' && (
+                      <span style={{ width: '100%', color: 'var(--color-warning)', lineHeight: 1.45 }}>
+                        ⚠️ Não deu para calcular no servidor ({promoCalcErro}). Nada foi estimado aqui — digite o lucro (e o ROI, se quiser) à mão para registrar.
+                      </span>
+                    )}
+                    {promoCalculo && (
+                      <>
+                        <span>
+                          Se a <strong>promoção</strong> ganhar:{' '}
+                          <strong style={{ color: promoCorValor(promoCalculo.lucroSePromoGanha) }}>{promoReais(promoCalculo.lucroSePromoGanha)}</strong>
+                        </span>
+                        <span>
+                          Se a <strong>cobertura</strong> ganhar{promoCalculo.cashbackNominal > 0 ? ' (com a devolução)' : ''}:{' '}
+                          <strong style={{ color: promoCorValor(promoCalculo.lucroSeCoberturaGanha) }}>{promoReais(promoCalculo.lucroSeCoberturaGanha)}</strong>
+                        </span>
+                        <span>
+                          Garantido (pior caso):{' '}
+                          <strong style={{ color: promoCorValor(promoCalculo.lucroGarantido) }}>{promoReais(promoCalculo.lucroGarantido)}</strong>
+                        </span>
+                        <span title="ROI sobre o dinheiro REAL investido (na freebet a ficha não conta como custo).">
+                          ROI:{' '}
+                          <strong style={{ color: 'var(--color-accent)' }}>
+                            {typeof promoCalculo.roiPct === 'number' ? `${promoCalculo.roiPct.toFixed(2)}%` : '—'}
+                          </strong>
+                          {typeof promoCalculo.roiPct !== 'number' && <span style={{ color: 'var(--text-muted)' }}> (sem dinheiro real investido)</span>}
+                        </span>
+                        {/* Retenção é a métrica das DUAS freebets. Na SRR passa de 100% e está certo:
+                            a ficha volta, então o lucro pode superar o valor dela. */}
+                        {typeof promoCalculo.retencaoPct === 'number' && (
+                          <span title="Lucro garantido ÷ valor da ficha. Na SRR pode passar de 100% (a ficha volta), na SNR não.">
+                            Retenção da freebet:{' '}
+                            <strong style={{ color: promoCorValor(promoCalculo.retencaoPct) }}>{promoCalculo.retencaoPct.toFixed(1)}%</strong>
+                          </span>
+                        )}
+                        <span title="Aporte usado na conta. Em branco no formulário, é o aporte EQUALIZADO que o core calcula (iguala o lucro dos dois cenários).">
+                          Cobertura: <strong>R$ {promoCalculo.coverStake.toFixed(2)}</strong>
+                          {promoAporteEmBranco && <span style={{ color: 'var(--text-muted)' }}> (equalizada)</span>}
+                        </span>
+                        {/* Teto de stake mordendo: a conta é a da parte ELEGÍVEL, não a do valor
+                            digitado — apostar o resto cola uma qualificativa com prejuízo. */}
+                        {promoCalculo.stakeElegivel < promoCalculo.promoStake && (
+                          <span style={{ color: 'var(--color-warning)' }} title="A promoção só aceita esta stake (teto do regulamento). Aposte só ela nessa perna.">
+                            Stake elegível: <strong>R$ {promoCalculo.stakeElegivel.toFixed(2)}</strong> de R$ {promoCalculo.promoStake.toFixed(2)}
+                          </span>
+                        )}
+                        {promoMostrarOddEfetiva && (
+                          <span title="Retorno bruto ÷ stake elegível, já com boost e tetos aplicados. É a odd que a promoção REALMENTE paga.">
+                            Odd efetiva da promoção: <strong>{promoCalculo.oddEfetivaPromo.toFixed(3)}</strong>
+                          </span>
+                        )}
+                        {promoCalculo.extraNominal > 0 && (
+                          <span title="Face do excedente/extra e, quando é bônus, o valor efetivo. O teto corta a FACE, antes da valorização do bônus.">
+                            {promoCalculo.extraEmBonus ? 'Extra (bônus)' : 'Excedente do boost'}:{' '}
+                            <strong>R$ {promoCalculo.extraNominal.toFixed(2)}</strong>
+                            {promoCalculo.extraEmBonus && (
+                              <>
+                                {' → efetivo '}
+                                <strong style={{ color: 'var(--color-accent)' }}>R$ {promoCalculo.extraEfetivo.toFixed(2)}</strong>
+                              </>
+                            )}
+                          </span>
+                        )}
+                        {/* Piso do boost: abaixo dele o extra não paga o par de odds. Vem do core
+                            (extraParaZerar) — não é estimado aqui. */}
+                        {typeof promoCalculo.extraParaZerar === 'number' && (
+                          <span style={{ width: '100%', color: 'var(--text-muted)' }}>
+                            {promoCalculo.extraParaZerar <= 0
+                              ? '✅ Esse par de odds já paga o pedágio sem o boost — o extra é lucro em cima de lucro.'
+                              : `Piso do extra com essas odds: R$ ${promoCalculo.extraParaZerar.toFixed(2)} efetivos (o atual é R$ ${promoCalculo.extraEfetivo.toFixed(2)}).`}
+                          </span>
+                        )}
+                        {/* Bônus não é caixa. Os dois avisos abaixo vivem em ramos OPOSTOS: ficha da
+                            SRR e extra do boost caem quando a promoção GANHA; a devolução da
+                            proteção cai quando ela PERDE. Por isso são condições independentes. */}
+                        {promoCalculo.bonusSePromoGanha > 0 && (
+                          <span style={{ width: '100%', color: 'var(--text-muted)' }}>
+                            🎟️ Se a <strong>promoção</strong> ganhar, o caixa do dia é{' '}
+                            <strong style={{ color: promoCorValor(promoCalculo.lucroEmCaixaSePromoGanha) }}>
+                              {promoReais(promoCalculo.lucroEmCaixaSePromoGanha)}
+                            </strong>{' '}
+                            — R$ {promoCalculo.bonusSePromoGanha.toFixed(2)} do resultado é bônus (ficha devolvida/extra) e só vira dinheiro depois de convertido.
+                          </span>
+                        )}
+                        {promoCalculo.bonusSePromoPerde > 0 && (
+                          <span style={{ width: '100%', color: 'var(--text-muted)' }}>
+                            🎟️ Se a <strong>cobertura</strong> ganhar, o caixa do dia é{' '}
+                            <strong style={{ color: promoCorValor(promoCalculo.lucroEmCaixaSeCoberturaGanha) }}>
+                              {promoReais(promoCalculo.lucroEmCaixaSeCoberturaGanha)}
+                            </strong>{' '}
+                            — R$ {promoCalculo.bonusSePromoPerde.toFixed(2)} é devolução em bônus, que só vira dinheiro depois de convertida.
+                          </span>
+                        )}
+                        {promoCalculo.avisos.length > 0 && (
+                          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '6px', paddingTop: '8px', borderTop: '1px solid var(--panel-border)' }}>
+                            {promoCalculo.avisos.map((aviso, i) => (
+                              <span key={i} style={{ fontSize: '11.5px', color: 'var(--color-warning)', lineHeight: 1.45 }}>⚠️ {aviso}</span>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 )}
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
@@ -3382,7 +4719,9 @@ export default function App() {
                     <Layers size={16} className="stat-icon" />
                   </div>
                   <div className="stat-value">R$ {promoInvestido.toFixed(2)}</div>
-                  <div className="stat-footer">Dinheiro real (freebet não conta como custo)</div>
+                  <div className="stat-footer" title="Cobertura de todas as linhas + a perna da promoção nos tipos com dinheiro real (qualificativa, proteção, super odd, lucro extra). Só as duas freebets não contam a ficha.">
+                    Dinheiro real (a ficha das freebets não conta)
+                  </div>
                 </div>
                 <div className="glass-panel stat-card">
                   <div className="stat-header">
@@ -3438,16 +4777,82 @@ export default function App() {
                             </td>
                             <td style={{ fontWeight: 'bold' }}>
                               {p.casa_promocao}
-                              <span
-                                title={p.promo_type === 'QUALIFYING' ? 'Aposta qualificativa (dinheiro real nas duas pernas)' : 'Freebet SNR: a ficha não retorna no ganho; investimento real = só a cobertura'}
-                                style={{ marginLeft: '6px', fontSize: '10px', fontWeight: 700, color: p.promo_type === 'QUALIFYING' ? 'var(--color-accent)' : 'var(--color-primary)', border: `1px solid ${p.promo_type === 'QUALIFYING' ? 'var(--color-accent)' : 'var(--color-primary)'}`, borderRadius: '999px', padding: '1px 6px', verticalAlign: 'middle', whiteSpace: 'nowrap' }}
-                              >
-                                {p.promo_type === 'QUALIFYING' ? 'qualificativa' : 'freebet'}
-                              </span>
+                              {/* Badge do tipo: rótulo, cor e tooltip vêm do PROMO_META (os 6 tipos
+                                  + o caso desconhecido). A escada com `else` que existia aqui
+                                  chamava TODO tipo não previsto de "freebet" e ainda afirmava no
+                                  tooltip que a ficha não retorna — mentira na SRR e na super odd,
+                                  e mentira sobre o dinheiro investido na linha. */}
+                              {(() => {
+                                const meta = metaPromo(p.promo_type);
+                                return (
+                                  <span
+                                    title={meta.dica}
+                                    style={{ marginLeft: '6px', fontSize: '10px', fontWeight: 700, color: meta.cor, border: `1px solid ${meta.cor}`, borderRadius: '999px', padding: '1px 6px', verticalAlign: 'middle', whiteSpace: 'nowrap' }}
+                                  >
+                                    {meta.badge}
+                                  </span>
+                                );
+                              })()}
                             </td>
                             <td>
                               R$ {(Number(p.valor_promocao) || 0).toFixed(2)}
                               {Number.isFinite(Number(p.odd_promocao)) && p.odd_promocao !== null && <span style={{ color: 'var(--text-muted)' }}> @ {Number(p.odd_promocao).toFixed(2)}</span>}
+                              {/* Devolução/extra da linha: sem eles a linha não se explica (é de onde
+                                  o lucro vem). Cada trecho só aparece se o valor VEIO do banco — o
+                                  registro grava apenas as colunas que o tipo usa, e coluna ausente
+                                  simplesmente não renderiza (nada é inferido do tipo). */}
+                              {/* No tooltip do bônus: Number.isFinite e não `|| 70`, porque 0 é
+                                  valorização VÁLIDA (bônus que não dá para converter) e o core
+                                  calculou a linha com 0% — o texto afirmava 70% sobre um lucro
+                                  que não usou 70%. */}
+                              {Number(p.cashback) > 0 && (
+                                <span
+                                  style={{ color: '#3b82f6', fontSize: '11px', whiteSpace: 'nowrap' }}
+                                  title={p.cashback_eh_bonus ? `Devolução de R$ ${Number(p.cashback).toFixed(2)} em BÔNUS (valorizada a ${Number.isFinite(Number(p.valor_bonus_pct)) ? Number(p.valor_bonus_pct) : 70}% no cálculo)` : `Devolução de R$ ${Number(p.cashback).toFixed(2)} em dinheiro`}
+                                >
+                                  {' '}🛡️ +R$ {Number(p.cashback).toFixed(2)}{p.cashback_eh_bonus ? ' bônus' : ''}
+                                </span>
+                              )}
+                              {Number(p.valor_ficha_pct) > 0 && Number(p.valor_ficha_pct) < 100 && (
+                                <span
+                                  style={{ color: '#a78bfa', fontSize: '11px', whiteSpace: 'nowrap' }}
+                                  title={`Freebet SRR: a ficha voltou como BÔNUS valendo ${Number(p.valor_ficha_pct).toFixed(0)}% — parte do lucro só virou dinheiro depois de convertida.`}
+                                >
+                                  {' '}🎟️ ficha volta {Number(p.valor_ficha_pct).toFixed(0)}%
+                                </span>
+                              )}
+                              {Number(p.odd_padrao) > 1 && (
+                                <span
+                                  style={{ color: '#f59e0b', fontSize: '11px', whiteSpace: 'nowrap' }}
+                                  title={`Super odd: a odd padrão do mercado era ${Number(p.odd_padrao).toFixed(2)} — o excedente é o boost.`}
+                                >
+                                  {' '}🚀 padrão @ {Number(p.odd_padrao).toFixed(2)}
+                                </span>
+                              )}
+                              {/* Extra do boost em REAIS vem gravado (extra_nominal/extra_efetivo,
+                                  derivados do core no registro) — a UI não recalcula boost. Só se
+                                  a linha não tiver esses valores é que sobra o percentual. */}
+                              {Number(p.extra_nominal) > 0 ? (
+                                <span
+                                  style={{ color: '#ec4899', fontSize: '11px', whiteSpace: 'nowrap' }}
+                                  title={
+                                    `Extra do boost: R$ ${Number(p.extra_nominal).toFixed(2)} de face` +
+                                    (Number.isFinite(Number(p.extra_efetivo)) ? ` valendo R$ ${Number(p.extra_efetivo).toFixed(2)}` : '') +
+                                    (p.extra_em_bonus ? ' (pago em BÔNUS — só virou dinheiro depois de convertido)' : ' (pago em dinheiro)') +
+                                    (Number(p.boost_pct) > 0 ? `. Boost de ${Number(p.boost_pct).toFixed(0)}% sobre ${p.boost_sobre_stake ? 'o VALOR APOSTADO' : 'o lucro'}` : '') +
+                                    (Number(p.teto_extra) > 0 ? `, teto de R$ ${Number(p.teto_extra).toFixed(2)}` : '') + '.'
+                                  }
+                                >
+                                  {' '}📈 +R$ {Number(p.extra_nominal).toFixed(2)}{p.extra_em_bonus ? ' bônus' : ''}
+                                </span>
+                              ) : Number(p.boost_pct) > 0 ? (
+                                <span
+                                  style={{ color: '#ec4899', fontSize: '11px', whiteSpace: 'nowrap' }}
+                                  title={`Lucro extra de ${Number(p.boost_pct).toFixed(0)}% sobre ${p.boost_sobre_stake ? 'o VALOR APOSTADO' : 'o lucro'}${Number(p.teto_extra) > 0 ? `, com teto de R$ ${Number(p.teto_extra).toFixed(2)}` : ''}.`}
+                                >
+                                  {' '}📈 +{Number(p.boost_pct).toFixed(0)}% extra
+                                </span>
+                              ) : null}
                             </td>
                             <td style={{ fontWeight: 'bold' }}>{p.evento}</td>
                             <td className="hide-mobile">{p.mercado || '—'}</td>
@@ -4578,6 +5983,119 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Guia das modalidades de promoção (botão "i" da aba Promoções).
+          Só CONTEÚDO: nenhum número é calculado aqui — os exemplos são valores fixos gerados
+          rodando o core (backend/src/core/promocoes.ts), e cada verbete diz as entradas que
+          os produzem, para dar para reconferir no preview da própria tela. */}
+      {promoGuiaTipo && (() => {
+        const guia = PROMO_GUIA[promoGuiaTipo];
+        const meta = PROMO_META[promoGuiaTipo];
+        const fechar = () => setPromoGuiaTipo(null);
+        const blocoExemplo = (ex: { titulo: string; linhas: GuiaLinha[]; leitura: string }) => (
+          <div className="promo-guia-exemplo">
+            <div className="promo-guia-exemplo-titulo">{ex.titulo}</div>
+            {ex.linhas.map((l, i) => (
+              <div key={i} className={`promo-guia-linha${l.forte ? ' forte' : ''}`}>
+                <span>{l.rotulo}</span>
+                <strong>{l.valor}</strong>
+              </div>
+            ))}
+            <div className="promo-guia-leitura">{ex.leitura}</div>
+          </div>
+        );
+        return (
+          <div className="modal-overlay" onClick={fechar}>
+            <div className="modal-content promo-guia-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h2 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Info size={18} style={{ color: '#10b981' }} />
+                  Modalidades de promoção
+                </h2>
+                <button className="modal-close" onClick={fechar}>
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="modal-body">
+                {/* 1) Qual é o tipo? A árvore vem PRIMEIRO: o erro caro não é errar a conta,
+                       é aplicar a doutrina de um tipo em outro (SNR × SRR, super odd × lucro extra). */}
+                <details className="promo-guia-arvore">
+                  <summary>Na dúvida, comece aqui: qual modalidade é a minha?</summary>
+                  {PROMO_GUIA_ARVORE.map((n, i) => (
+                    <div key={i} className="promo-guia-no">
+                      <div className="promo-guia-pergunta">{i + 1}. {n.pergunta}</div>
+                      <div className="promo-guia-resposta"><span className="sim">SIM</span> {n.sim}</div>
+                      <div className="promo-guia-resposta"><span className="nao">NÃO</span> {n.nao}</div>
+                    </div>
+                  ))}
+                </details>
+
+                {/* 2) Chips: trocam o VERBETE, não o formulário (o botão "usar este tipo" faz isso). */}
+                <div className="promo-guia-chips">
+                  {(Object.keys(PROMO_GUIA) as PromoTipo[]).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setPromoGuiaTipo(t)}
+                      className={`promo-guia-chip${t === promoGuiaTipo ? ' ativo' : ''}`}
+                      style={t === promoGuiaTipo ? { borderColor: PROMO_META[t].cor, color: PROMO_META[t].cor } : undefined}
+                    >
+                      {PROMO_META[t].chip}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="promo-guia-verbete">
+                  <div className="promo-guia-titulo" style={{ color: meta.cor }}>{guia.titulo}</div>
+                  <p className="promo-guia-texto">{guia.oQueE}</p>
+
+                  <div className="promo-guia-secao">Como a casa anuncia</div>
+                  <ul className="promo-guia-lista">
+                    {guia.anuncio.map((a, i) => <li key={i}>{a}</li>)}
+                  </ul>
+
+                  <div className="promo-guia-secao">Fórmula (a mesma do cálculo desta tela)</div>
+                  <pre className="promo-guia-formula">{guia.formula.join('\n')}</pre>
+
+                  <div className="promo-guia-secao">Exemplo</div>
+                  {blocoExemplo(guia.exemplo)}
+                  {guia.exemplo2 && blocoExemplo(guia.exemplo2)}
+
+                  <div className="promo-guia-secao">Armadilhas</div>
+                  <ul className="promo-guia-lista">
+                    {guia.armadilhas.map((a, i) => <li key={i}>{a}</li>)}
+                  </ul>
+
+                  <div className="promo-guia-nao-confunda">
+                    <strong>Não confunda com:</strong> {guia.naoConfundaCom}
+                  </div>
+
+                  <button
+                    className="btn"
+                    onClick={() => { setPromoForm((f) => ({ ...f, promoTipo: promoGuiaTipo })); fechar(); }}
+                    style={{ marginTop: '14px', padding: '6px 12px', fontSize: '11.5px', fontWeight: 700, background: meta.cor, color: '#0b1220', border: 'none' }}
+                  >
+                    Usar {meta.chip} no formulário
+                  </button>
+                </div>
+
+                {/* 3) Vale para TODAS: é o que mais queima promoção (Apêndice C do Promocoes.md). */}
+                <details className="promo-guia-arvore">
+                  <summary>Regulamento: o que conferir em qualquer promoção</summary>
+                  <ul className="promo-guia-lista">
+                    <li><strong>OPT-IN</strong> na oferta ANTES de montar o bilhete — é o que mais queima promoção.</li>
+                    <li>Tipo de bilhete aceito (simples? múltipla com N seleções?) e mercado/competição elegível.</li>
+                    <li>Odd mínima por seleção e odd total mínima.</li>
+                    <li>Valor mínimo e os <strong>tetos</strong>: de stake, de devolução e de ganho (ganho ≠ retorno).</li>
+                    <li>Janela da promoção e prazo de creditação (costuma ser "até 24h após o FIM da campanha").</li>
+                    <li>O bônus recebido é SNR ou SRR? Tem odd mínima, validade, rollover?</li>
+                    <li>Uma aposta por evento/CPF/dia? A oferta é repetível?</li>
+                  </ul>
+                </details>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Calculator Modal */}
       {selectedOpp && modalCalc && (

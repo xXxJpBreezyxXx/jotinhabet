@@ -27,13 +27,15 @@ export const skillSurebetsRadar: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      roi_min: { type: 'number', description: 'ROI mínimo em % (ex.: 3).' },
+      roi_min: { type: 'number', description: 'em %' },
       esporte: { type: 'string', description: 'Futebol | Basquete | Tênis | E-sports.' },
-      casa: { type: 'string', description: 'Filtra oportunidades que envolvem essa casa.' },
-      evento: { type: 'string', description: 'Filtro por texto no nome do evento.' },
-      fonte: { type: 'string', description: 'sureradar | motor | telegram | copiloto.' },
+      casa: { type: 'string' },
+      evento: { type: 'string', description: 'Texto no nome do evento.' },
+      // enum: o filtro é um `includes` sobre estes valores; em prosa o modelo inventava
+      // fonte ("radar", "agente") e o filtro devolvia zero.
+      fonte: { type: 'string', enum: ['sureradar', 'motor', 'telegram', 'copiloto'] },
       so_salvas: { type: 'boolean', description: 'true = só as que o usuário salvou.' },
-      limite: { type: 'number', description: 'Máximo de itens (default 15, teto 40).' },
+      limite: { type: 'number', description: 'default 15, teto 40' },
     },
     additionalProperties: false,
   },
@@ -107,7 +109,7 @@ export const skillRevalidarSurebet: Skill = {
     'ou quando ele perguntar "essa ainda está valendo?". Pegue o id em surebets_no_radar.',
   parametros: {
     type: 'object',
-    properties: { id: { type: 'string', description: 'id (uuid) da oportunidade no radar.' } },
+    properties: { id: { type: 'string', description: 'uuid da oportunidade no radar.' } },
     required: ['id'],
     additionalProperties: false,
   },
@@ -151,9 +153,9 @@ export const skillValueBets: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      tipo: { type: 'string', description: 'value | middle | ambos (default ambos).' },
-      edge_min: { type: 'number', description: 'Edge mínimo em % para value bets.' },
-      limite: { type: 'number', description: 'Máximo por tipo (default 10).' },
+      tipo: { type: 'string', enum: ['value', 'middle', 'ambos'] },
+      edge_min: { type: 'number', description: 'em % (value bets)' },
+      limite: { type: 'number', description: 'por tipo; default 10, teto 30' },
     },
     additionalProperties: false,
   },
@@ -215,8 +217,8 @@ export const skillRadarCashout: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      janela_min: { type: 'number', description: 'Janela em minutos (default 1440 = 24h).' },
-      limite: { type: 'number', description: 'Máximo de itens (default 10).' },
+      janela_min: { type: 'number', description: 'minutos; default 1440, teto 4320' },
+      limite: { type: 'number', description: 'default 10, teto 30' },
     },
     additionalProperties: false,
   },

@@ -152,11 +152,11 @@ export const skillConsultarOddsCasa: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      casa: { type: 'string', description: 'Nome ou chave da casa.' },
-      evento: { type: 'string', description: 'Nome do jogo como aparece na casa.' },
-      esporte: { type: 'string', description: 'Ajuda a filtrar o feed.' },
-      mercado: { type: 'string', description: 'Filtro opcional de mercado.' },
-      ao_vivo: { type: 'boolean', description: 'true busca também partida EM ANDAMENTO.' },
+      casa: { type: 'string' },
+      evento: { type: 'string', description: 'Como aparece na casa.' },
+      esporte: { type: 'string' },
+      mercado: { type: 'string' },
+      ao_vivo: { type: 'boolean', description: 'true inclui partida EM ANDAMENTO.' },
     },
     required: ['casa', 'evento'],
     additionalProperties: false,
@@ -239,12 +239,14 @@ export const skillCompararOddsCasas: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      evento: { type: 'string', description: 'Nome do jogo (ex.: "Grêmio x Bolívar").' },
-      esporte: { type: 'string', description: 'Default: procura em todos.' },
-      mercado: { type: 'string', description: 'Filtro de mercado.' },
+      evento: { type: 'string', description: 'Ex.: "Grêmio x Bolívar".' },
+      esporte: { type: 'string', description: 'Default: todos.' },
+      mercado: { type: 'string' },
       casas: { type: 'array', items: { type: 'string' }, description: 'Vazio = casas de API/WS.' },
       incluir_browser: { type: 'boolean', description: 'true inclui casas de Chromium (lento).' },
-      max_casas: { type: 'number', description: 'Teto de casas (default 10).' },
+      // O texto anunciava "default 10" e o código faz Math.min(16, x || 12): o modelo pedia
+      // 10 achando que era o default e cortava 2 casas de propósito.
+      max_casas: { type: 'number', description: 'default 12, teto 16' },
       ao_vivo: { type: 'boolean', description: 'true inclui partida EM ANDAMENTO.' },
     },
     required: ['evento'],
@@ -398,10 +400,11 @@ export const skillVarrerJogosCasa: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      casa: { type: 'string', description: 'Nome ou chave da casa.' },
+      casa: { type: 'string' },
       esporte: { type: 'string', description: 'Default Futebol.' },
-      situacao: { type: 'string', description: 'ao_vivo | pre_jogo | todos (default todos).' },
-      limite: { type: 'number', description: 'Quantos jogos listar (default 8, teto 25).' },
+      // enum: mais barato que a lista em prosa e ainda RESTRINGE a saída do provedor.
+      situacao: { type: 'string', enum: ['ao_vivo', 'pre_jogo', 'todos'] },
+      limite: { type: 'number', description: 'default 8, teto 25' },
     },
     required: ['casa'],
     additionalProperties: false,
@@ -503,12 +506,12 @@ export const skillVarrerSurebetsCasas: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      casas: { type: 'array', items: { type: 'string' }, description: 'Casas a cruzar (2 a 4). Vazio = melhores fontes de API.' },
+      casas: { type: 'array', items: { type: 'string' }, description: '2 a 4. Vazio = melhores fontes de API.' },
       esporte: { type: 'string', description: 'Default Futebol.' },
-      situacao: { type: 'string', description: 'ao_vivo | pre_jogo | todos (default todos).' },
-      mercado: { type: 'string', description: 'Filtro de mercado.' },
-      roi_minimo: { type: 'number', description: 'ROI mínimo em % (default 0.5).' },
-      limite: { type: 'number', description: 'Quantas listar (default 8, teto 15).' },
+      situacao: { type: 'string', enum: ['ao_vivo', 'pre_jogo', 'todos'] },
+      mercado: { type: 'string' },
+      roi_minimo: { type: 'number', description: 'em % (default 0.5)' },
+      limite: { type: 'number', description: 'default 8, teto 15' },
     },
     additionalProperties: false,
   },

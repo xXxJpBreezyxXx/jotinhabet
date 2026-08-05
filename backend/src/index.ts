@@ -23,7 +23,11 @@ import { WhatsAppAgentBridge, tokenWebhookValido, chatsPermitidos } from './IA/a
 import { skillsParaUI } from './IA/agent/registry';
 import { catalogoCasas, casasSemIntegracao } from './IA/agent/catalogoCasas';
 import { cadeiaAgente, criarMotor } from './IA/agent/chatModels';
-import { calcularPromocao } from './core/promocoes';
+import {
+  calcularPromocao, VALOR_BONUS_PADRAO_PCT, PROMO_TYPES_BANCO, TIPOS_PROMOCAO,
+  ehFreebetSemCusto, ehTipoComBoost, tipoDoPromoType, promoTypeDoTipo,
+  type TipoPromocao, type ResultadoPromocao,
+} from './core/promocoes';
 import { WhatsAppNotifier } from './notify/whatsapp';
 import { avisarDeployWhatsApp } from './notify/deployNotice';
 import { extrairSinalDeImagem } from './IA/extractors/telegramSignalExtractor';
@@ -452,6 +456,7 @@ app.post('/api/evolution', (req, res) => {
 });
 
 import { ArbitrageScannerV2 } from './core/scanner_v2';
+import { sureradarSync } from './core/sureradarSync';
 
 // Manual Scanner Endpoint
 const scanner = new ArbitrageScannerV2();
@@ -485,6 +490,18 @@ app.post('/api/scan', async (req, res) => {
 // Status da varredura manual (o painel usa p/ manter o spinner até concluir).
 app.get('/api/scan/status', (_req, res) => {
   res.json({ running: scanManualEmAndamento });
+});
+
+// Sincronia com o SureRadar: quando ELES recalcularam, de quanto em quanto tempo recalculam,
+// quanto depois disso a NOSSA varredura capturou e quanto de vida resta ao dado do banco.
+// Sem estado em disco: medição de fase em memória. Restart perde só a CADÊNCIA (volta em ~30
+// min, quando 4 recálculos deles tiverem sido observados); o resto vem na 1ª varredura.
+app.get('/api/sureradar/sync', (_req, res) => {
+  try {
+    res.json(sureradarSync.snapshot());
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'falha ao montar o snapshot de sincronia' });
+  }
 });
 
 // GET list of opportunities
@@ -781,9 +798,30 @@ app.post('/api/saldos', async (req, res) => {
   }
 });
 
-// ===== Surebets de PROMOÇÃO (histórico manual — tabela promo_surebets, migration 018) =====
-// Lucro extraído de promoções (freebet/superodd/cashback): perna da promoção numa
-// casa + cobertura na outra. Não vincula com oportunidades nem mexe na banca ativa.
+// ═════════ Surebets de PROMOÇÃO (histórico manual — tabela promo_surebets) ═════════
+// Lucro extraído de promoções das casas: perna promocional numa casa + cobertura na
+// outra. Vive fora do radar, não mexe na banca ativa e tem ROI próprio.
+//
+// TODA a matemática vem de core/promocoes.ts (fonte única, 57 testes). Esta camada só
+// lê o corpo, chama o core e grava. Os 6 tipos, e o que cada um muda na conta:
+//   FREEBET_SNR   ficha não volta   → retorno S×(odd−1), custo R$ 0 (só a cobertura é investimento)
+//   FREEBET_SRR   ficha volta       → retorno S×(odd−1+v), custo R$ 0; v = valor_ficha_pct
+//   QUALIFYING    dinheiro real     → retorno S×odd, custo S (o qualificador quase sempre dá prejuízo)
+//   PROTECAO      dinheiro real     → idem + devolução se a perna promocional PERDER
+//   SUPERODD      odd turbinada     → em caixa a odd JÁ contém o excedente; em bônus paga odd_padrao + bônus
+//   LUCRO_EXTRA   % de lucro extra  → retorno S×odd + extra valorizado (boost_pct, teto_extra)
+// S = stake ELEGÍVEL (min(valor, teto_stake)) — não é o valor digitado quando há teto.
+//
+// Armadilhas desta camada (todas já custaram dinheiro no repo):
+//   • promo_type do BANCO ≠ tipo do core só na qualificativa (QUALIFYING ↔ QUALIFICATIVA).
+//     Traduza SEMPRE com tipoDoPromoType/promoTypeDoTipo; tradutor novo aqui volta a
+//     divergir e faz filtro devolver zero em silêncio.
+//   • tipo desconhecido é ERRO 400, não default: coagir para FREEBET_SNR respondendo
+//     success:true gravava custo zero onde havia dinheiro real na mesa.
+//   • "investido" = dinheiro que sai do bolso → ehFreebetSemCusto(tipo) decide, e a stake
+//     que entra é a elegível.
+//   • coluna nova só vai no INSERT quando o tipo/regulamento a usa (degradação sem
+//     migration): um banco sem a 022 continua gravando freebet/qualificativa/proteção.
 
 // GET - lista o histórico de promoções (mais recente primeiro)
 app.get('/api/promocoes', async (_req, res) => {
@@ -800,108 +838,428 @@ app.get('/api/promocoes', async (_req, res) => {
   }
 });
 
-// POST - registra uma promoção. promo_type define a matemática (refatoracao
-// promocoes.md): FREEBET_SNR (default) = ficha não retorna → custo do lado da
-// promoção é R$ 0 e o investimento real é SÓ a cobertura; QUALIFYING = dinheiro
-// real nas duas pernas. Derivações quando o campo vem vazio: valor_cobertura =
-// cobertura equalizada (iguala o lucro dos dois cenários) a partir de
-// valor+odd da promoção e odd de cobertura; lucro = pior cenário entre as
-// pernas, na fórmula do tipo. ROI = lucro/investimento do tipo. '' e null
-// contam como ausentes (Number('') é 0 — campo vazio viraria R$ 0,00 válido).
-app.post('/api/promocoes', async (req, res) => {
-  const b = req.body || {};
-  const num = (v: any) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
-  const str = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
-  const r2 = (v: number) => Math.round(v * 100) / 100;
+// Migration que introduziu cada coluna/tipo de promoção. Existe para a mensagem de erro
+// apontar a migration que REALMENTE falta: o texto fixo em "021" mandava reaplicar uma
+// migration já aplicada, e a regex /cashback|promo_type_check/ passou a casar com o CHECK
+// da 022 (que já tem os 6 tipos) — ou seja, "falta a 022" era lido como "aplique a 021".
+const MIGRACOES_PROMO: Array<{ arquivo: string; colunas: string[]; tipos: string[] }> = [
+  { arquivo: '019_promo_odds.sql', colunas: ['odd_promocao', 'odd_cobertura'], tipos: [] },
+  { arquivo: '020_promo_type.sql', colunas: ['promo_type'], tipos: ['FREEBET_SNR', 'QUALIFYING'] },
+  {
+    arquivo: '021_promo_protecao.sql',
+    colunas: ['cashback', 'cashback_pct', 'cashback_teto', 'cashback_eh_bonus', 'valor_bonus_pct'],
+    tipos: ['PROTECAO'],
+  },
+  {
+    arquivo: '022_promo_srr_superodd_lucro_extra.sql',
+    colunas: [
+      'valor_ficha_pct', 'odd_padrao', 'teto_stake', 'boost_pct', 'boost_sobre_stake', 'teto_extra',
+      'extra_em_bonus', 'valor_extra_pct', 'teto_ganho', 'teto_incide_sobre', 'extra_nominal',
+      'extra_efetivo', 'odd_efetiva_promo',
+    ],
+    tipos: ['FREEBET_SRR', 'SUPERODD', 'LUCRO_EXTRA'],
+  },
+];
+const migrationDaColunaPromo = (coluna: string) =>
+  MIGRACOES_PROMO.find((m) => m.colunas.includes(coluna))?.arquivo ?? null;
+const migrationDoTipoPromo = (promoType: string) =>
+  MIGRACOES_PROMO.find((m) => m.tipos.includes(promoType))?.arquivo ?? null;
 
-  const promoType = b.promo_type === 'QUALIFYING' ? 'QUALIFYING' : 'FREEBET_SNR';
-  const casaPromocao = str(b.casa_promocao);
-  const valorPromocao = num(b.valor_promocao);
-  const evento = str(b.evento);
-  const casaCobertura = str(b.casa_cobertura);
-  const oddPromocao = num(b.odd_promocao);
-  const oddCobertura = num(b.odd_cobertura);
-  let lucro = num(b.lucro);
+/**
+ * Traduz erro de SCHEMA (coluna ausente ou CHECK de promo_type) em instrução útil: o que o
+ * banco não aceitou e qual a migration mais nova a aplicar. `colunasEnviadas` são as chaves
+ * que este INSERT realmente mandou — sem elas a mensagem teria de adivinhar quando o
+ * PostgREST cita só a primeira coluna que faltou. Devolve null se o erro não é de schema.
+ */
+function erroDeSchemaPromo(err: any, promoType: string, colunasEnviadas: string[]): string | null {
+  const msg = `${err?.message ?? ''} ${err?.details ?? ''}`;
+  const codigo = `${err?.code ?? ''}`;
+  const ehColunaAusente =
+    codigo === 'PGRST204' || codigo === '42703' || /column .*(schema cache|does not exist)/i.test(msg);
+  const ehCheckDeTipo = /promo_type_check/i.test(msg);
+  if (!ehColunaAusente && !ehCheckDeTipo) return null;
+
+  const faltando: string[] = [];
+  const migrations = new Set<string>();
+  if (ehCheckDeTipo) {
+    faltando.push(`o tipo ${promoType} (CHECK de promo_type desatualizado)`);
+    const arquivo = migrationDoTipoPromo(promoType);
+    if (arquivo) migrations.add(arquivo);
+  }
+  if (ehColunaAusente) {
+    const citada = /'([a-z0-9_]+)'|"([a-z0-9_]+)"/.exec(msg);
+    const nome = citada ? citada[1] || citada[2] : null;
+    // Se a coluna citada é conhecida, ela basta; senão listamos todas as opcionais deste
+    // INSERT, porque as demais da mesma migration também vão faltar.
+    const alvos = nome && migrationDaColunaPromo(nome) ? [nome] : colunasEnviadas;
+    for (const coluna of alvos) {
+      const arquivo = migrationDaColunaPromo(coluna);
+      if (arquivo) {
+        faltando.push(`a coluna ${coluna}`);
+        migrations.add(arquivo);
+      }
+    }
+  }
+  const lista = [...migrations].sort();
+  const maisNova = lista[lista.length - 1];
+  if (!maisNova || !faltando.length) return null;
+  return (
+    `Banco sem ${faltando.join(', ')} — aplique a migration ${maisNova}` +
+    (lista.length > 1 ? ` (e, se ainda faltarem, ${lista.slice(0, -1).join(', ')})` : '') +
+    ' e REINICIE o PostgREST (o NOTIFY sozinho não basta).'
+  );
+}
+
+const numPromo = (v: any) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+const strPromo = (v: any) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+interface PromocaoLida {
+  tipo: TipoPromocao;
+  /** Vocabulário do BANCO (QUALIFICATIVA vira QUALIFYING). */
+  promoType: string;
+  casaPromocao: string | null;
+  valorPromocao: number | null;
+  evento: string | null;
+  mercado: string | null;
+  casaCobertura: string | null;
+  oddPromocao: number | null;
+  oddCobertura: number | null;
+  aporteInformado: number | null;
+  lucroInformado: number | null;
+  roiInformado: number | null;
+  /** Teto de stake elegível (null = sem teto). Só para o fallback de investimento sem odds. */
+  tetoStake: number | null;
+  calcular: (coverStake: number | null) => ResultadoPromocao | null;
+  /** Colunas que só entram no INSERT quando o tipo/regulamento realmente as usa. */
+  colunasOpcionais: (calc: ResultadoPromocao | null) => Record<string, any>;
+}
+
+/**
+ * Lê o corpo de uma promoção — MESMO formato no registro e no preview — e devolve a entrada
+ * já normalizada + o fechamento que chama o core, ou uma mensagem pronta de 400.
+ *
+ * '' e null contam como ausentes: Number('') é 0, então campo vazio viraria R$ 0,00 válido.
+ */
+function lerPromocaoDoCorpo(body: any): { erro: string; lido?: undefined } | { erro?: undefined; lido: PromocaoLida } {
+  const b = body || {};
+  // Aceita snake_case (formulário e colunas) e camelCase (vocabulário do core): campo lido
+  // com a grafia errada volta null e a promoção DEGRADA EM SILÊNCIO — sem boost_pct o
+  // LUCRO_EXTRA cai para qualificativa crua, que é prejuízo garantido com cara de plano.
+  const n = (...chaves: string[]) => {
+    for (const k of chaves) {
+      const v = numPromo(b[k]);
+      if (v !== null) return v;
+    }
+    return null;
+  };
+  const flag = (...chaves: string[]) => chaves.some((k) => b[k] === true || b[k] === 'true');
+  const erros: string[] = [];
+  // Teto 0 é "sem teto" (é como o core trata); negativo é digitação errada e tem de doer.
+  const teto = (rotulo: string, ...chaves: string[]) => {
+    const v = n(...chaves);
+    if (v === null) return null;
+    if (v < 0) {
+      erros.push(`${rotulo} não pode ser negativo`);
+      return null;
+    }
+    return v > 0 ? v : null;
+  };
+  // Só para os percentuais de VALORIZAÇÃO de bônus (ficha, extra, cashback), que o core
+  // clampa em 0..1: 0 é entrada VÁLIDA (bônus que não vale nada), mas um "700" digitado por
+  // engano viraria 100% inventado em silêncio. Percentual de boost/cashback não entra aqui —
+  // lá o número não é clampado, então nada é inventado.
+  const pct = (rotulo: string, ...chaves: string[]) => {
+    const v = n(...chaves);
+    if (v === null) return null;
+    if (v < 0 || v > 100) {
+      erros.push(`${rotulo} tem de ficar entre 0 e 100 (é um percentual)`);
+      return null;
+    }
+    return v;
+  };
+
+  // Tipo desconhecido é ERRO, não default: a whitelist anterior coagia qualquer string para
+  // FREEBET_SNR e respondia success:true — matemática de freebet (custo zero) gravada sobre
+  // uma operação com dinheiro real na mesa. Ausente segue caindo no default histórico.
+  const promoTypeBruto = (strPromo(b.promo_type) ?? strPromo(b.tipo) ?? '').toUpperCase();
+  const conhecido =
+    (PROMO_TYPES_BANCO as readonly string[]).includes(promoTypeBruto) ||
+    (TIPOS_PROMOCAO as readonly string[]).includes(promoTypeBruto);
+  if (promoTypeBruto && !conhecido) {
+    return { erro: `promo_type inválido ("${promoTypeBruto}"). Válidos: ${PROMO_TYPES_BANCO.join(', ')}.` };
+  }
+  // Tradutores do core nas duas direções — não escreva um terceiro aqui.
+  const tipo = tipoDoPromoType(promoTypeBruto || 'FREEBET_SNR');
+  const promoType = promoTypeDoTipo(tipo);
+
+  const casaPromocao = strPromo(b.casa_promocao);
+  const casaCobertura = strPromo(b.casa_cobertura);
+  const evento = strPromo(b.evento);
+  const mercado = strPromo(b.mercado);
+  const valorPromocao = n('valor_promocao', 'valorPromocao', 'promoStake');
+  const oddPromocao = n('odd_promocao', 'oddPromocao', 'promoOdd');
+  const oddCobertura = n('odd_cobertura', 'oddCobertura', 'coverOdd');
   if ((oddPromocao !== null && oddPromocao <= 1) || (oddCobertura !== null && oddCobertura <= 1)) {
-    return res.status(400).json({ error: 'Odds devem ser maiores que 1.' });
+    return { erro: 'Odds devem ser maiores que 1.' };
   }
   // Valor <= 0 precisa falhar APONTANDO para si: sem isto o cálculo devolvia null e o
   // erro reclamava de valor_cobertura, mandando o usuário mexer no campo errado.
   if (valorPromocao !== null && valorPromocao <= 0) {
-    return res.status(400).json({ error: 'valor_promocao deve ser maior que zero.' });
+    return { erro: 'valor_promocao deve ser maior que zero.' };
   }
-  // Cobertura equalizada e lucro/ROI vêm de core/promocoes.ts — MESMA matemática que o
-  // Agente usa na skill calcular_cobertura_promocao (antes havia duas cópias da
-  // fórmula, e duas cópias divergem no primeiro ajuste). As CASAS entram no cálculo para
-  // a comissão de exchange (Bolsa de Aposta 1,5%) valer aqui também, como na skill.
-  const tipoPromo = promoType === 'QUALIFYING' ? ('QUALIFICATIVA' as const) : ('FREEBET_SNR' as const);
+
+  // Devolução da proteção: % da stake (com teto) ou valor direto em reais. Em bônus, o
+  // valor efetivo é menor que a face — quem faz esse desconto é o core.
+  const cashbackInformado = n('cashback');
+  // Devolução acima de 100% da stake não existe em regulamento nenhum, e o core NÃO clampa
+  // este percentual: um "500" digitado por engano virava cashback de R$ 500 sobre stake de
+  // R$ 100, aporte clampado em zero e lucro de R$ 100 gravado com ROI de 100%.
+  const cashbackPct = pct('cashback_pct', 'cashback_pct', 'cashbackPct');
+  // Default true (o core usa `!== false`): só desliga com false EXPLÍCITO no corpo.
+  const cashbackSoSePerder = !(b.cashback_so_se_perder === false || b.cashbackSoSePerder === false || b.cashback_so_se_perder === 'false');
+  const cashbackTeto = teto('cashback_teto', 'cashback_teto', 'cashbackTeto');
+  const cashbackEhBonus = flag('cashback_eh_bonus', 'cashbackEhBonus');
+  const valorBonusPct = pct('valor_bonus_pct', 'valor_bonus_pct', 'valorBonusPct');
+  // SRR: v da fórmula S×(odd−1+v). Ausente = 100 (ficha volta em dinheiro), decidido no core.
+  const valorFichaPct = pct('valor_ficha_pct', 'valor_ficha_pct', 'valorFichaPct');
+  // SUPERODD / LUCRO_EXTRA.
+  const oddPadrao = n('odd_padrao', 'oddPadrao');
+  const tetoStake = teto('teto_stake', 'teto_stake', 'tetoStake');
+  const boostPct = n('boost_pct', 'boostPct');
+  const boostSobreStake = flag('boost_sobre_stake', 'boostSobreStake');
+  const tetoExtra = teto('teto_extra', 'teto_extra', 'tetoExtra');
+  const extraEmBonus = flag('extra_em_bonus', 'extraEmBonus');
+  const valorExtraPct = pct('valor_extra_pct', 'valor_extra_pct', 'valorExtraPct');
+  // Teto de regulamento (qualquer tipo).
+  const tetoGanho = teto('teto_ganho', 'teto_ganho', 'tetoGanho');
+  const tetoIncideBruto = (strPromo(b.teto_incide_sobre) ?? strPromo(b.tetoIncideSobre) ?? '').toUpperCase();
+  if (tetoIncideBruto && tetoIncideBruto !== 'GANHO' && tetoIncideBruto !== 'RETORNO') {
+    return {
+      erro:
+        `teto_incide_sobre inválido ("${tetoIncideBruto}"): use GANHO ("ganhe até R$ X", limita o lucro) ou ` +
+        'RETORNO ("retorno máximo R$ X", limita o pagamento inteiro). Não são a mesma fórmula.',
+    };
+  }
+  const tetoIncideSobre = tetoIncideBruto === 'RETORNO' ? ('RETORNO' as const) : tetoIncideBruto === 'GANHO' ? ('GANHO' as const) : null;
+  if (oddPadrao !== null && oddPadrao <= 1) {
+    return { erro: 'odd_padrao (a odd NORMAL do mercado, sem o boost) deve ser maior que 1.' };
+  }
+  if (boostPct !== null && boostPct < 0) {
+    return { erro: 'boost_pct não pode ser negativo.' };
+  }
+  if (erros.length) return { erro: `Valores fora da faixa: ${erros.join('; ')}.` };
+
   // Aporte 0/negativo = ausente (0 não é uma cobertura válida): antes ele era gravado
   // como 0 mas o lucro vinha do aporte equalizado — número que nunca existiu na mesa.
-  const aporteInformado = (num(b.valor_cobertura) ?? 0) > 0 ? num(b.valor_cobertura) : null;
+  const aporteBruto = n('valor_cobertura', 'valorCobertura', 'coverStake');
+  const aporteInformado = (aporteBruto ?? 0) > 0 ? aporteBruto : null;
+
+  // As CASAS entram no cálculo para a comissão de exchange (Bolsa de Aposta 1,5%) valer
+  // aqui como vale na skill do Agente.
   const calcular = (coverStake: number | null) =>
     valorPromocao !== null && oddPromocao !== null && oddCobertura !== null
       ? calcularPromocao({
-          tipo: tipoPromo,
+          tipo,
           promoStake: valorPromocao,
           promoOdd: oddPromocao,
           coverOdd: oddCobertura,
           coverStake,
+          cashback: cashbackInformado,
+          cashbackPct,
+          cashbackTeto,
+          cashbackEhBonus,
+          valorBonusPct,
+          cashbackSoSePerder,
+          valorFichaPct,
+          oddPadrao,
+          tetoStake,
+          boostPct,
+          boostSobreStake,
+          tetoExtra,
+          extraEmBonus,
+          valorExtraPct,
+          tetoGanho,
+          ...(tetoIncideSobre ? { tetoIncideSobre } : {}),
           casaPromo: casaPromocao,
           casaCobertura,
         })
       : null;
 
-  const calc = calcular(aporteInformado);
-  let valorCobertura = aporteInformado;
+  const comBoost = ehTipoComBoost(tipo);
+  const temCashback = tipo === 'PROTECAO' || (cashbackInformado ?? 0) > 0 || (cashbackPct ?? 0) > 0;
+  const usaColunasDa022 = tipo === 'FREEBET_SRR' || comBoost || tetoStake !== null || tetoGanho !== null;
+  // Degradação sem migration: coluna nova só entra no INSERT quando o tipo/regulamento
+  // realmente a usa. O PostgREST rejeita o INSERT INTEIRO por uma coluna desconhecida, então
+  // mandar sempre as 13 colunas novas quebraria freebet/qualificativa/proteção num banco
+  // que ainda não recebeu a 022.
+  const colunasOpcionais = (calc: ResultadoPromocao | null): Record<string, any> => {
+    const cols: Record<string, any> = {};
+    if (temCashback) {
+      // Valor de FACE já com o teto aplicado (quem aplica é o core).
+      cols.cashback = calc ? calc.cashbackNominal : cashbackInformado;
+      cols.cashback_pct = cashbackPct;
+      cols.cashback_teto = cashbackTeto;
+      cols.cashback_eh_bonus = cashbackEhBonus;
+      cols.valor_bonus_pct = cashbackEhBonus ? (valorBonusPct ?? VALOR_BONUS_PADRAO_PCT) : null;
+      // Só grava quando é FALSE (o caso raro): assim uma proteção normal continua entrando
+      // em banco sem a 022, e a linha incondicional não é relida como condicional.
+      if (!cashbackSoSePerder) cols.cashback_so_se_perder = false;
+    }
+    if (tipo === 'FREEBET_SRR') {
+      // Sem gravar o v a linha não reproduz: ficha em dinheiro (100) e ficha em bônus (70)
+      // dão lucros diferentes sob o MESMO tipo.
+      cols.valor_ficha_pct = valorFichaPct ?? 100;
+    }
+    if (comBoost) {
+      if (tipo === 'SUPERODD') cols.odd_padrao = oddPadrao;
+      if (tipo === 'LUCRO_EXTRA') {
+        cols.boost_pct = boostPct;
+        cols.boost_sobre_stake = boostSobreStake;
+      }
+      cols.teto_extra = tetoExtra;
+      cols.extra_em_bonus = extraEmBonus;
+      cols.valor_extra_pct = extraEmBonus ? (valorExtraPct ?? VALOR_BONUS_PADRAO_PCT) : null;
+      // Derivados do core: face e valor efetivo do extra. Ficam gravados para a UI e o
+      // histórico não reimplementarem o boost (cópia divergente = número que não foi o executado).
+      if (calc) {
+        cols.extra_nominal = calc.extraNominal;
+        cols.extra_efetivo = calc.extraEfetivo;
+      }
+    }
+    // Tetos são de REGULAMENTO, não de tipo: entram quando informados, em qualquer tipo.
+    if (tetoStake !== null) {
+      cols.teto_stake = tetoStake;
+      // valor_promocao guarda o que o usuário digitou; a stake que FOI À MESA é esta. Sem
+      // gravá-la, todo leitor da tabela precisa lembrar de aplicar min(valor, teto) — e o
+      // card "Investido" já somava R$ 128,57 onde só R$ 58,57 saíram do bolso.
+      if (calc) cols.stake_elegivel = calc.stakeElegivel;
+    }
+    if (tetoGanho !== null) {
+      cols.teto_ganho = tetoGanho;
+      cols.teto_incide_sobre = tetoIncideSobre ?? 'GANHO'; // default explícito do core
+    }
+    // odd_efetiva_promo só é gravada onde a 022 já é obrigatória por outra coluna: nos tipos
+    // antigos ela é a própria odd_promocao (nada a somar) e não vale arriscar o INSERT.
+    if (calc && usaColunasDa022) cols.odd_efetiva_promo = calc.oddEfetivaPromo;
+    return cols;
+  };
+
+  return {
+    lido: {
+      tipo, promoType, casaPromocao, valorPromocao, evento, mercado, casaCobertura,
+      oddPromocao, oddCobertura, aporteInformado, tetoStake,
+      lucroInformado: n('lucro'),
+      roiInformado: n('roi_pct', 'roiPct'),
+      calcular, colunasOpcionais,
+    },
+  };
+}
+
+// POST - registra uma promoção no histórico. promo_type escolhe a matemática (ver o
+// cabeçalho do bloco); a conta em si é toda do core.
+// Derivações quando o campo vem vazio: valor_cobertura = cobertura EQUALIZADA (iguala o
+// lucro dos dois cenários) a partir de valor+odd da promoção e odd de cobertura;
+// lucro = pior cenário entre os dois, na fórmula do tipo; ROI = lucro/investimento real.
+app.post('/api/promocoes', async (req, res) => {
+  const r2 = (v: number) => Math.round(v * 100) / 100;
+  const { erro, lido: p } = lerPromocaoDoCorpo(req.body);
+  if (!p) return res.status(400).json({ error: erro || 'Corpo da promoção inválido.' });
+
+  const calc = p.calcular(p.aporteInformado);
+  let valorCobertura = p.aporteInformado;
   if (valorCobertura === null && calc) valorCobertura = calc.coverStakeEqualizado;
   const faltando = [
-    !casaPromocao && 'casa_promocao', valorPromocao === null && 'valor_promocao',
-    !evento && 'evento', !casaCobertura && 'casa_cobertura',
-    valorCobertura === null && 'valor_cobertura (ou odds das duas pernas p/ derivar)',
+    !p.casaPromocao && 'casa_promocao', p.valorPromocao === null && 'valor_promocao',
+    !p.evento && 'evento', !p.casaCobertura && 'casa_cobertura',
+    // Aporte DERIVADO igual a zero também é ausente: o core clampa o equalizado em zero
+    // quando a devolução efetiva passa do retorno bruto, e a linha ia para o banco com
+    // valor_cobertura = 0,00 + o "lucro" de uma operação sem cobertura nenhuma. O aporte
+    // INFORMADO como 0 já era recusado, e a skill gêmea que grava na MESMA tabela também
+    // recusa — era a única porta que aceitava.
+    !(valorCobertura! > 0) && 'valor_cobertura (ou odds das duas pernas p/ derivar)',
   ].filter(Boolean);
   if (faltando.length) {
     return res.status(400).json({ error: `Campos obrigatórios ausentes/inválidos: ${faltando.join(', ')}` });
   }
 
-  // Investimento real: freebet não é dinheiro do usuário — só a cobertura conta.
-  const investido = promoType === 'FREEBET_SNR' ? valorCobertura! : valorPromocao! + valorCobertura!;
+  // Recalcula com o aporte efetivamente gravado (pode ter vindo do corpo, não do equalizado).
+  const comAporte = p.calcular(valorCobertura);
+  let lucro = p.lucroInformado;
   if (lucro === null) {
-    if (oddPromocao === null || oddCobertura === null) {
+    if (p.oddPromocao === null || p.oddCobertura === null) {
       return res.status(400).json({ error: 'Informe o lucro OU as odds das duas pernas (para o cálculo automático).' });
     }
-    // Recalcula com o aporte efetivamente gravado (pode ter vindo do corpo, não do equalizado).
-    const comAporte = calcular(valorCobertura);
     if (!comAporte) return res.status(400).json({ error: 'Valores inválidos para o cálculo do lucro (valor > 0 e odds > 1).' });
     lucro = comAporte.lucroGarantido;
   }
-  const roiPct = num(b.roi_pct) ?? (investido > 0 ? r2((lucro / investido) * 100) : null);
+  // Investimento real = dinheiro que SAI DO BOLSO: quem já calculou isso é o core
+  // (investimentoReal = custo do tipo + aporte), com a stake ELEGÍVEL e a polaridade certa
+  // de ehFreebetSemCusto (SNR e SRR não contam a ficha; havia duas regras opostas no repo).
+  // Sem odds não há cálculo — aí a conta é feita aqui, com a MESMA regra: freebet não conta a
+  // ficha, e a stake elegível é o próprio valor (teto de stake sem odds não muda nada).
+  // Somar a stake digitada quando o teto morde gravaria investimento que nunca foi à mesa e
+  // um ROI que divergiria do lucro (calculado só sobre a parte elegível).
+  const investido = comAporte
+    ? comAporte.investimentoReal
+    : ehFreebetSemCusto(p.tipo)
+      ? valorCobertura!
+      : Math.min(p.valorPromocao!, p.tetoStake ?? p.valorPromocao!) + valorCobertura!;
+  const roiPct = p.roiInformado ?? (investido > 0 ? r2((lucro / investido) * 100) : null);
+
+  const linha: Record<string, any> = {
+    promo_type: p.promoType,
+    casa_promocao: p.casaPromocao,
+    valor_promocao: p.valorPromocao,
+    evento: p.evento,
+    mercado: p.mercado,
+    casa_cobertura: p.casaCobertura,
+    valor_cobertura: valorCobertura,
+    odd_promocao: p.oddPromocao,
+    odd_cobertura: p.oddCobertura,
+    roi_pct: roiPct,
+    lucro,
+    ...p.colunasOpcionais(comAporte),
+  };
 
   try {
-    const { data, error } = await supabase
-      .from('promo_surebets')
-      .insert({
-        promo_type: promoType,
-        casa_promocao: casaPromocao,
-        valor_promocao: valorPromocao,
-        evento,
-        mercado: str(b.mercado),
-        casa_cobertura: casaCobertura,
-        valor_cobertura: valorCobertura,
-        odd_promocao: oddPromocao,
-        odd_cobertura: oddCobertura,
-        roi_pct: roiPct,
-        lucro,
-      })
-      .select()
-      .single();
+    const { data, error } = await supabase.from('promo_surebets').insert(linha).select().single();
     if (error) throw error;
-    res.json({ success: true, promocao: data });
+    res.json({ success: true, promocao: data, avisos: comAporte?.avisos || [] });
   } catch (error: any) {
+    // Schema ANTES de isMissingTable: o 42703 de coluna ausente ("column ... does not
+    // exist") casa com a regex de tabela ausente e mandaria aplicar a 018 sem necessidade.
+    const pendencia = erroDeSchemaPromo(error, p.promoType, Object.keys(linha));
+    if (pendencia) return res.status(500).json({ error: pendencia });
     if (isMissingTable(error)) {
-      return res.status(500).json({ error: 'Tabela promo_surebets ausente no banco — aplique a migration 018.' });
+      return res.status(500).json({ error: 'Tabela promo_surebets ausente no banco — aplique a migration 018_promo_surebets.sql (e as seguintes).' });
     }
     res.status(500).json({ error: error.message || 'Erro ao salvar promoção' });
   }
+});
+
+// POST - PREVIEW: mesma leitura de corpo e MESMA matemática do registro, sem gravar nada.
+// É daqui que o formulário tira aporte da cobertura, lucro dos dois cenários e avisos: a
+// alternativa é o frontend reimplementar as fórmulas, e duas cópias divergem no primeiro
+// ajuste — divergir aqui significa mandar o usuário aportar valor errado na casa.
+// Sem autenticação nova (o app não tem) e sem efeito colateral: só lê o corpo e calcula.
+app.post('/api/promocoes/calcular', (req, res) => {
+  const { erro, lido: p } = lerPromocaoDoCorpo(req.body);
+  if (!p) return res.status(400).json({ ok: false, error: erro || 'Corpo da promoção inválido.' });
+  // Aqui casa/evento não importam (nada é gravado), mas sem valor e as duas odds não existe
+  // conta nenhuma — avisar qual campo falta é melhor que devolver zeros plausíveis.
+  const faltando = [
+    p.valorPromocao === null && 'valor_promocao',
+    p.oddPromocao === null && 'odd_promocao',
+    p.oddCobertura === null && 'odd_cobertura',
+  ].filter(Boolean);
+  if (faltando.length) {
+    return res.status(400).json({ ok: false, error: `Sem esses campos não há cálculo: ${faltando.join(', ')}.` });
+  }
+  const calculo = p.calcular(p.aporteInformado);
+  if (!calculo) {
+    return res.status(400).json({ ok: false, error: 'Valores inválidos para o cálculo (valor_promocao > 0, odd_promocao > 1 e odd_cobertura > 1).' });
+  }
+  res.json({ ok: true, calculo });
 });
 
 // DELETE - remove uma promoção do histórico

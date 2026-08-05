@@ -1203,3 +1203,224 @@ h1, h2, h3, h4 {
   .md h1 { font-size: 16px; }
   .md h2 { font-size: 15px; }
 }
+
+/* ============================================================================
+   CHIPS DE TIPO DA ABA PROMOÇÕES (6 tipos em 3 grupos).
+
+   Fica no FIM do arquivo pelo mesmo motivo da seção do chat: as classes são novas e não
+   colidem com nada acima — os chips são <button> sem a classe .btn, então nenhum override
+   de componente precisa vencer daqui.
+
+   Mobile-first: em ~480px (viewport real do F8 Ultra) os 6 chips numa linha só cortavam a
+   tela, então os GRUPOS empilham em coluna e os chips de cada grupo dividem a linha. O JSX
+   NÃO define display/flex-direction — se definisse, o @media não teria como vencer o inline.
+   ========================================================================== */
+.promo-tipos { display: flex; flex-direction: column; gap: 10px; }
+/* min-width: 0 é obrigatório: filho de flex-coluna usa largura de CONTEÚDO, e o chip
+   ("🎟️ Qualificativa") esticaria o grupo além da tela (a mesma armadilha do .resp-stack). */
+.promo-tipo-grupo { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.promo-tipo-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+/* `flex: 1 1 auto` SEM min-width: 0 de propósito — os chips repartem a linha, mas nunca
+   encolhem abaixo do próprio texto (que é `nowrap`): se não couberem, o wrap joga o chip
+   para a linha de baixo em vez de vazar da tela. Com min-width: 0 o texto transbordaria
+   o botão e o body{overflow-x:hidden} esconderia o estrago. */
+.promo-tipo-chips > button { flex: 1 1 auto; text-align: center; }
+@media (min-width: 769px) {
+  /* No desktop os 3 grupos voltam para a mesma linha, cada chip com sua largura natural. */
+  .promo-tipos { flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px 18px; }
+  .promo-tipo-chips > button { flex: 0 0 auto; }
+}
+
+/* ============================================================================
+   GUIA DAS MODALIDADES DE PROMOÇÃO (modal do botão "i" da aba Promoções).
+
+   Fim do arquivo pelo mesmo motivo dos chips acima: `.promo-guia-modal` precisa VENCER o
+   `.modal-content` (max-width: 480px) definido lá em cima e o `@media (max-width: 768px)`
+   que reduz o modal no celular — mesma especificidade, então quem vem depois ganha.
+
+   `max-width: min(720px, 94vw)` e não 720px puro: como esta regra é incondicional, um
+   `max-width: 720px` aqui apagaria o `max-width: 94%` do @media mobile e o modal passaria a
+   vazar a tela (o body{overflow-x:hidden} esconderia o estrago em vez de mostrar).
+   ========================================================================== */
+.promo-guia-modal { max-width: min(720px, 94vw); }
+
+/* Botão "i" redondo ao lado do título do formulário. */
+.promo-guia-btn {
+  width: 20px; height: 20px; min-height: 20px; padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  background: rgba(16, 185, 129, 0.12);
+  color: #10b981;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.promo-guia-btn:hover { background: rgba(16, 185, 129, 0.28); transform: scale(1.08); }
+
+/* Atalho em texto, na linha de resumo do tipo ativo. */
+.promo-guia-link {
+  background: none; border: none; padding: 0; margin: 0;
+  font: inherit; font-weight: 700;
+  color: #10b981; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 3px;
+  vertical-align: baseline;
+}
+.promo-guia-link:hover { text-decoration: underline; }
+
+/* Blocos colapsáveis (árvore de decisão e regras de regulamento). */
+.promo-guia-arvore {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+:root.light .promo-guia-arvore { background: rgba(15, 23, 42, 0.03); }
+.promo-guia-arvore > summary {
+  cursor: pointer; font-size: 12px; font-weight: 700;
+  color: var(--text-secondary);
+}
+.promo-guia-no { margin-top: 10px; font-size: 12px; line-height: 1.45; }
+.promo-guia-pergunta { color: var(--text-primary); font-weight: 700; }
+.promo-guia-resposta { color: var(--text-secondary); margin-top: 2px; padding-left: 2px; }
+.promo-guia-resposta .sim,
+.promo-guia-resposta .nao {
+  display: inline-block; min-width: 34px;
+  font-size: 10px; font-weight: 800; letter-spacing: 0.04em;
+  margin-right: 5px;
+}
+.promo-guia-resposta .sim { color: #10b981; }
+.promo-guia-resposta .nao { color: var(--text-muted); }
+
+/* Chips que trocam o VERBETE (não o tipo do formulário). */
+.promo-guia-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.promo-guia-chip {
+  padding: 5px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+}
+:root.light .promo-guia-chip { background: rgba(15, 23, 42, 0.04); }
+.promo-guia-chip.ativo { background: rgba(16, 185, 129, 0.1); }
+
+.promo-guia-titulo { font-size: 14px; font-weight: 800; }
+.promo-guia-texto { font-size: 12.5px; line-height: 1.5; color: var(--text-secondary); margin: 6px 0 0; }
+.promo-guia-secao {
+  margin-top: 14px; font-size: 10px; font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+/* `list-style: disc` explícito: o preflight do Tailwind zera o marcador de toda <ul>, e sem
+   ele as frases de "como a casa anuncia"/armadilhas viravam um bloco de texto indentado. */
+.promo-guia-lista {
+  margin: 6px 0 0; padding-left: 18px;
+  list-style: disc outside;
+  font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+}
+.promo-guia-lista > li { margin-bottom: 4px; }
+
+/* Fórmula: bloco monoespaçado que ROLA SOZINHO. Sem o overflow-x aqui as linhas
+   ("R = S × odd_padrao + v × min(...)") empurram a largura do modal inteiro. */
+.promo-guia-formula {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.55);
+  color: #cbd5e1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.6;
+  white-space: pre;
+  overflow-x: auto;
+}
+:root.light .promo-guia-formula { background: rgba(15, 23, 42, 0.06); color: #0f172a; }
+
+.promo-guia-exemplo {
+  margin-top: 8px; padding: 10px 12px;
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid rgba(16, 185, 129, 0.7);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+:root.light .promo-guia-exemplo { background: rgba(15, 23, 42, 0.03); }
+.promo-guia-exemplo-titulo { font-size: 12px; font-weight: 700; color: var(--text-primary); margin-bottom: 6px; }
+/* Rótulo à esquerda, número à direita; em coluna no celular (nunca corta o número). */
+.promo-guia-linha {
+  display: flex; flex-wrap: wrap; gap: 2px 10px;
+  justify-content: space-between;
+  font-size: 12px; line-height: 1.45;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+.promo-guia-linha > strong { color: var(--text-primary); font-weight: 700; }
+.promo-guia-linha.forte { border-top: 1px dashed var(--panel-border); margin-top: 4px; padding-top: 5px; }
+.promo-guia-linha.forte > strong { color: #10b981; }
+.promo-guia-leitura { margin-top: 7px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
+
+.promo-guia-nao-confunda {
+  margin-top: 14px; padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 12px; line-height: 1.5;
+  color: var(--text-secondary);
+}
+.promo-guia-nao-confunda > strong { color: #f59e0b; }
+
+/* ============================================================================
+   FAIXA DE SINCRONIA COM O SURERADAR (topo do radar).
+
+   Mesmo motivo dos blocos acima para estar no fim: classes novas, nenhum override de
+   componente para vencer. `.sync-faixa` usa .glass-panel só pelo fundo/borda.
+
+   Mobile-first: as células empilham em coluna (em ~480px cinco pares rótulo/valor numa
+   linha só cortariam a tela) e viram linha a partir de 769px.
+   ========================================================================== */
+.sync-faixa { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+/* No celular as células vão em GRID de 2 colunas (empilhadas em uma coluna a faixa ficava
+   com 6 linhas de altura); no desktop viram uma linha só. */
+.sync-linha { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; min-width: 0; }
+
+.sync-badge {
+  grid-column: 1 / -1;
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 800; white-space: nowrap;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--panel-border);
+  cursor: pointer;
+}
+:root.light .sync-badge { background: rgba(15, 23, 42, 0.04); }
+
+.sync-celula { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sync-celula > strong { font-size: 12.5px; font-weight: 800; color: var(--text-primary); }
+.sync-rotulo {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+
+.sync-acao {
+  align-self: flex-start;
+  padding: 5px 10px; font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; gap: 4px;
+  border: none; color: #fff;
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+}
+
+.sync-detalhe {
+  border-top: 1px dashed var(--panel-border);
+  padding-top: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 11.5px; line-height: 1.5; color: var(--text-secondary);
+}
+.sync-reco { color: var(--text-primary); font-weight: 700; }
+.sync-grade { display: grid; grid-template-columns: 1fr; gap: 3px 18px; }
+.sync-grade strong { color: var(--text-primary); }
+.sync-aviso { color: #f59e0b; }
+
+@media (min-width: 769px) {
+  .sync-linha { display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px 22px; }
+  .sync-acao { margin-left: auto; }
+  .sync-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -1,6 +1,7 @@
 /**
- * SKILLS DE CÁLCULO — surebet, cobertura de promoção (freebet SNR/qualificativa),
- * otimização da odd de freebet e múltipla qualificadora com cobertura sequencial.
+ * SKILLS DE CÁLCULO — surebet, cobertura de promoção nos 6 tipos do core (freebet SNR/SRR,
+ * qualificativa, proteção, super odd, lucro extra), otimização da odd de freebet e múltipla
+ * qualificadora com cobertura sequencial.
  *
  * Por que ferramenta e não "o modelo calcula": LLM erra aritmética de centavo e o
  * usuário digita o aporte na casa. Aqui a matemática é a MESMA de core/calculator.ts e
@@ -12,10 +13,17 @@ import { calcularArbitragem } from '../../../core/calculator';
 import {
   calcularPromocao,
   calcularMultiplaQualificadora,
+  cashbackParaZerar,
   curvaRetencaoFreebet,
+  ehFreebetSemCusto,
+  ehTipoComBoost,
   margemImplicita,
   oddIdealFreebet,
+  ResultadoPromocao,
   TipoPromocao,
+  tipoPromocaoDeTexto,
+  TIPOS_PROMOCAO,
+  VALOR_BONUS_PADRAO_PCT,
 } from '../../../core/promocoes';
 import { bancaParaAlertas } from '../../../core/bancaAtiva';
 import { canonizarCasa } from '../../../signals/casasAliases';
@@ -28,6 +36,17 @@ import { normalizarMercado } from '../../../arbitrage/markets';
 import { parseKickoff } from '../../../arbitrage/matcher';
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
+
+/**
+ * null/''/NaN → undefined, para percentual OPCIONAL que segue para o core.
+ *
+ * Provedores de function calling mandam `null` em parâmetro opcional, e o núcleo lê
+ * Number(null) como 0 — que é *entrada válida* em valorBonusPct ("esse bônus não vale
+ * nada"). Sem esta limpeza, um null vira 0 e a devolução em bônus é contada como zero em
+ * silêncio, quando o certo é cair no default de 70%.
+ */
+const pctOpcional = (v: any): number | undefined =>
+  v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v);
 
 export const skillCalcularSurebet: Skill = {
   nome: 'calcular_surebet',
@@ -43,10 +62,10 @@ export const skillCalcularSurebet: Skill = {
     properties: {
       odd1: { type: 'number' },
       odd2: { type: 'number' },
-      casa1: { type: 'string', description: 'Nome da casa da perna 1 (resolve comissão de exchange).' },
+      casa1: { type: 'string' },
       casa2: { type: 'string' },
-      investimento_total: { type: 'number', description: 'Total a investir. Vazio = usa a banca ativa do painel.' },
-      arredondar_para: { type: 'number', description: 'Passo de arredondamento do aporte (ex.: 1 = reais inteiros; default 0.01).' },
+      investimento_total: { type: 'number', description: 'Vazio = banca ativa do painel.' },
+      arredondar_para: { type: 'number', description: 'default 0.01' },
     },
     required: ['odd1', 'odd2'],
     additionalProperties: false,
@@ -116,34 +135,103 @@ export const skillCalcularSurebet: Skill = {
   },
 };
 
+/**
+ * Instrução OPERACIONAL por tipo — o que o usuário faz na casa, na ordem.
+ *
+ * Era uma escada com `else`, e o `else` entregava o texto da QUALIFICATIVA para todo tipo
+ * que não fosse SNR ou proteção: quem pedia super odd recebia "aposte e cubra" sem o
+ * opt-in (sem ele a casa paga a odd normal e a conta inteira muda) e quem pedia SRR
+ * recebia a doutrina errada de odd. O switch é exaustivo de propósito — tipo novo no core
+ * quebra o TYPECHECK aqui em vez de se disfarçar de qualificativa na tela.
+ */
+function comoExecutarPromocao(tipo: TipoPromocao, res: ResultadoPromocao): string {
+  // Sempre a stake ELEGÍVEL, nunca a digitada: com teto de stake ("super odd até R$ 30")
+  // mandar apostar o valor cheio joga o excedente na odd normal da casa e desequaliza tudo.
+  const promo = `R$ ${res.stakeElegivel.toFixed(2)} @${res.promoOdd}`;
+  const cobrir = `cubra com R$ ${res.coverStake.toFixed(2)} @${res.coverOdd} no mercado oposto, em OUTRA casa`;
+  const fecho = `Confirme as odds na tela antes de digitar os aportes; nos dois cenários o resultado é ~R$ ${res.lucroGarantido.toFixed(2)}.`;
+  switch (tipo) {
+    case 'FREEBET_SNR':
+      return `Aposte a freebet de ${promo} (a ficha NÃO volta no green) e ${cobrir}. ${fecho}`;
+    case 'FREEBET_SRR':
+      return (
+        `Aposte a freebet de ${promo} e ${cobrir} — o aporte é MAIOR que na SNR porque a ficha volta no green. ` +
+        `Se ainda pode escolher o jogo, desça para a MENOR odd que o regulamento aceita: na SRR a retenção cai com a odd. ${fecho}`
+      );
+    case 'QUALIFICATIVA':
+      return `Aposte ${promo} (qualificadora, dinheiro real do bolso) e ${cobrir}. ${fecho}`;
+    case 'PROTECAO':
+      return (
+        `Ative a promoção ANTES de apostar. Aposte ${promo} na casa da proteção e ${cobrir}. ` +
+        `Se a promo perder você recebe R$ ${res.cashbackNominal.toFixed(2)} de devolução` +
+        `${res.cashbackEhBonus ? ' EM BÔNUS (ainda precisa converter)' : ''}. ${fecho}`
+      );
+    case 'SUPERODD':
+      return (
+        `Faça o OPT-IN da super odd ANTES da aposta (sem ele a casa paga a odd normal) e aposte ${promo}. Depois ${cobrir}` +
+        `${
+          res.extraEmBonus
+            ? `. O excedente de R$ ${res.extraNominal.toFixed(2)} cai em BÔNUS, então no green o caixa do dia é R$ ${res.lucroEmCaixaSePromoGanha.toFixed(2)}`
+            : ''
+        }. ${fecho}`
+      );
+    case 'LUCRO_EXTRA':
+      return (
+        `Ative o lucro extra ANTES da aposta e aposte ${promo} (extra de R$ ${res.extraNominal.toFixed(2)} de face` +
+        `${res.extraEmBonus ? `, valendo R$ ${res.extraEfetivo.toFixed(2)} em bônus` : ', em caixa'}). Depois ${cobrir}. ${fecho}`
+      );
+  }
+  const naoPrevisto: never = tipo;
+  return `Tipo de promoção sem instrução própria (${String(naoPrevisto)}) — leia o regulamento antes de executar.`;
+}
+
 export const skillCalcularPromocao: Skill = {
   nome: 'calcular_cobertura_promocao',
   resumo:
-    'Cobertura de freebet SNR ou qualificativa (com cashback opcional): aporte exato, lucro nos dois cenários, lucro garantido, ROI e retenção.',
+    'Cobertura de promoção nos 6 tipos (freebet SNR/SRR, qualificativa, proteção, super odd, lucro extra): aporte, lucro dos 2 cenários, garantido, ROI, retenção e piso do boost.',
   grupo: 'calculo',
   descricao:
-    'Calcula a cobertura de uma aposta de PROMOÇÃO: freebet SNR (a ficha não volta) ou qualificativa ' +
-    '(dinheiro real), com cashback opcional. Devolve o aporte exato da cobertura, o lucro nos dois cenários, ' +
-    'o lucro garantido, ROI e a RETENÇÃO da freebet. Use sempre que o usuário falar de freebet, aposta extra, ' +
-    'bônus, aposta qualificadora ou "quanto cubro".',
+    'Calcula a cobertura de uma aposta de PROMOÇÃO em qualquer um dos 6 tipos: freebet SNR (a ficha não volta), ' +
+    'freebet SRR (a ficha volta no green), qualificativa (dinheiro real), PROTEÇÃO (a casa devolve X% se a aposta ' +
+    'perder), SUPER ODD (odd turbinada acima do mercado) e LUCRO EXTRA (+X% de lucro por cima). Devolve o aporte ' +
+    'exato da cobertura, o lucro nos dois cenários, o lucro garantido, ROI, a RETENÇÃO da freebet, a odd efetiva da ' +
+    'perna promocional e o extra mínimo que faz o boost pagar a operação. Use sempre que o usuário falar de freebet, ' +
+    'aposta extra, bônus, aposta qualificadora, "aposta perdida de volta"/cashback/seguro, odd turbinada/aumentada, ' +
+    'lucro extra ou "quanto cubro".',
   parametros: {
     type: 'object',
     properties: {
-      tipo: { type: 'string', description: 'FREEBET_SNR (ficha não retorna) ou QUALIFICATIVA (dinheiro real).' },
-      valor_promocao: { type: 'number', description: 'Valor da freebet ou stake real da qualificadora.' },
-      odd_promocao: { type: 'number', description: 'Odd da perna promocional.' },
-      odd_cobertura: { type: 'number', description: 'Odd do mercado OPOSTO na casa de cobertura.' },
-      aporte_cobertura: { type: 'number', description: 'Aporte já feito. Vazio = calcula o que EQUALIZA.' },
-      cashback: { type: 'number', description: 'Cashback em reais.' },
-      cashback_so_se_perder: { type: 'boolean', description: 'true (default) = só se a perna promo perder.' },
+      // enum em vez de lista em prosa: a lista dos 6 tipos passa de 70 caracteres e chegaria
+      // TRUNCADA ao modelo (o último tipo simplesmente desapareceria do schema), além de
+      // custar mais tokens. O enum ainda RESTRINGE a saída do provedor ao vocabulário do core.
+      tipo: { type: 'string', enum: [...TIPOS_PROMOCAO] },
+      valor_promocao: { type: 'number', description: 'Valor da freebet ou stake real.' },
+      odd_promocao: { type: 'number' },
+      odd_cobertura: { type: 'number', description: 'Do mercado OPOSTO.' },
+      aporte_cobertura: { type: 'number', description: 'Vazio = o que EQUALIZA.' },
+      cashback: { type: 'number', description: 'Devolução em reais.' },
+      cashback_pct: { type: 'number', description: '% da stake, se perder (ex.: 50).' },
+      cashback_teto: { type: 'number', description: 'Teto da devolução, em reais.' },
+      // Um flag só para "o benefício vem em BÔNUS": é o MESMO fato do regulamento na
+      // devolução e no extra do boost. valor_bonus_pct, valor_extra_pct, teto_extra,
+      // teto_ganho, boost_sobre_stake e valor_ficha_pct existem no core mas ficam FORA do
+      // schema: os defaults cobrem o caso normal e cada param pesa em TODA rodada (cota da Groq).
+      cashback_eh_bonus: { type: 'boolean', description: `true = devolução/extra em bônus (~${VALOR_BONUS_PADRAO_PCT}%).` },
+      cashback_so_se_perder: { type: 'boolean', description: 'true (default) = só se a promo perder.' },
+      odd_padrao: { type: 'number', description: 'SUPERODD: a odd NORMAL, sem o boost.' },
+      boost_pct: { type: 'number', description: 'LUCRO_EXTRA: % de lucro extra (ex.: 30).' },
+      teto_stake: { type: 'number', description: 'Stake máxima que a promoção aceita.' },
       casa_promocao: { type: 'string' },
-      casa_cobertura: { type: 'string', description: 'Para descontar comissão de exchange.' },
+      casa_cobertura: { type: 'string' },
     },
     required: ['valor_promocao', 'odd_promocao', 'odd_cobertura'],
     additionalProperties: false,
   },
   async executar(args: any) {
-    const tipo: TipoPromocao = /QUALIF/i.test(`${args?.tipo}`) ? 'QUALIFICATIVA' : 'FREEBET_SNR';
+    const tipo = tipoPromocaoDeTexto(args?.tipo);
+    const comBoost = ehTipoComBoost(tipo);
+    const ehFreebet = ehFreebetSemCusto(tipo);
+    const emBonus = args?.cashback_eh_bonus === true;
     const res = calcularPromocao({
       tipo,
       promoStake: Number(args?.valor_promocao),
@@ -151,21 +239,91 @@ export const skillCalcularPromocao: Skill = {
       coverOdd: Number(args?.odd_cobertura),
       coverStake: args?.aporte_cobertura,
       cashback: args?.cashback,
+      cashbackPct: args?.cashback_pct,
+      cashbackTeto: args?.cashback_teto,
+      cashbackEhBonus: emBonus,
+      valorBonusPct: pctOpcional(args?.valor_bonus_pct),
       cashbackSoSePerder: args?.cashback_so_se_perder,
+      oddPadrao: args?.odd_padrao,
+      tetoStake: args?.teto_stake,
+      boostPct: args?.boost_pct,
+      // Fora dos tipos com boost o campo não significa nada: marcar extraEmBonus numa
+      // proteção sujaria a resposta com um "extra em bônus" que não existe na operação.
+      extraEmBonus: comBoost && emBonus,
       casaPromo: args?.casa_promocao ? canonizarCasa(args.casa_promocao) : null,
       casaCobertura: args?.casa_cobertura ? canonizarCasa(args.casa_cobertura) : null,
     });
     if (!res) return { erro: 'entrada inválida: valor > 0 e odds > 1 são obrigatórios' };
 
     const m = margemImplicita(Number(args?.odd_promocao), Number(args?.odd_cobertura));
+    // Na proteção, a pergunta operacional é "esse cashback cobre o custo do par de odds?".
+    // C₀ é o piso: devolução efetiva abaixo dele e a operação vira prejuízo garantido.
+    // A base é a stake ELEGÍVEL (não a digitada): com teto de stake, o piso da parte que
+    // realmente entra na promoção é menor, e usar o valor cheio exigiria devolução maior
+    // do que a operação precisa.
+    const c0 = cashbackParaZerar(res.stakeElegivel, res.promoOddEfetiva, res.coverOddEfetiva);
+    // Odd ótima só existe na FREEBET — e a SRR NÃO tem pico: como a ficha volta, a retenção
+    // cai com a odd e o ótimo é a MENOR odd elegível. Este campo imprimia o √(1+1/m) da SNR
+    // para qualquer tipo, inclusive SRR (conselho ativamente errado) e proteção (onde a
+    // pergunta "que odd de freebet pegar" não existe). vFicha=1 porque valorFichaPct está
+    // fora do schema e o core assume ficha em dinheiro (100%).
+    //
+    // `temMargem` é separado de propósito: com margem medida ≤ 0 (par que já é surebet), a
+    // função devolve Infinity/NaN e ler isso como "sem pico" rotularia uma SNR com a doutrina
+    // da SRR ("desça a odd"). Sem margem não há o que otimizar — e é isso que a resposta diz.
+    const temMargem = ehFreebet && m > 0;
+    const oddOtima = temMargem ? oddIdealFreebet(m, tipo === 'FREEBET_SRR' ? 1 : 0) : NaN;
     return {
       ...res,
       margem_implicita_da_cobertura_pct: r2(m * 100),
-      odd_de_freebet_ideal_para_essa_margem: m > 0 ? r2(oddIdealFreebet(m)) : null,
-      como_executar:
-        tipo === 'FREEBET_SNR'
-          ? `Aposte a freebet de R$ ${res.promoStake.toFixed(2)} @${res.promoOdd} e cubra com R$ ${res.coverStake.toFixed(2)} @${res.coverOdd} no mercado oposto, em OUTRA casa. Confirme a odd na tela antes de digitar o aporte.`
-          : `Aposte R$ ${res.promoStake.toFixed(2)} @${res.promoOdd} (qualificadora) e cubra com R$ ${res.coverStake.toFixed(2)} @${res.coverOdd} no mercado oposto, em OUTRA casa.`,
+      ...(ehFreebet
+        ? temMargem
+          ? {
+              direcao_do_otimo: Number.isFinite(oddOtima) ? 'pico' : 'menor-odd',
+              odd_de_freebet_ideal_para_essa_margem: Number.isFinite(oddOtima) ? r2(oddOtima) : null,
+              ...(Number.isFinite(oddOtima)
+                ? {}
+                : {
+                    nota_do_otimo:
+                      'Freebet SRR não tem odd ótima interior: a ficha volta, a retenção cai com a odd — pegue a MENOR odd que o regulamento aceita.',
+                  }),
+            }
+          : {
+              odd_de_freebet_ideal_para_essa_margem: null,
+              // Com m ≤ 0 a retenção da SNR é (O−1)/O, que CRESCE com a odd: o ótimo é a MAIOR
+              // odd elegível. Dizer "não há odd a otimizar" mandava parar exatamente onde o
+              // modelo manda esticar (o espelho do erro que este lote corrigiu na SRR).
+              direcao_do_otimo: tipo === 'FREEBET_SRR' ? 'menor-odd' : 'maior-odd',
+              nota_do_otimo:
+                tipo === 'FREEBET_SRR'
+                  ? 'Margem medida ≤ 0 (par justo ou já surebet) numa SRR: a ficha volta, então continue na MENOR odd elegível.'
+                  : 'Margem medida ≤ 0 (par justo ou já surebet): a retenção cresce com a odd — pegue a MAIOR odd que o regulamento aceita.',
+            }
+        : {}),
+      ...(tipo === 'PROTECAO'
+        ? {
+            devolucao_minima_para_zerar_reais: r2(Math.max(0, c0)),
+            devolucao_minima_para_zerar_pct_da_stake: res.stakeElegivel > 0 ? r2(Math.max(0, c0 / res.stakeElegivel) * 100) : null,
+            folga_da_devolucao_reais: r2(res.cashbackEfetivo - Math.max(0, c0)),
+          }
+        : {}),
+      // Nos tipos com boost o piso é o EXTRA, não a devolução (extraParaZerar vem do core).
+      // MAS só quando o extra é pago FORA da odd (lucro extra, ou super odd em bônus): na
+      // super odd em DINHEIRO a odd turbinada já contém o excedente, então `extraEfetivo` não
+      // é parcela a somar e a "folga" comparava grandezas diferentes — dava folga positiva em
+      // operação perdedora. Lá o piso é a própria odd: H/(H−1).
+      ...(comBoost && (tipo === 'LUCRO_EXTRA' || res.extraEmBonus)
+        ? {
+            extra_minimo_para_zerar_reais: res.extraParaZerar,
+            folga_do_extra_reais: r2(res.extraEfetivo - (res.extraParaZerar ?? 0)),
+          }
+        : comBoost
+          ? {
+              odd_promo_minima_para_zerar: r2(res.coverOddEfetiva / (res.coverOddEfetiva - 1)),
+              folga_de_odd: r2(res.promoOddEfetiva - res.coverOddEfetiva / (res.coverOddEfetiva - 1)),
+            }
+          : {}),
+      como_executar: comoExecutarPromocao(tipo, res),
     };
   },
 };
@@ -173,24 +331,34 @@ export const skillCalcularPromocao: Skill = {
 export const skillOtimizarFreebet: Skill = {
   nome: 'otimizar_odd_freebet',
   resumo:
-    'Curva de retenção da freebet por odd e a odd ótima. Mede a margem real se você passar a odd da promo e a de cobertura observadas.',
+    'Curva de retenção da freebet por odd: na SNR devolve a odd ÓTIMA (pico); na SRR (a ficha volta) o ótimo é a MENOR odd elegível. Mede a margem do par observado.',
   grupo: 'calculo',
   descricao:
-    'Mostra em que odd a freebet rende mais: curva de retenção por odd, odd ótima √(1+1/m) e lucro estimado. ' +
-    'Aceita a margem do mercado OU (melhor) uma odd de promoção + a odd de cobertura observada na casa, de onde ' +
-    'ele MEDE a margem real. Use quando o usuário perguntar "vale pegar odd alta?" ou antes de escolher o jogo da freebet.',
+    'Mostra em que odd a freebet rende mais: curva de retenção por odd e lucro estimado. Na SNR (a ficha não volta) ' +
+    'existe um PICO em O* = √(1+1/m); na SRR (a ficha volta no green) a retenção é monótona decrescente e o ótimo é ' +
+    'a MENOR odd que o regulamento aceita — são doutrinas OPOSTAS, então informe o tipo. Aceita a margem do mercado ' +
+    'OU (melhor) uma odd de promoção + a odd de cobertura observada na casa, de onde ele MEDE a margem real. ' +
+    'Use quando o usuário perguntar "vale pegar odd alta?" ou antes de escolher o jogo da freebet.',
   parametros: {
     type: 'object',
     properties: {
-      valor_freebet: { type: 'number', description: 'Valor da freebet em reais (default 10).' },
-      odd_promocao_observada: { type: 'number', description: 'Odd que ele viu na casa da promoção (para medir a margem).' },
-      odd_cobertura_observada: { type: 'number', description: 'Odd do mercado oposto na casa de cobertura (para medir a margem).' },
-      margem_pct: { type: 'number', description: 'Margem do mercado de cobertura em % (default 6, usado se não medir).' },
-      odds: { type: 'array', items: { type: 'number' }, description: 'Odds específicas a avaliar.' },
+      // Sem o tipo, um usuário de SRR recebia a odd ótima da SNR ("estique a odd") e perdia
+      // retenção de propósito — os dois ótimos são opostos.
+      tipo: { type: 'string', enum: ['FREEBET_SNR', 'FREEBET_SRR'] },
+      valor_freebet: { type: 'number', description: 'Em reais (default 10).' },
+      odd_promocao_observada: { type: 'number', description: 'Mede a margem.' },
+      odd_cobertura_observada: { type: 'number', description: 'Do lado OPOSTO; mede a margem.' },
+      margem_pct: { type: 'number', description: 'Da cobertura, em % (default 6).' },
+      odds: { type: 'array', items: { type: 'number' } },
     },
     additionalProperties: false,
   },
   async executar(args: any) {
+    // Tradutor do core: "aposta grátis que devolve a ficha", "SRR", "stake return" caem em
+    // FREEBET_SRR; qualquer outro texto (e o tipo ausente) cai em SNR, que é o default
+    // histórico da skill. v=1 porque a ficha da SRR volta em DINHEIRO no caso normal.
+    const tipo = tipoPromocaoDeTexto(args?.tipo) === 'FREEBET_SRR' ? 'FREEBET_SRR' : 'FREEBET_SNR';
+    const vFicha = tipo === 'FREEBET_SRR' ? 1 : 0;
     const valor = Number(args?.valor_freebet) > 0 ? Number(args.valor_freebet) : 10;
     let margem = Number(args?.margem_pct) > 0 ? Number(args.margem_pct) / 100 : 0.06;
     let origemMargem = `estimada (${r2(margem * 100)}%)`;
@@ -203,19 +371,33 @@ export const skillOtimizarFreebet: Skill = {
         origemMargem = `MEDIDA no par observado (${oP} × ${oC}) = ${r2(medida * 100)}%`;
       }
     }
-    const curva = curvaRetencaoFreebet(valor, margem, Array.isArray(args?.odds) ? args.odds.map(Number) : undefined);
+    const curva = curvaRetencaoFreebet(valor, margem, Array.isArray(args?.odds) ? args.odds.map(Number) : undefined, vFicha);
+    // Sem pico, o número de referência é a MENOR odd da grade avaliada — dizer qual foi
+    // evita o modelo apresentar "retenção no ideal" como se houvesse uma odd ótima.
+    const menorOddAvaliada = curva.curva.reduce((min, p) => Math.min(min, p.promoOdd), Infinity);
     return {
+      tipo,
       valor_freebet: valor,
       margem_usada_pct: curva.margemPct,
       origem_da_margem: origemMargem,
+      direcao_do_otimo: curva.direcaoDoOtimo,
       odd_ideal: curva.oddIdeal,
+      resposta:
+        curva.direcaoDoOtimo === 'pico'
+          ? `Pegue odd ~${curva.oddIdeal} (retenção estimada ${curva.retencaoIdealPct}%).`
+          : `Não existe odd ótima interior nesta SRR: pegue a MENOR odd que o regulamento aceita. Na grade avaliada a melhor foi ${
+              Number.isFinite(menorOddAvaliada) ? menorOddAvaliada : '—'
+            } (retenção ${curva.retencaoIdealPct}%), e ela ainda imobiliza menos caixa na cobertura.`,
       retencao_no_ideal_pct: curva.retencaoIdealPct,
       cobertura_esperada_no_ideal: curva.coverOddNoIdeal,
       lucro_no_ideal: r2((curva.retencaoIdealPct / 100) * valor),
       curva: curva.curva,
       doutrina:
-        'Retenção R(O) = (O−1)·(1 − m·(O−1))/O tem PICO em O* = √(1+1/m) e CAI em odds esticadas — ' +
-        'odd alta com cobertura em 1.06/1.07 rende ~40%, não 80%.',
+        curva.direcaoDoOtimo === 'pico'
+          ? 'SNR (a ficha NÃO volta): R(O) = (O−1)·(1 − m·(O−1))/O tem PICO em O* = √(1+1/m) e CAI em odds ' +
+            'esticadas — odd alta com cobertura em 1.06/1.07 rende ~40%, não 80%.'
+          : 'SRR (a ficha VOLTA): R(O) = (O−1+v)·(1 − m·(O−1))/O é decrescente — não há pico, o único vazamento é ' +
+            'a margem paga no lay e ela cresce com a odd. Não aplique aqui a doutrina da SNR ("estique a odd").',
     };
   },
 };
@@ -223,7 +405,7 @@ export const skillOtimizarFreebet: Skill = {
 export const skillMultiplaQualificadora: Skill = {
   nome: 'calcular_multipla_qualificadora',
   resumo:
-    'Valida uma múltipla JÁ ESCOLHIDA contra o regulamento e monta a cobertura sequencial (aporte por perna, caixa de pico). Para ESCOLHER as pernas, use montar_multipla_promocao.',
+    'Valida uma múltipla JÁ ESCOLHIDA e monta a cobertura sequencial (aporte por perna, caixa de pico). Para ESCOLHER as pernas: montar_multipla_promocao.',
   grupo: 'calculo',
   descricao:
     'Valida uma múltipla de qualificação contra o regulamento (odd total mínima, odd mínima por seleção) e monta ' +
@@ -232,7 +414,7 @@ export const skillMultiplaQualificadora: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      stake: { type: 'number', description: 'Valor do bilhete (ex.: 50).' },
+      stake: { type: 'number', description: 'Valor do bilhete.' },
       pernas: {
         type: 'array',
         description: 'Seleções na ORDEM de resolução.',
@@ -240,8 +422,8 @@ export const skillMultiplaQualificadora: Skill = {
           type: 'object',
           properties: {
             descricao: { type: 'string' },
-            odd: { type: 'number', description: 'Odd da seleção.' },
-            oddCobertura: { type: 'number', description: 'Odd do mercado OPOSTO na cobertura.' },
+            odd: { type: 'number' },
+            oddCobertura: { type: 'number', description: 'Do mercado OPOSTO.' },
             resolveEm: { type: 'string', description: 'Quando a perna RESOLVE.' },
           },
           required: ['odd'],
@@ -249,7 +431,7 @@ export const skillMultiplaQualificadora: Skill = {
       },
       odd_total_minima: { type: 'number' },
       odd_minima_por_perna: { type: 'number' },
-      perda_aceita: { type: 'number', description: 'Perda aceita no pior caminho (default 0).' },
+      perda_aceita: { type: 'number', description: 'No pior caminho; default 0.' },
     },
     required: ['stake', 'pernas'],
     additionalProperties: false,
@@ -304,7 +486,7 @@ const odd2 = (n: number) => Math.round(n * 100) / 100;
 export const skillMontarMultiplaPromocao: Skill = {
   nome: 'montar_multipla_promocao',
   resumo:
-    'MONTA a múltipla de promoção com odds reais: escolhe as pernas que cumprem o regulamento, acha a odd de cobertura em outra casa e calcula a cobertura sequencial. LENTA.',
+    'MONTA a múltipla de promoção com odds reais: escolhe as pernas do regulamento, acha a cobertura em outra casa e a sequencial. LENTA.',
   grupo: 'calculo',
   custosa: true,
   descricao:
@@ -316,15 +498,17 @@ export const skillMontarMultiplaPromocao: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      casa: { type: 'string', description: 'Casa da PROMOÇÃO (onde o bilhete será feito).' },
-      stake: { type: 'number', description: 'Valor do bilhete (ex.: 50).' },
-      odd_total_minima: { type: 'number', description: 'Odd total mínima do regulamento.' },
-      odd_minima_por_perna: { type: 'number', description: 'Odd mínima por seleção (default 1.20).' },
-      max_pernas: { type: 'number', description: 'Teto de seleções (default 5).' },
+      casa: { type: 'string', description: 'Casa da PROMOÇÃO (onde o bilhete vai).' },
+      stake: { type: 'number', description: 'Valor do bilhete.' },
+      odd_total_minima: { type: 'number', description: 'Do regulamento.' },
+      odd_minima_por_perna: { type: 'number', description: 'default 1.20' },
+      max_pernas: { type: 'number', description: 'default 5, teto 8' },
       esporte: { type: 'string', description: 'Default Futebol.' },
-      situacao: { type: 'string', description: 'pre_jogo (default) | ao_vivo | todos.' },
+      // enum: restringe a saída do provedor e custa menos que a lista em prosa. O default
+      // (pre_jogo aqui) vive no código — repeti-lo no schema é token pago em toda rodada.
+      situacao: { type: 'string', enum: ['pre_jogo', 'ao_vivo', 'todos'] },
       casas_cobertura: { type: 'array', items: { type: 'string' }, description: 'Onde cobrir (máx. 3).' },
-      perda_aceita: { type: 'number', description: 'Perda aceita no pior caminho (default 0).' },
+      perda_aceita: { type: 'number', description: 'No pior caminho; default 0.' },
     },
     required: ['casa', 'stake', 'odd_total_minima'],
     additionalProperties: false,

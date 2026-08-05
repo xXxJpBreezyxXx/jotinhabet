@@ -20,6 +20,7 @@ import { RivaloScraper } from '../scraping/casa_rivalo';
 import { Brazino777Scraper, ApostaGanhaScraper } from '../scraping/casa_nsoft';
 import { BetssonScraper } from '../scraping/casa_betsson';
 import { SureRadarScraper } from '../scraping/casa_sureradar';
+import { sureradarSync } from './sureradarSync';
 import { supabase } from '../db/client';
 import { WhatsAppNotifier } from '../notify/whatsapp';
 import { alertAlreadySent, markAlertAsSent } from '../notify/alertCache';
@@ -434,6 +435,7 @@ export class ArbitrageScannerV2 {
     // ⚡ [Scanner V2] Extrai oportunidades consolidadas do SureRadar
     const sureradarScraper = new SureRadarScraper();
     let srOps: ArbitrageOpportunity[] = [];
+    const srInicioMs = Date.now();
     try {
       srOps = await sureradarScraper.extrairOportunidades();
       if (srOps.length > 0) {
@@ -452,6 +454,28 @@ export class ArbitrageScannerV2 {
       }
     } catch (err: any) {
       console.error(`❌ Erro ao extrair dados do SureRadar:`, err.message);
+    }
+
+    // Sincronia: registra QUANDO varremos contra QUANDO eles recalcularam. É o que permite
+    // ao scheduler ajustar a fase (varrer logo depois do recálculo deles, não logo antes) e à
+    // UI dizer quanto tempo de vida resta ao que está no banco. Fora do try acima de
+    // propósito: varredura que falhou também é dado de sincronia ("ficamos cegos neste ciclo").
+    try {
+      sureradarSync.registrarVarredura({
+        inicioMs: srInicioMs,
+        fimMs: Date.now(),
+        fonte: sureradarScraper.ultimaFonte,
+        importadas: srOps.length,
+        status: sureradarScraper.ultimoStatus,
+      });
+      const s = sureradarSync.snapshot();
+      console.log(
+        `🕒 [Sincronia] SureRadar recalculou há ${s.deles.idadeSeg ?? '?'}s · cadência ${s.deles.cadenciaSeg ?? '?'}s` +
+          `${s.deles.cadenciaConfiavel ? '' : ' (estimando)'} · nossa captura ${s.sincronia.defasagemUltimaSeg ?? '?'}s depois` +
+          ` · vida restante ${s.deles.vidaRestanteSeg ?? '?'}s · estado ${s.sincronia.estado}`
+      );
+    } catch (e: any) {
+      console.error('⚠️ [Sincronia] Falha ao registrar a varredura (não-fatal):', e?.message || e);
     }
 
     // Banca dos alertas: a banca ativa salva no painel (app_config), com

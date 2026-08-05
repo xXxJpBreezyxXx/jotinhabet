@@ -29,14 +29,14 @@ export const skillChecarPar: Skill = {
     type: 'object',
     properties: {
       esporte: { type: 'string', description: 'Futebol | Basquete | Tênis | Tênis de Mesa | E-sports.' },
-      mercado: { type: 'string', description: 'Nome do mercado como aparece na casa.' },
+      mercado: { type: 'string', description: 'Como aparece na casa.' },
       casaA: { type: 'string' },
       casaB: { type: 'string' },
-      finalidade: {
-        type: 'string',
-        description:
-          '"surebet" (default) aplica as Diretrizes e BLOQUEIA. "promocao" (freebet SNR, qualificativa, cashback, múltipla) NÃO bloqueia: devolve o mesmo diagnóstico como AVISO.',
-      },
+      // Enum em vez da prosa de 166 chars: ela era TRUNCADA em 67 antes de chegar ao modelo,
+      // ou seja a metade que explicava "promocao" nunca chegava — e o modelo, sem saber que o
+      // valor existia, deixava as Diretrizes de surebet bloquearem operações de promoção.
+      // O resumo da skill carrega a semântica; aqui basta o vocabulário aceito.
+      finalidade: { type: 'string', enum: ['surebet', 'promocao'] },
     },
     required: ['mercado', 'casaA', 'casaB'],
     additionalProperties: false,
@@ -115,7 +115,7 @@ export const skillRegrasCasa: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      casa: { type: 'string', description: 'Nome da casa.' },
+      casa: { type: 'string' },
       esporte: { type: 'string', description: 'tenis | basquete | futebol (vazio = todos).' },
     },
     required: ['casa'],

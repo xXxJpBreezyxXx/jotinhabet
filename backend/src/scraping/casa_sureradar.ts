@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fetchTextoComRetry } from '../utils/http';
 import { oddEfetiva, ehExchangeComComissao } from '../arbitrage/comissao';
+import { StatusSureRadarObservado, parseHorarioSureRadar } from '../core/sureradarSync';
 
 // ---------------------------------------------------------------------------
 // Tipos da API interna do SureRadar (descobertos via engenharia do painel /app)
@@ -44,7 +45,22 @@ interface SureRadarSurebet {
 interface SureRadarApiResponse {
   surebets: SureRadarSurebet[];
   locked?: SureRadarSurebet[];
-  status?: { total: number; ultima_atualizacao: string; conectado: boolean };
+  /**
+   * O relógio do painel deles, de graça na resposta:
+   *  - `updated_ts`: epoch em SEGUNDOS (float) do último recálculo — relógio DELES.
+   *  - `idade_seg`:  idade do dado no instante da resposta, medida por eles. É o campo que
+   *                  interessa: não depende do desvio entre os dois relógios.
+   *  - `ultima_atualizacao`: texto ("2026-08-05 12:51:43 UTC (conta)"), fallback de auditoria.
+   * Alimenta o monitor de sincronia (core/sureradarSync.ts).
+   */
+  status?: {
+    total?: number;
+    ultima_atualizacao?: string;
+    updated_ts?: number;
+    idade_seg?: number;
+    conectado?: boolean;
+    online?: boolean;
+  };
   plano?: string;
 }
 
@@ -71,9 +87,17 @@ export class SureRadarScraper {
    */
   public ultimaFonte: 'api' | 'browser' | 'none' = 'none';
 
+  /**
+   * Relógio do painel na última extração via API (null no fallback de browser, que não expõe
+   * o `status`). É o insumo do monitor de sincronia: sem ele não há como saber se a surebet
+   * que acabamos de gravar nasceu fresca ou com 9 dos 10 minutos de vida já gastos.
+   */
+  public ultimoStatus: StatusSureRadarObservado | null = null;
+
   async extrairOportunidades(): Promise<ArbitrageOpportunity[]> {
     console.log(`🤖 [SureRadar] Iniciando extração de oportunidades via cookies...`);
     this.ultimaFonte = 'none';
+    this.ultimoStatus = null;
 
     const cookies = this.carregarCookies();
     if (!cookies) return [];
@@ -169,6 +193,8 @@ export class SureRadarScraper {
         (data.status?.total ? ` (sistema reporta ${data.status.total} no total)` : '')
     );
 
+    this.ultimoStatus = this.lerRelogioDoPainel(data, [...liberadas, ...vip]);
+
     const opportunities: ArbitrageOpportunity[] = [];
     for (const sb of liberadas) {
       const opp = this.converterSurebet(sb, false);
@@ -182,6 +208,69 @@ export class SureRadarScraper {
     const esportes = [...new Set(opportunities.map((o) => o.esporte))].join(', ');
     console.log(`   [SureRadar/API] ${opportunities.length} oportunidades extraídas (${esportes || 'nenhum esporte'}).`);
     return opportunities;
+  }
+
+  /**
+   * Extrai o relógio do painel (o `status` da resposta) + a idade REAL de cada surebet.
+   *
+   * Por que as duas coisas: `status.ultima_atualizacao` é quando o painel deles recalculou,
+   * mas cada surebet carrega o seu próprio `updated_at` e ele costuma ser MAIS VELHO — numa
+   * amostra de 05/08 o painel marcava 12:51:43 e a primeira linha da lista era de 12:40:20.
+   * Sincronizar só pelo relógio do painel daria "dado fresco" para odds de 11 minutos.
+   *
+   * A idade das linhas é medida no relógio DELES (`updated_ts + idade_seg` = "agora" deles),
+   * porque `updated_at` também é do lado deles; misturar com o nosso `Date.now()` embutiria o
+   * desvio entre as máquinas na idade de cada odd.
+   */
+  private lerRelogioDoPainel(data: SureRadarApiResponse, todas: SureRadarSurebet[]): StatusSureRadarObservado {
+    const s = data.status || {};
+    const tsSeg = Number.isFinite(Number(s.updated_ts)) ? Number(s.updated_ts) : null;
+    const atualizadoEmMs = tsSeg != null ? Math.round(tsSeg * 1000) : parseHorarioSureRadar(s.ultima_atualizacao);
+    const idadeSegDeles = Number.isFinite(Number(s.idade_seg)) ? Number(s.idade_seg) : null;
+
+    // "Agora" no relógio deles. Sem `idade_seg` não há como saber, e aí o nosso relógio é a
+    // única régua disponível (o skew entra na conta, e o monitor o expõe).
+    const agoraDelesMs = atualizadoEmMs != null && idadeSegDeles != null ? atualizadoEmMs + idadeSegDeles * 1000 : Date.now();
+
+    const idades: number[] = [];
+    let maisAntigaMs: number | null = null;
+    let eventoMaisAntigo: string | null = null;
+    for (const sb of todas) {
+      const ms = parseHorarioSureRadar(sb.updated_at);
+      if (ms == null) continue;
+      idades.push(Math.max(0, (agoraDelesMs - ms) / 1000));
+      if (maisAntigaMs == null || ms < maisAntigaMs) {
+        maisAntigaMs = ms;
+        eventoMaisAntigo = sb.event || null;
+      }
+    }
+    const ordenadas = [...idades].sort((a, b) => a - b);
+    const medianaIdade = ordenadas.length
+      ? ordenadas.length % 2
+        ? ordenadas[(ordenadas.length - 1) / 2]
+        : (ordenadas[ordenadas.length / 2 - 1] + ordenadas[ordenadas.length / 2]) / 2
+      : null;
+
+    console.log(
+      `   [SureRadar/API] Painel recalculado ${idadeSegDeles != null ? `há ${Math.round(idadeSegDeles)}s` : '(idade não informada)'}` +
+        (medianaIdade != null
+          ? ` · idade das linhas: mais nova ${Math.round(ordenadas[0])}s, mediana ${Math.round(medianaIdade)}s, máx ${Math.round(ordenadas[ordenadas.length - 1])}s`
+          : '')
+    );
+
+    return {
+      atualizadoEmMs,
+      idadeSegDeles,
+      textoAtualizacao: typeof s.ultima_atualizacao === 'string' ? s.ultima_atualizacao : null,
+      totalDeles: Number.isFinite(Number(s.total)) ? Number(s.total) : null,
+      // `conectado` é o campo histórico; `online` apareceu depois com o mesmo sentido. Só
+      // reporta false quando ALGUM dos dois afirma isso — ausência de campo não é desconexão.
+      conectado: s.conectado === false || s.online === false ? false : s.conectado ?? s.online ?? null,
+      legIdadeMinSeg: ordenadas.length ? Math.round(ordenadas[0] * 10) / 10 : null,
+      legIdadeMedianaSeg: medianaIdade == null ? null : Math.round(medianaIdade * 10) / 10,
+      legIdadeMaxSeg: ordenadas.length ? Math.round(ordenadas[ordenadas.length - 1] * 10) / 10 : null,
+      eventoMaisAntigo,
+    };
   }
 
   /**

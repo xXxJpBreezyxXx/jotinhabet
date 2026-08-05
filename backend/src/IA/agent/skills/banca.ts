@@ -11,6 +11,7 @@ import { supabase } from '../../../db/client';
 import { bancaParaAlertas } from '../../../core/bancaAtiva';
 import { normalizarCasa } from '../../riskAnalyzer';
 import { canonizarCasa } from '../../../signals/casasAliases';
+import { ehFreebetSemCusto, promoTypeDoTipo, tipoDoPromoType, tipoPromocaoDeTexto, TIPOS_PROMOCAO } from '../../../core/promocoes';
 
 const r2 = (v: any) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : null);
 
@@ -78,11 +79,11 @@ export const skillHistoricoEntradas: Skill = {
   parametros: {
     type: 'object',
     properties: {
-      de: { type: 'string', description: 'Data inicial (DD/MM/AAAA ou AAAA-MM-DD).' },
-      ate: { type: 'string', description: 'Data final (DD/MM/AAAA ou AAAA-MM-DD).' },
-      esporte: { type: 'string', description: 'Filtro por esporte.' },
-      casa: { type: 'string', description: 'Filtro por casa envolvida.' },
-      limite: { type: 'number', description: 'Máximo de entradas detalhadas (default 20, teto 60).' },
+      de: { type: 'string', description: 'DD/MM/AAAA, AAAA-MM-DD ou AAAA-MM.' },
+      ate: { type: 'string', description: 'Idem `de`.' },
+      esporte: { type: 'string' },
+      casa: { type: 'string' },
+      limite: { type: 'number', description: 'default 20, teto 60' },
     },
     additionalProperties: false,
   },
@@ -165,17 +166,20 @@ export const skillHistoricoEntradas: Skill = {
 export const skillHistoricoPromocoes: Skill = {
   nome: 'historico_promocoes',
   resumo:
-    'Histórico de apostas de promoção (freebets/qualificativas) com lucro, ROI e retenção média.',
+    'Histórico de promoções nos 6 tipos (freebet SNR/SRR, qualificativa, proteção, super odd, lucro extra) com lucro, ROI e retenção média das freebets.',
   grupo: 'banca',
   descricao:
-    'Histórico das apostas de PROMOÇÃO já registradas (freebets SNR e qualificativas): casa, valor do bônus, ' +
-    'odds das duas pernas, lucro e ROI. Use para "quanto já tirei de freebet", "quais promoções eu fiz" ou para ' +
+    'Histórico das apostas de PROMOÇÃO já registradas, em qualquer um dos 6 tipos (freebet SNR, freebet SRR, ' +
+    'qualificativa, proteção, super odd, lucro extra): casa, valor do bônus, odds das duas pernas, lucro, ROI e — ' +
+    'nas freebets (SNR e SRR) — a retenção. Use para "quanto já tirei de freebet", "quais promoções eu fiz" ou para ' +
     'medir a retenção média que o usuário vem conseguindo.',
   parametros: {
     type: 'object',
     properties: {
-      limite: { type: 'number', description: 'Máximo de registros (default 20, teto 60).' },
-      tipo: { type: 'string', description: 'FREEBET_SNR | QUALIFYING (vazio = todos).' },
+      limite: { type: 'number', description: 'default 20, teto 60' },
+      // Vocabulário do CORE (os tradutores fazem a ponte com o banco): o mapeamento manual
+      // que existia aqui não conhecia os tipos novos e devolvia zero registro em silêncio.
+      tipo: { type: 'string', enum: [...TIPOS_PROMOCAO] },
     },
     additionalProperties: false,
   },
@@ -188,44 +192,79 @@ export const skillHistoricoPromocoes: Skill = {
         .order('criado_em', { ascending: false })
         .limit(200);
       if (error) throw error;
-      // O vocabulário exposto ao modelo nas outras skills é QUALIFICATIVA, mas a coluna
-      // do banco guarda QUALIFYING — sem este mapeamento o filtro devolvia zero calado.
-      const bruto = (args?.tipo || '').toString().toUpperCase();
-      const tipo = /QUALIF/.test(bruto) ? 'QUALIFYING' : /FREEBET|SNR/.test(bruto) ? 'FREEBET_SNR' : '';
+      // Filtro pelos TRADUTORES do core: tipoPromocaoDeTexto entende o que o modelo escreveu
+      // ("cashback", "super odd", "aposta grátis") e tipoDoPromoType normaliza o que está no
+      // banco (QUALIFYING → QUALIFICATIVA). Texto desconhecido cai em FREEBET_SNR, por isso o
+      // tipo resolvido VOLTA na resposta: filtro que não é o pedido e não aparece é o mesmo
+      // bug de antes, com outra cara.
+      const pedido = `${args?.tipo ?? ''}`.trim();
+      const tipoFiltro = pedido ? tipoPromocaoDeTexto(pedido) : null;
       const linhas = (data || [])
-        .filter((p: any) => !tipo || (p.promo_type || 'FREEBET_SNR') === tipo)
-        .map((p: any) => ({
-          id: p.id,
-          tipo: p.promo_type || 'FREEBET_SNR',
-          data: (p.criado_em || '').slice(0, 16),
-          evento: p.evento,
-          mercado: p.mercado,
-          casa_promocao: p.casa_promocao,
-          valor_promocao: r2(p.valor_promocao),
-          odd_promocao: r2(p.odd_promocao),
-          casa_cobertura: p.casa_cobertura,
-          valor_cobertura: r2(p.valor_cobertura),
-          odd_cobertura: r2(p.odd_cobertura),
-          lucro: r2(p.lucro),
-          roi_pct: r2(p.roi_pct),
-          retencao_pct:
-            (p.promo_type || 'FREEBET_SNR') === 'FREEBET_SNR' && Number(p.valor_promocao) > 0
-              ? r2((Number(p.lucro) / Number(p.valor_promocao)) * 100)
-              : null,
-        }));
-      const freebets = linhas.filter((l) => l.tipo === 'FREEBET_SNR' && l.retencao_pct !== null);
+        .map((p: any) => {
+          const tipo = tipoDoPromoType(p.promo_type);
+          // Retenção é a métrica de TODA freebet: a SRR ficava fora (e nela a retenção passa
+          // de 100%, porque a ficha volta). A base é a stake ELEGÍVEL — com teto de stake, o
+          // lucro gravado saiu só da parte elegível, e dividir pelo valor cheio subestimaria.
+          const teto = Number(p.teto_stake);
+          const base = teto > 0 ? Math.min(Number(p.valor_promocao), teto) : Number(p.valor_promocao);
+          return {
+            id: p.id,
+            tipo,
+            data: (p.criado_em || '').slice(0, 16),
+            evento: p.evento,
+            mercado: p.mercado,
+            casa_promocao: p.casa_promocao,
+            valor_promocao: r2(p.valor_promocao),
+            odd_promocao: r2(p.odd_promocao),
+            casa_cobertura: p.casa_cobertura,
+            valor_cobertura: r2(p.valor_cobertura),
+            odd_cobertura: r2(p.odd_cobertura),
+            // Só a proteção usa devolução; nas outras vem null (ou undefined sem a migration 021).
+            cashback: r2(p.cashback),
+            cashback_eh_bonus: p.cashback_eh_bonus === true ? true : undefined,
+            // Campos dos tipos novos: só aparecem na linha que os tem (num banco sem a 022
+            // vêm undefined e o JSON simplesmente não os traz).
+            odd_padrao: r2(p.odd_padrao) ?? undefined,
+            boost_pct: r2(p.boost_pct) ?? undefined,
+            extra_efetivo: r2(p.extra_efetivo) ?? undefined,
+            odd_efetiva_promo: r2(p.odd_efetiva_promo) ?? undefined,
+            valor_ficha_pct: r2(p.valor_ficha_pct) ?? undefined,
+            lucro: r2(p.lucro),
+            roi_pct: r2(p.roi_pct),
+            retencao_pct: ehFreebetSemCusto(tipo) && base > 0 ? r2((Number(p.lucro) / base) * 100) : null,
+          };
+        })
+        .filter((l) => !tipoFiltro || l.tipo === tipoFiltro);
+      // retencao_pct só é preenchida nas freebets (SNR e SRR), então este filtro já é
+      // "as freebets com retenção calculável".
+      const freebets = linhas.filter((l) => l.retencao_pct !== null);
+      // SNR e SRR NÃO são comparáveis: na SRR a ficha volta e a retenção é estruturalmente
+      // acima de 100%, enquanto a SNR vive na faixa 70-85%. Uma média única sobe sozinha
+      // conforme o usuário faz mais SRR e não descreve nenhuma das duas populações.
+      const media = (ls: typeof freebets) =>
+        ls.length ? r2(ls.reduce((s, l) => s + (l.retencao_pct || 0), 0) / ls.length) : null;
+      const snr = freebets.filter((l) => l.tipo === 'FREEBET_SNR');
+      const srr = freebets.filter((l) => l.tipo === 'FREEBET_SRR');
       return {
         total: linhas.length,
+        filtro_tipo: tipoFiltro
+          ? { pedido, aplicado: tipoFiltro, promo_type_no_banco: promoTypeDoTipo(tipoFiltro) }
+          : undefined,
         lucro_total: r2(linhas.reduce((s, l) => s + (l.lucro || 0), 0)),
-        retencao_media_freebets_pct: freebets.length
-          ? r2(freebets.reduce((s, l) => s + (l.retencao_pct || 0), 0) / freebets.length)
-          : null,
+        retencao_media_snr_pct: media(snr),
+        snr_na_media: snr.length,
+        retencao_media_srr_pct: media(srr),
+        srr_na_media: srr.length,
+        nota_retencao:
+          srr.length && snr.length
+            ? 'SNR e SRR têm médias separadas de propósito: na SRR a ficha volta, então a retenção passa de 100% e misturar as duas dá um número que não descreve nenhuma.'
+            : undefined,
         promocoes: linhas.slice(0, limite),
       };
     } catch (e: any) {
       const msg = `${e?.message || e}`;
       if (/promo_surebets|does not exist|PGRST205/i.test(msg)) {
-        return { total: 0, promocoes: [], nota: 'Tabela promo_surebets ausente (migration 018 não aplicada).' };
+        return { total: 0, promocoes: [], nota: 'Tabela promo_surebets ausente (migrations de promoção não aplicadas).' };
       }
       return { erro: msg.slice(0, 200) };
     }
