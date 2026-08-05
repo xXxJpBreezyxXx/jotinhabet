@@ -485,6 +485,10 @@ interface SyncSnapshot {
     intervaloSeg: number | null;
     proximaVarredura: string | null;
     segundosParaProxima: number | null;
+    /** Leitura LEVE (só o painel deles, ~1,2s) — null quando o worker está desligado. */
+    intervaloLeveSeg: number | null;
+    proximaLeituraLeve: string | null;
+    segundosParaProximaLeitura: number | null;
     ajusteFaseSeg: number | null;
     alinhamentoAtivo: boolean;
     importadasUltima: number | null;
@@ -550,7 +554,12 @@ function SincroniaSureRadar({ sync, agoraServidorMs, onEscanear }: { sync: SyncS
   // número ficaria congelado entre polls e pareceria travado).
   const vidaRestante = ate(sync.deles.proximaAtualizacaoPrevista) ?? sync.deles.vidaRestanteSeg;
   const idadeDeles = desde(sync.deles.ultimaAtualizacao) ?? sync.deles.idadeSeg;
-  const proximaNossa = ate(sync.nosso.proximaVarredura) ?? sync.nosso.segundosParaProxima;
+  // A próxima leitura do painel é a MAIS PRÓXIMA entre a leve e a completa (o backend já manda
+  // esse mínimo; aqui é só recontado no cliente para o número andar entre polls).
+  const proximosIso = [sync.nosso.proximaLeituraLeve, sync.nosso.proximaVarredura]
+    .map((iso) => ate(iso))
+    .filter((v): v is number => v != null);
+  const proximaLeitura = proximosIso.length ? Math.min(...proximosIso) : sync.nosso.segundosParaProximaLeitura;
   const vidaCurta = vidaRestante != null && vidaRestante <= 60;
 
   const celula = (rotulo: string, valor: string, dica: string, cor?: string) => (
@@ -590,11 +599,16 @@ function SincroniaSureRadar({ sync, agoraServidorMs, onEscanear }: { sync: SyncS
           `Medida por nós em ${sync.deles.cadenciaAmostras} intervalo(s) observado(s).` +
             (sync.deles.cadenciaConfiavel ? '' : ' Ainda sem confiança: previsões e alinhamento automático seguem suspensos.')
         )}
+        {/* "Nossa leitura" e não "nossa varredura": desde 05/08 quem lê o painel com mais
+            frequência é o worker leve (~1,2s), e a varredura completa (5 min) virou a lenta das
+            duas. O que interessa é quando o painel será reconferido — a mais próxima das duas. */}
         {celula(
-          'Nossa varredura',
-          `há ${durSeg(desde(sync.nosso.ultimaVarredura))} · próxima em ${durSeg(proximaNossa)}`,
-          `Intervalo de ${durSeg(sync.nosso.intervaloSeg)}` +
-            (sync.nosso.alinhamentoAtivo ? ' com alinhamento de fase ATIVO.' : ' (alinhamento de fase inativo).')
+          'Nossa leitura',
+          `há ${durSeg(desde(sync.nosso.ultimaVarredura))} · próxima em ${durSeg(proximaLeitura)}`,
+          (sync.nosso.intervaloLeveSeg != null
+            ? `Leitura leve do painel a cada ${durSeg(sync.nosso.intervaloLeveSeg)} (só o SureRadar) + varredura completa a cada ${durSeg(sync.nosso.intervaloSeg)} (com o motor próprio).`
+            : `Só a varredura completa lê o painel, a cada ${durSeg(sync.nosso.intervaloSeg)} — a leitura leve está desligada (SURERADAR_LEVE_MIN=0).`) +
+            (sync.nosso.alinhamentoAtivo ? ' Alinhamento de fase ATIVO.' : '')
         )}
         {celula(
           'Defasagem da captura',
@@ -622,7 +636,8 @@ function SincroniaSureRadar({ sync, agoraServidorMs, onEscanear }: { sync: SyncS
             <span>Atualizações perdidas: <strong>{sync.sincronia.atualizacoesPerdidas}</strong></span>
             <span>Recálculos pendentes de captura: <strong>{sync.sincronia.atualizacoesPendentes}</strong></span>
             <span>Última leitura: <strong>{sync.nosso.fonteUltima || '—'}</strong>{sync.nosso.importadasUltima != null ? ` · ${sync.nosso.importadasUltima} surebets em ${durSeg(sync.nosso.duracaoUltimaSeg)}` : ''}</span>
-            <span>Ajuste de fase aplicado: <strong>{sync.nosso.ajusteFaseSeg != null ? `${sync.nosso.ajusteFaseSeg > 0 ? '+' : ''}${sync.nosso.ajusteFaseSeg}s` : '—'}</strong></span>
+            <span>Ritmo das leituras: <strong>leve {sync.nosso.intervaloLeveSeg != null ? durSeg(sync.nosso.intervaloLeveSeg) : 'desligada'} · completa {durSeg(sync.nosso.intervaloSeg)}</strong></span>
+            <span>Ajuste de fase aplicado: <strong>{sync.nosso.ajusteFaseSeg ? `${sync.nosso.ajusteFaseSeg > 0 ? '+' : ''}${sync.nosso.ajusteFaseSeg}s` : 'nenhum'}</strong></span>
             <span>Total no painel deles: <strong>{sync.deles.total ?? '—'}</strong></span>
             {/* Painel recalculado ≠ odd recalculada: cada surebet tem o seu próprio updated_at. */}
             <span>Idade das linhas na leitura: <strong>mais nova {durSeg(sync.dados.legIdadeMinSeg)} · mediana {durSeg(sync.dados.legIdadeMedianaSeg)} · máx {durSeg(sync.dados.legIdadeMaxSeg)}</strong>{sync.dados.eventoMaisAntigo ? ` (mais velha: ${sync.dados.eventoMaisAntigo})` : ''}</span>

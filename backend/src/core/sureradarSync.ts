@@ -1,18 +1,24 @@
 /**
  * Monitor de SINCRONIA com o SureRadar.
  *
- * O problema que ele resolve: o painel deles recalcula as surebets a cada ~10 min e a nossa
- * varredura roda a cada 5. Se a nossa cai pouco antes do recálculo deles, a oportunidade que
- * gravamos no banco (e que o usuário vai clicar) nasce com a vida quase toda gasta — já foi
- * substituída no site quando alguém abre o card. Não é erro de matemática, é erro de FASE.
+ * O problema que ele resolve: a oportunidade que gravamos no banco (e que o usuário vai clicar)
+ * pode nascer com a vida toda gasta, porque o painel deles já recalculou. Não é erro de
+ * matemática — é erro de RITMO entre as duas varreduras.
+ *
+ * O que a medição mostrou (05/08/2026, produção) e mudou o desenho: eles **não** recalculam a
+ * cada 10 min como se supunha. Recalculam a cada **~4,4 min, de forma irregular** — 261 s,
+ * 262 s, 342 s, e um vão de 534 s sem recálculo nenhum. Como isso é MAIS RÁPIDO que o ciclo de
+ * 5 min da varredura completa, perder recálculo era matemático (aconteceu: leitura fechando com
+ * o dado deles em 337 s e uma atualização inteira em branco).
  *
  * Duas coisas acontecem aqui:
  *  1. CONTAGEM/medição: quando eles atualizaram, de quanto em quanto tempo atualizam, quanto
- *     tempo depois disso a nossa varredura capturou, quantas atualizações deles passaram sem
- *     nenhuma varredura nossa no meio, e quanto de vida resta ao dado que está no banco.
- *  2. FASE: `ajusteDeFaseSeg()` diz ao scheduler quantos segundos adiantar/atrasar a próxima
- *     varredura para ela cair ALVO_APOS_SEG depois do recálculo deles. O intervalo médio não
- *     muda — só o instante dentro do ciclo.
+ *     tempo depois disso a nossa leitura capturou, quantas atualizações deles passaram sem
+ *     nenhuma leitura nossa no meio, e quanto de vida resta ao dado que está no banco.
+ *  2. FASE: `ajusteDeFaseSeg()` diz ao scheduler quantos segundos deslocar a próxima varredura
+ *     para cair ALVO_APOS_SEG depois do recálculo deles. **Desligado por default** — num grid
+ *     irregular não há fase estável para travar. Quem resolve é amostrar mais rápido que a
+ *     fonte: `scheduler/sureradarLeve.ts` lê só o painel (~1,2 s) a cada 2 min.
  *
  * A fonte dos números é a própria API deles, que entrega o relógio de graça:
  *     status: { total, ultima_atualizacao: "2026-08-05 12:51:43 UTC (conta)",
@@ -26,9 +32,9 @@
  * o NOSSO relógio (`fim da requisição − idade_seg`, ambos medidos deste lado), e o desvio fica
  * exposto em `relogioSkewSeg` só para diagnóstico.
  *
- * Estado em MEMÓRIA de propósito (sem tabela): é medição de fase, não histórico contábil.
+ * Estado em MEMÓRIA de propósito (sem tabela): é medição de ritmo, não histórico contábil.
  * Um restart zera a estimativa de CADÊNCIA: ela exige 3 intervalos, ou seja 4 recálculos deles
- * observados, e a ~10 min cada isso leva ~30 min. O estado do momento (quando eles atualizaram,
+ * observados — a ~4,4 min cada, uns 15–20 min. O estado do momento (quando eles atualizaram,
  * idade do dado, defasagem da captura) volta já na PRIMEIRA varredura, porque vem pronto na
  * resposta deles (`idade_seg`). Enquanto a cadência não fecha, `snapshot()` diz quantas amostras
  * tem e marca `cadenciaConfiavel: false` — a UI nunca finge confiança que não existe, e o
@@ -37,8 +43,20 @@
 
 /** Quanto DEPOIS do recálculo deles queremos varrer (folga p/ o dado assentar no painel). */
 const ALVO_APOS_SEG = Number(process.env.SURERADAR_ALVO_APOS_SEG || 45);
-/** Alinhamento de fase do scheduler. 0/false desliga e volta ao intervalo fixo. */
-const FASE_HABILITADA = !['0', 'false', 'no'].includes(String(process.env.SURERADAR_SYNC_FASE || '1').toLowerCase());
+/**
+ * Alinhamento de fase do scheduler — **desligado por default desde 05/08/2026**.
+ *
+ * Foi escrito supondo a fonte regular ("recalcula a cada 10 min"). A medição em produção
+ * mostrou outra coisa: ~4,4 min e IRREGULAR (261 s, 262 s, 342 s, e um vão de 534 s). Num grid
+ * irregular não existe fase estável para travar, e deslocar a varredura COMPLETA custa
+ * frescor do motor próprio sem ganhar nada. Quem resolve é amostrar mais rápido que a fonte
+ * (scheduler/sureradarLeve.ts).
+ *
+ * O código fica: se a cadência deles virar regular (e a leitura leve for desligada), basta
+ * `SURERADAR_SYNC_FASE=1`. O guard de confiança continua valendo — só alinha com cadência medida.
+ */
+const faseHabilitada = (): boolean =>
+  ['1', 'true', 'yes', 'on'].includes(String(process.env.SURERADAR_SYNC_FASE || '0').toLowerCase());
 /** Só mexe na fase com cadência medida; abaixo disso o "alvo" seria chute. */
 const MIN_AMOSTRAS_CADENCIA = 3;
 /** Nudge sem histerese fica corrigindo ±2s para sempre. */
@@ -153,6 +171,15 @@ export interface SnapshotSincronia {
     intervaloSeg: number | null;
     proximaVarredura: string | null;
     segundosParaProxima: number | null;
+    /** Leitura LEVE (só o painel deles, ~1,2 s): intervalo e próximo tique. */
+    intervaloLeveSeg: number | null;
+    proximaLeituraLeve: string | null;
+    /**
+     * Segundos até a PRÓXIMA leitura do painel, seja ela leve ou completa. É o número que
+     * interessa para "quando isto na tela vai ser reconferido" — a varredura completa não é
+     * mais a única a ler o SureRadar.
+     */
+    segundosParaProximaLeitura: number | null;
     ajusteFaseSeg: number | null;
     alinhamentoAtivo: boolean;
     importadasUltima: number | null;
@@ -187,6 +214,7 @@ class SureRadarSyncMonitor {
   /** Atualizações DISTINTAS deles, no nosso relógio, em ordem — base da cadência. */
   private atualizacoes: number[] = [];
   private agenda: { proximaMs: number; intervaloSeg: number; ajusteSeg: number } | null = null;
+  private agendaLeve: { proximaMs: number; intervaloSeg: number } | null = null;
 
   /** Chamado pelo scanner ao fim de cada varredura (agendada ou manual). */
   registrarVarredura(e: EntradaVarredura): void {
@@ -228,6 +256,11 @@ class SureRadarSyncMonitor {
   /** Chamado pelo scheduler a cada reagendamento, para a UI ter o countdown do NOSSO lado. */
   registrarAgendamento(a: { proximaMs: number; intervaloSeg: number; ajusteSeg: number }): void {
     this.agenda = a;
+  }
+
+  /** Idem para o worker de leitura LEVE (scheduler/sureradarLeve.ts). */
+  registrarAgendamentoLeve(a: { proximaMs: number; intervaloSeg: number }): void {
+    this.agendaLeve = a;
   }
 
   /**
@@ -282,7 +315,7 @@ class SureRadarSyncMonitor {
    * (desligado, cadência ainda sem confiança, ou já dentro da banda morta).
    */
   ajusteDeFaseSeg(alvoProximoMs: number, intervaloSeg: number): number {
-    if (!FASE_HABILITADA) return 0;
+    if (!faseHabilitada()) return 0;
     const cad = this.cadencia();
     const ult = this.ultimaAtualizacaoLocal();
     if (!cad.confiavel || !cad.seg || ult == null) return 0;
@@ -336,13 +369,18 @@ class SureRadarSyncMonitor {
     const ajusteAgora =
       this.agenda != null ? this.ajusteDeFaseSeg(this.agenda.proximaMs, this.agenda.intervaloSeg) : 0;
     if (estado === 'desalinhado' && defasagemMediana != null) {
+      // Com a leitura leve ativa, a alavanca é a FREQUÊNCIA de amostragem, não a fase: o dado
+      // no banco nunca fica mais velho que o intervalo entre leituras, qualquer que seja a fase.
+      const leve = this.agendaLeve;
       recomendacao =
-        `A varredura cai ~${Math.round(defasagemMediana)}s depois do recálculo do SureRadar (alvo: ${ALVO_APOS_SEG}s). ` +
-        (FASE_HABILITADA
-          ? cad.confiavel
-            ? `O alinhamento automático já está corrigindo a fase (${ajusteAgora >= 0 ? '+' : ''}${ajusteAgora}s no próximo ciclo).`
-            : `O alinhamento automático espera cadência medida (${cad.amostras}/${MIN_AMOSTRAS_CADENCIA} amostras).`
-          : 'Alinhamento automático DESLIGADO (SURERADAR_SYNC_FASE=0).');
+        `As leituras estão fechando ~${Math.round(defasagemMediana)}s depois do recálculo do SureRadar (alvo: ${ALVO_APOS_SEG}s). ` +
+        (leve
+          ? `A leitura leve roda a cada ${Math.round(leve.intervaloSeg / 60)} min — baixar SURERADAR_LEVE_MIN reduz essa defasagem.`
+          : faseHabilitada()
+            ? cad.confiavel
+              ? `O alinhamento de fase está corrigindo (${ajusteAgora >= 0 ? '+' : ''}${ajusteAgora}s no próximo ciclo).`
+              : `O alinhamento de fase espera cadência medida (${cad.amostras}/${MIN_AMOSTRAS_CADENCIA} amostras).`
+            : 'Sem leitura leve e sem alinhamento de fase: só a varredura completa lê o painel, a cada 5 min.');
     } else if (estado === 'desatualizado') {
       recomendacao =
         `O SureRadar já recalculou ${pendentes}× desde a nossa última captura — as odds no painel podem estar vencidas. ` +
@@ -404,8 +442,16 @@ class SureRadarSyncMonitor {
         intervaloSeg: this.agenda?.intervaloSeg ?? null,
         proximaVarredura: this.agenda ? new Date(this.agenda.proximaMs).toISOString() : null,
         segundosParaProxima: this.agenda ? r1((this.agenda.proximaMs - agoraMs) / 1000) : null,
+        intervaloLeveSeg: this.agendaLeve?.intervaloSeg ?? null,
+        proximaLeituraLeve: this.agendaLeve ? new Date(this.agendaLeve.proximaMs).toISOString() : null,
+        segundosParaProximaLeitura: (() => {
+          const candidatos = [this.agenda?.proximaMs, this.agendaLeve?.proximaMs].filter(
+            (v): v is number => typeof v === 'number'
+          );
+          return candidatos.length ? r1((Math.min(...candidatos) - agoraMs) / 1000) : null;
+        })(),
         ajusteFaseSeg: this.agenda?.ajusteSeg ?? null,
-        alinhamentoAtivo: FASE_HABILITADA && cad.confiavel,
+        alinhamentoAtivo: faseHabilitada() && cad.confiavel,
         importadasUltima: ultima?.importadas ?? null,
         fonteUltima: ultima?.fonte ?? null,
       },
@@ -435,10 +481,15 @@ class SureRadarSyncMonitor {
     this.obs = [];
     this.atualizacoes = [];
     this.agenda = null;
+    this.agendaLeve = null;
   }
 }
 
 /** Instância única — scanner escreve, scheduler consulta, endpoint lê. */
 export const sureradarSync = new SureRadarSyncMonitor();
 export const SYNC_ALVO_APOS_SEG = ALVO_APOS_SEG;
-export const SYNC_FASE_HABILITADA = FASE_HABILITADA;
+/**
+ * Lida a cada chamada (e não uma vez no import) para o flag ser realmente configurável em
+ * runtime — e para o teste do alinhamento poder ligá-lo sem depender da ordem dos imports.
+ */
+export { faseHabilitada };

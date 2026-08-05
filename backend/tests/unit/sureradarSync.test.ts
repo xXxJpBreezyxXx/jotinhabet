@@ -6,12 +6,18 @@ import { sureradarSync, parseHorarioSureRadar, StatusSureRadarObservado } from '
  *  - a cadência tem de sair do relógio DELES (`idade_seg`), não do nosso `Date.now()`;
  *  - varredura que falha (e pula um recálculo) não pode estragar a estimativa: o delta vem
  *    2× o período e precisa ser dobrado de volta, contando a atualização perdida;
- *  - o ajuste de fase tem de mover a varredura para DEPOIS do recálculo — e ficar quieto
- *    quando já está no alvo (sem banda morta, o scheduler corrige ±2s para sempre).
+ *  - o ajuste de fase (hoje OPT-IN) tem de mover a varredura para DEPOIS do recálculo, ficar
+ *    quieto quando já está no alvo (sem banda morta, o scheduler corrige ±2s para sempre) e não
+ *    fazer nada sem o flag ligado;
+ *  - o monitor tem de expor as duas agendas (leve e completa) e a próxima leitura = a mais
+ *    próxima das duas.
  */
 
 const T0 = Date.UTC(2026, 7, 5, 12, 0, 0); // 05/08/2026 12:00:00Z
-const CADENCIA = 600; // 10 min, o que o painel deles pratica
+// Grid REGULAR de 10 min, sintético: mantém as asserções legíveis. O painel real recalcula a
+// cada ~4,4 min e de forma irregular (261/262/342s, medido em 05/08) — é justamente por isso que
+// o alinhamento de fase virou opt-in e a leitura leve passou a ser o mecanismo principal.
+const CADENCIA = 600;
 const ALVO = 45; // SURERADAR_ALVO_APOS_SEG (default)
 
 /** Status como o scraper monta a partir do `status` da API deles. */
@@ -52,7 +58,10 @@ describe('parseHorarioSureRadar', () => {
 });
 
 describe('monitor de sincronia', () => {
-  beforeEach(() => sureradarSync.resetar());
+  beforeEach(() => {
+    sureradarSync.resetar();
+    delete process.env.SURERADAR_SYNC_FASE; // default = alinhamento OFF
+  });
 
   it('mede a cadência deles pelo idade_seg e a defasagem da nossa captura', () => {
     // Eles recalculam a cada 600s; a gente varre 300s depois de cada recálculo.
@@ -112,6 +121,8 @@ describe('monitor de sincronia', () => {
   });
 
   it('ajuste de fase: adianta a varredura marcada para logo ANTES do recálculo deles', () => {
+    // O alinhamento é OPT-IN desde 05/08 (a cadência real deles é irregular): liga só aqui.
+    process.env.SURERADAR_SYNC_FASE = '1';
     for (let k = 0; k < 4; k++) {
       const atualizacao = T0 + k * CADENCIA * 1000;
       varrer(atualizacao + 570_000, atualizacao); // 30s ANTES do próximo recálculo
@@ -122,9 +133,14 @@ describe('monitor de sincronia', () => {
     const ajuste = sureradarSync.ajusteDeFaseSeg(alvoRuim, 300);
     expect(ajuste).toBeGreaterThan(0); // atrasa para cair depois do recálculo
     expect(ajuste).toBeLessThanOrEqual(105); // teto de 35% do intervalo de 300s
+
+    // Sem o flag (o default), não mexe na fase de jeito nenhum.
+    delete process.env.SURERADAR_SYNC_FASE;
+    expect(sureradarSync.ajusteDeFaseSeg(alvoRuim, 300)).toBe(0);
   });
 
   it('ajuste de fase: zero quando já está no alvo (banda morta) e zero sem cadência confiável', () => {
+    process.env.SURERADAR_SYNC_FASE = '1';
     for (let k = 0; k < 4; k++) {
       const atualizacao = T0 + k * CADENCIA * 1000;
       varrer(atualizacao + ALVO * 1000, atualizacao);
@@ -138,6 +154,7 @@ describe('monitor de sincronia', () => {
     varrer(T0 + 60_000, T0); // 1 amostra: sem cadência, sem mexer na fase
     expect(sureradarSync.ajusteDeFaseSeg(T0 + 360_000, 300)).toBe(0);
     expect(sureradarSync.snapshot(T0 + 70_000).nosso.alinhamentoAtivo).toBe(false);
+    delete process.env.SURERADAR_SYNC_FASE;
   });
 
   it('leitura sem status (cookies expirados) não inventa sincronia — e avisa', () => {
@@ -190,5 +207,51 @@ describe('monitor de sincronia', () => {
     expect(s.sincronia.ciclosObservados).toBe(2);
     expect(s.sincronia.atualizacoesObservadas).toBe(1);
     expect(s.deles.cadenciaAmostras).toBe(0);
+  });
+});
+
+/**
+ * Leitura LEVE (scheduler/sureradarLeve.ts) — o mecanismo que de fato resolve o frescor quando
+ * a fonte recalcula mais rápido que a varredura completa. O monitor precisa expor as DUAS
+ * agendas e, principalmente, o "quando o painel será reconferido" = a mais próxima das duas.
+ */
+describe('agenda da leitura leve', () => {
+  beforeEach(() => {
+    sureradarSync.resetar();
+    delete process.env.SURERADAR_SYNC_FASE;
+  });
+
+  it('segundosParaProximaLeitura é a MAIS PRÓXIMA entre a leve e a completa', () => {
+    varrer(T0 + 60_000, T0);
+    sureradarSync.registrarAgendamento({ proximaMs: T0 + 300_000, intervaloSeg: 300, ajusteSeg: 0 });
+    sureradarSync.registrarAgendamentoLeve({ proximaMs: T0 + 120_000, intervaloSeg: 120 });
+
+    const s = sureradarSync.snapshot(T0 + 60_000);
+    expect(s.nosso.intervaloSeg).toBe(300);
+    expect(s.nosso.intervaloLeveSeg).toBe(120);
+    expect(s.nosso.segundosParaProxima).toBe(240); // a completa
+    expect(s.nosso.segundosParaProximaLeitura).toBe(60); // a leve chega primeiro
+  });
+
+  it('sem worker leve, a próxima leitura é a da varredura completa', () => {
+    varrer(T0 + 60_000, T0);
+    sureradarSync.registrarAgendamento({ proximaMs: T0 + 300_000, intervaloSeg: 300, ajusteSeg: 0 });
+    const s = sureradarSync.snapshot(T0 + 60_000);
+    expect(s.nosso.intervaloLeveSeg).toBeNull();
+    expect(s.nosso.proximaLeituraLeve).toBeNull();
+    expect(s.nosso.segundosParaProximaLeitura).toBe(240);
+  });
+
+  it('com leitura leve ativa, a recomendação aponta a FREQUÊNCIA (não a fase)', () => {
+    // Capturas tarde no ciclo deles (~300s de defasagem) = desalinhado.
+    for (let k = 0; k < 4; k++) {
+      const atualizacao = T0 + k * CADENCIA * 1000;
+      varrer(atualizacao + 300_000, atualizacao);
+    }
+    sureradarSync.registrarAgendamentoLeve({ proximaMs: T0 + 4 * CADENCIA * 1000, intervaloSeg: 120 });
+    const s = sureradarSync.snapshot(T0 + 3 * CADENCIA * 1000 + 310_000);
+    expect(s.sincronia.estado).toBe('desalinhado');
+    expect(s.sincronia.recomendacao).toContain('SURERADAR_LEVE_MIN');
+    expect(s.sincronia.recomendacao).not.toContain('fase');
   });
 });

@@ -275,6 +275,15 @@ export class ArbitrageScannerV2 {
   private static varreduraEmAndamento = false;
 
   /**
+   * Leitura pública da trava. O worker leve do SureRadar usa para NÃO empilhar tick em cima
+   * de varredura em andamento: ele seria recusado pela trava de qualquer forma, mas assim o
+   * pulo é contado e logado em vez de aparecer como "varredura que não achou nada".
+   */
+  static get varreduraAtiva(): boolean {
+    return ArbitrageScannerV2.varreduraEmAndamento;
+  }
+
+  /**
    * @param apenasApi quando true, o cruzamento entre casas usa SÓ os scrapers de API
    *   (rápidos, sem Playwright) — permite rodar de forma frequente no scheduler.
    */

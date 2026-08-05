@@ -1,5 +1,5 @@
 import { ArbitrageScannerV2 } from '../core/scanner_v2';
-import { sureradarSync, SYNC_ALVO_APOS_SEG, SYNC_FASE_HABILITADA } from '../core/sureradarSync';
+import { sureradarSync, SYNC_ALVO_APOS_SEG, faseHabilitada } from '../core/sureradarSync';
 
 export class SchedulerService {
   private scanner = new ArbitrageScannerV2();
@@ -10,13 +10,14 @@ export class SchedulerService {
   private proximaMs = 0;
 
   /**
-   * Inicia o agendamento de varreduras periódicas, alinhado à fase do SureRadar.
+   * Inicia o agendamento de varreduras periódicas.
    *
-   * Era `setInterval` fixo. Virou `setTimeout` reagendado porque intervalo fixo fixa também a
-   * FASE: se a varredura cai 30s antes do recálculo do painel deles, ela cai 30s antes PARA
-   * SEMPRE, e toda surebet importada nasce com a vida esgotada. O intervalo médio continua o
-   * mesmo — o que muda é o instante dentro do ciclo deles, deslocado no máximo
-   * ±35% do intervalo por ciclo (core/sureradarSync.ts decide o quanto).
+   * Era `setInterval` fixo. Virou `setTimeout` reagendado para PODER deslocar a fase (intervalo
+   * fixo fixa também a fase: cair 30s antes do recálculo deles significa cair 30s antes para
+   * sempre). O deslocamento está DESLIGADO por default desde 05/08 — a cadência medida do painel
+   * deles é irregular e não há fase estável para travar; quem cuida do frescor é a leitura leve
+   * (scheduler/sureradarLeve.ts), que amostra mais rápido que a fonte. Com
+   * `SURERADAR_SYNC_FASE=1` o alinhamento volta, limitado a ±35% do intervalo por ciclo.
    *
    * O agendamento segue independente da DURAÇÃO do job (como no setInterval): o alvo é
    * calculado sobre a linha do tempo e a trava `isRunning` continua sendo o que evita
@@ -33,7 +34,7 @@ export class SchedulerService {
     this.intervalMs = intervalMinutes * 60 * 1000;
     console.log(
       `🚀 [Scheduler] Iniciando agendador automático. Intervalo: ${intervalMinutes} minutos` +
-        (SYNC_FASE_HABILITADA
+        (faseHabilitada()
           ? ` · alinhamento de fase ATIVO (alvo: varrer ${SYNC_ALVO_APOS_SEG}s depois do recálculo do SureRadar).`
           : ' · alinhamento de fase DESLIGADO (SURERADAR_SYNC_FASE=0).')
     );

@@ -12,6 +12,7 @@ import { EnrichmentService } from './scheduler/enrichmentService';
 import { GreenMonitorService } from './scheduler/greenMonitorService';
 import { BrowserScrapeWorker } from './scheduler/browserScrapeWorker';
 import { DigestNoturnoService } from './scheduler/digestNoturno';
+import { SureRadarLeveWorker } from './scheduler/sureradarLeve';
 import { RevalidationService } from './core/revalidationService';
 import { getValorAtivas, deleteValor, getMiddlesAtivos, deleteMiddle } from './core/valorRepo';
 import { getResumoCalibracao, getAlertasRecentes } from './core/calibracaoRepo';
@@ -1646,9 +1647,14 @@ app.listen(port, () => {
   // no Swarm). Espera ~5s a rede/Evolution assentar antes da 1ª tentativa; fire-and-forget.
   setTimeout(() => { void avisarDeployWhatsApp(); }, 5_000);
 
-  // Scan agendado do SureRadar a cada 10 min (alinhado ao ciclo de atualização do próprio SureRadar)
   const scheduler = new SchedulerService();
   scheduler.start(5); // pré-match sempre fresco: varredura + reconciliação a cada 5 min
+
+  // Leitura LEVE do SureRadar entre as varreduras completas. O painel deles recalcula a cada
+  // ~4,4 min (medido, e irregular), ou seja MAIS RÁPIDO que o nosso ciclo de 5 min: sem isto,
+  // perder recálculo é matemático. A leitura custa ~1,2s contra ~2,5 min da varredura completa,
+  // que gasta o tempo coletando as casas do motor. SURERADAR_LEVE_MIN=0 desliga.
+  new SureRadarLeveWorker().start(Number(process.env.SURERADAR_LEVE_MIN ?? 2));
 
   // Fonte Telegram: escuta o grupo de sinais e injeta oportunidades extraídas
   // por IA de visão no pipeline (gates + revalidação + WhatsApp).
